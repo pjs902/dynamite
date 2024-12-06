@@ -2193,13 +2193,16 @@ contains
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine qgrid_setup()
         use initial_parameters, only: nEner, nI2, nI3, rLogMin, rLogMax, sigobs_km &
-                                      , conversion_factor &
-                                      , quad_nr, quad_nth, quad_nph
+                                      , conversion_factor
         use integrator, only: integrator_dithering
         !----------------------------------------------------------------------
-        integer(kind=i4b) :: i
+        integer(kind=i4b) :: i, quad_nr, quad_nth, quad_nph
         real(kind=dp)  :: inR, psfsize
         print *, "  ** Octant grid module setup"
+
+        quad_nr = 10   !10 !15 ! int(NEner / integrator_dithering*0.55 )
+        quad_nth = 6    !4  !4 ! int(nI2   / integrator_dithering ) - 1 ! towards middle axis
+        quad_nph = 6    ! 5 !5 ! int(nI3   / integrator_dithering ) - 1 ! towards minor axis
 
         print *, "  ** Grid dimension:"
         print *, quad_nr, quad_nth, quad_nph
