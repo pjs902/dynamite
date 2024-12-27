@@ -507,7 +507,7 @@ class LegacyWeightSolver(WeightSolver):
         """
         fname = self.direc_with_ml + "nn_orbmat.out"
         orbmat_shape = np.loadtxt(fname, max_rows=1, dtype=int)
-        orbmat_size = np.product(orbmat_shape)
+        orbmat_size = np.prod(orbmat_shape)
         tmp = np.loadtxt(fname, skiprows=1)
         orbmat = tmp[0:orbmat_size]
         orbmat = np.reshape(orbmat, orbmat_shape)
@@ -547,7 +547,7 @@ class LegacyWeightSolver(WeightSolver):
 
         intrinsic_masses = mge.get_intrinsic_masses_from_file(self.direc_no_ml)
         projected_masses = mge.get_projected_masses_from_file(self.direc_no_ml)
-        n_intrinsic = np.product(intrinsic_masses.shape)
+        n_intrinsic = np.prod(intrinsic_masses.shape)
         n_apertures = len(projected_masses)
         chi2_kin = np.sum(chi2_vector[1 + n_intrinsic + n_apertures :])
         return weights, chi2_tot, chi2_kin
@@ -727,7 +727,7 @@ class NNLS(WeightSolver):
             [self.intrinsic_mass_error / 10.0, np.abs(1.0 - self.total_mass)]
         )
         # enumerate the mass constriants
-        n_intrinsic = np.product(self.intrinsic_masses.shape)
+        n_intrinsic = np.prod(self.intrinsic_masses.shape)
         n_apertures = len(self.projected_masses)
         self.n_intrinsic = n_intrinsic
         self.n_apertures = n_apertures
@@ -896,27 +896,20 @@ class NNLS(WeightSolver):
             chi2_kinmap = results.meta["chi2_kinmap"]
         else:
             A, b = self.construct_nnls_matrix_and_rhs(orblib)
+
+            # Normalize the data
+            A_max = np.max(np.abs(A), axis=0)
+            A_normalized = A / A_max
+            b_max = np.max(np.abs(b))
+            b_normalized = b / b_max
+
             if self.nnls_solver == "scipy":
                 try:
-                    # Normalize the data
-                    A_max = np.max(np.abs(A), axis=0)
-                    A_normalized = A / A_max
-                    b_max = np.max(np.abs(b))
-                    b_normalized = b / b_max
-
                     # Solve the NNLS problem with normalized data
-                    try:
-                        x_normalized, rnorm = optimize.nnls(A_normalized, b_normalized)
-                        # Scale the solution back to the original scale
-                        x = x_normalized * b_max / A_max
+                    x_normalized, rnorm = optimize.nnls(A_normalized, b_normalized)
+                    # Scale the solution back to the original scale
+                    weights = x_normalized * b_max / A_max
 
-                        weights = x
-
-                    except Exception as e:
-                        print("An error occurred:", e)
-
-                    # solution = optimize.nnls(A, b)
-                    # weights = solution[0]s
                 except Exception as e:
                     txt = (
                         f'Orblib {orblib.mod_dir}, ml={orblib.parset["ml"]}'
@@ -927,10 +920,12 @@ class NNLS(WeightSolver):
                     weights = np.full(A.shape[1], np.nan)
             elif self.nnls_solver == "cvxopt":
                 try:
-                    P = np.dot(A.T, A)
-                    q = -1.0 * np.dot(A.T, b)
+                    P = np.dot(A_normalized.T, A_normalized)
+                    q = -1.0 * np.dot(A_normalized.T, b_normalized)
                     solver = CvxoptNonNegSolver(P, q)
-                    weights = solver.beta
+                    x_normalized = solver.beta
+                    # Scale the solution back to the original scale
+                    weights = x_normalized * b_max / A_max
                 except Exception as e:
                     txt = (
                         f'Orblib {orblib.mod_dir}, ml={orblib.parset["ml"]}'
