@@ -304,7 +304,8 @@ class LegacyWeightSolver(WeightSolver):
         """
         self.logger.info(f"Using WeightSolver: {__class__.__name__}")
         if (not ignore_existing_weights) and self.weight_file_exists():
-            self.logger.info("Reading NNLS solution from existing output.")
+            self.logger.info("Reading NNLS solution from existing output "
+                             f"{self.weight_file}.")
             results = ascii.read(self.weight_file)
             weights = results["weights"]
             chi2_tot = results.meta["chi2_tot"]
@@ -365,9 +366,11 @@ class LegacyWeightSolver(WeightSolver):
                     if p.returncode == 127:  # command not found
                         text += "Check DYNAMITE legacy_fortran executables."
                         self.logger.error(text)
+                        os.chdir(cur_dir)
                         raise FileNotFoundError(text)
                     text += f"{log_file} Be wary: DYNAMITE may crash..."
                     self.logger.warning(text)
+                    os.chdir(cur_dir)
                     raise RuntimeError(text)
                 # set the current directory to the dynamite directory
                 os.chdir(cur_dir)
@@ -658,18 +661,11 @@ class NNLS(WeightSolver):
         self.nnls_solver = nnls_solver
         self.get_observed_mass_constraints()
 
-    def get_observed_mass_constraints(self, kins=True, pops=False):
+    def get_observed_mass_constraints(self):
         """Get aperture+intrinsic mass constraints from MGE
 
-        Parameters
-        ----------
-        kins : Bool
-            If True, returns the projected masses of the MGE for the
-            kinematic data apertures.
-        pops : Bool
-            If True, returns the projected masses of the MGE for the
-            population data apertures. If both kins and pops are True,
-            population data is returned following kinematic data.
+        Returns the projected masses of the MGE for the kinematic data
+        apertures.
 
         Returns
         -------
@@ -687,11 +683,9 @@ class NNLS(WeightSolver):
         if self.system.is_bar_disk_system():
             bardisk = self.system.get_unique_bar_component()
             mge = bardisk.mge_lum + bardisk.disk_lum
-            n_kin_ap = [k.n_spatial_bins for k in bardisk.kinematic_data]
         else:
             stars = self.system.get_unique_triaxial_visible_component()
             mge = stars.mge_lum
-            n_kin_ap = [k.n_spatial_bins for k in stars.kinematic_data]
 
         # intrinsic mass
         intrinsic_masses = mge.get_intrinsic_masses_from_file(self.direc_no_ml)
