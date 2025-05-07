@@ -27,19 +27,6 @@
 ! Written by Remco van den Bosch <bosch@strw.leidenuniv.nl>
 ! Sterrewacht Leiden, The Netherlands
 
-!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-! Note on rotating bar code:
-! The modified or added lines are commented by ! (BT)
-! In this file, the modified parts are:
-! 1- Integration of orbits in a rotating frame in case of (Omega != 0).
-! 2- Applying 4-fold symmetry instead of 8-fold symmetry mirroring and symmetrizing if (Omega != 0).
-! 3- if (Omega != 0), Sorting information of each orbit e.g. Circularity and ... during integration.
-! created file called  _orb_info.out for each library
-!
-! adapted from code originally by Behzad Tahmasebzadeh, July 2023
-!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-
 module random_gauss_generator
     use numeric_kinds
     implicit none
@@ -70,7 +57,7 @@ contains
         do
             v(1) = ran1(1)
             v(2) = ran1(1)
-            ! call random_number(v)
+!         call random_number(v)
             v = 2.0_sp*v - 1.0_sp
             rsq = sum(v**2)
             if (rsq > 0.0_sp .and. rsq < 1.0_sp) exit
@@ -126,7 +113,7 @@ module integrator
 
     public  :: integrator_integrate
 
-    public  :: integrator_setup, integrator_set_current, integrator_setup_bar
+    public  :: integrator_setup, integrator_set_current
 
     public  :: integrator_stop, integrator_find_orbtype
 
@@ -207,7 +194,6 @@ contains
         print *, "  ** Setting up integrator module"
         print *, "  * Calling MGE setup"
         call iniparam()
-        print *, "  * Calling ip_setup"
         call ip_setup()
         call ini_integ()
         print *, "  * How many orbits should be integrated?"
@@ -234,8 +220,8 @@ contains
 
         if (integrator_number < 1) stop " To few starting points"
         if (integrator_number > &
-            (nEner*nI2*nI3/integrator_dithering**3)) &
-            & stop " Too many orbits in total"
+             (nEner*nI2*nI3/integrator_dithering**3)) &
+             & stop " Too many orbits in total"
         print *, "  * How great should te accuracy be of the integrator?"
         read *, integrator_accuracy
         print *, "    ", integrator_accuracy
@@ -245,55 +231,6 @@ contains
         print *, "  ** integrator module setup finished"
 
     end subroutine integrator_setup
-
-    !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    subroutine integrator_setup_bar()
-        use initial_parameters, only: iniparam_bar, orbit_dithering, Omega
-        !use triaxpotent, only : tp_setup
-        use interpolpot, only: ip_setup_bar
-        !----------------------------------------------------------------------
-        integer(kind=i4b) :: ndith3
-        print *, "  ** Setting up integrator module"
-        print *, "  * Calling MGE setup"
-        call iniparam_bar()
-        print *, "  * Calling ip_setup_bar"
-        call ip_setup_bar()
-        call ini_integ()
-        print *, "  * How many orbits should be integrated?"
-        read *, integrator_n_orbits
-        print *, "    ", integrator_n_orbits
-        if (integrator_n_orbits < 1) stop " Too few orbits"
-        print *, "  * How many points should be generated per starting point?"
-        read *, integrator_points
-        print *, "    ", integrator_points
-        integrator_dithering = orbit_dithering
-        ndith3 = integrator_dithering**3
-        allocate (integrator_orbittypes(ndith3))
-        allocate (integrator_moments(5, ndith3))
-        if (integrator_points < 1) stop " Too few points"
-        print *, "  * At which starting point should be started?"
-        read *, integrator_start
-        print *, "    ", integrator_start
-        call integrator_set_current(integrator_start - 1)
-        print *, "  * How many starting points should be integrated?"
-        read *, integrator_number
-        print *, "    ", integrator_number
-        if (integrator_number == -1) integrator_number = &
-            (nEner*nI2*nI3/integrator_dithering**3)
-
-        if (integrator_number < 1) stop " To few starting points"
-        if (integrator_number > &
-            (nEner*nI2*nI3/integrator_dithering**3)) &
-            & stop " Too many orbits in total"
-        print *, "  * How great should te accuracy be of the integrator?"
-        read *, integrator_accuracy
-        print *, "    ", integrator_accuracy
-        if (integrator_accuracy < 0 .or. 0.5 < integrator_accuracy) &
-          & stop " wrong accuracy"
-
-        print *, "  ** integrator module setup finished"
-
-    end subroutine integrator_setup_bar
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine integrator_stop()
@@ -313,7 +250,6 @@ contains
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine integrator_integrate(pos, vel, otype, done, first, alldone)
-      use initial_parameters    , only : conversion_factor , Omega     ! (BT)
         logical, intent(out):: done, alldone
         logical, intent(in):: first
         real(kind=dp), intent(out), dimension(integrator_points, 3) :: pos
@@ -321,10 +257,7 @@ contains
         integer(kind=i4b), intent(out) :: otype
         integer(kind=i4b), save :: dith = 0
         integer(kind=i4b)    :: temporbit
-        real    (kind=dp ), dimension(6) :: YY ! (BT)
-        real    (kind=dp )   :: Enjo,r_mean,lz2,vca,Svr,Svt,Svz ! (BT)
         real(kind=dp), dimension(5) :: moments
-        real    (kind=dp ),dimension(3) :: moments2 ! (BT)
         !----------------------------------------------------------------------
         alldone = .false.
         if (first) then
@@ -343,35 +276,10 @@ contains
             if (regurizable(temporbit) == 1) totalnotregularizable = 1
             !print*,"  * Starting integrating :",integrator_current,dith,temporbit
             call real_integrator(temporbit, pos, vel)
-            call integrator_find_orbtype(otype, moments, moments2, pos, vel) ! (BT)
+            call integrator_find_orbtype(otype, moments, pos, vel)
             integrator_orbittypes(dith) = otype
             integrator_moments(:, dith) = moments
             done = .false.
-
-            ! write orbit information  in case of figure rotation (BT)
-            if (Omega /= 0.0_dp ) then
-               r_mean = moments(4)*conversion_factor**(-1.0_dp)
-               lz2    = moments(3)*conversion_factor**(-1.0_dp)
-               !cir = moments(3)/( SQRT(moments(5))*moments(4) )
-               vca  = moments(5)
-               Svr  = moments2(1)
-               Svt  = moments2(2)
-               Svz  = moments2(3)
-
-               YY(1) =  pos(1,1)
-               YY(2) =  pos(1,2)
-               YY(3) =  pos(1,3)
-               YY(4) =  vel(1,1)
-               YY(5) =  vel(1,2)
-               YY(6) =  vel(1,3)
-
-               ! Compute and store start energy at begin point
-               call computer_energy(YY,Enjo)
-
-               write (unit=32, fmt="(25es13.5)")  Enjo, r_mean, lz2, vca, Svr, Svt, Svz
-            endif
-            ! end write orbit information
-
         else
             ! integrating done. Set 'done' to true and return.
             pos(:, :) = 0.0_dp
@@ -537,7 +445,7 @@ contains
 
             !CALL OF THE SUBROUTINE DOPRI8 ( The dop853 integrator.)
             CALL DOP853(N, derivs, X, Y, XEND, RTOL, ATOL, ITOL, SOLOUT, IOUT, &
-                        WORK, LWORK, IWORK, LIWORK, RPAR, IPAR, IDID)
+                 &                  WORK, LWORK, IWORK, LIWORK, RPAR, IPAR, IDID)
 
 !   IPAR(1)    COUNT   NUMBER OF STORED INTEGRATION STEPS IN pos_t AND vel_t
 !   IWORK(17)  NFCN    NUMBER OF FUNCTION EVALUATIONS
@@ -655,8 +563,7 @@ contains
                       tcirc(i), vcirc(i), gEner(i), gI2(i), gI3(i), regurizable(i))
 
         read (unit=31, fmt="(3I5,9ES30.10,I4)") (gener(i), gi2(i), gi3(i), xini(i), &
-                                                 yini(i), zini(i), vxini(i), vyini(i), &
-                                                 vzini(i), rcirc(i), tcirc(i), &
+                                                 yini(i), zini(i), vxini(i), vyini(i), vzini(i), rcirc(i), tcirc(i), &
                                                  vcirc(i), regurizable(i), &
                                                  i=1, nEner*nI2*nI3)
 
@@ -666,7 +573,6 @@ contains
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine derivs(N, xin, yin, dydx, RPAR, IPAR)
-      use initial_parameters, only: Omega        ! (BT)
         use interpolpot, only: ip_accel
         !use triaxpotent, only : tp_accel
         integer, intent(in)              :: N
@@ -686,22 +592,9 @@ contains
         !   yin(5) = dy/dt
         !   yin(6) = dz/dt
 
-        if (Omega == 0.0_dp ) then
-           ! First calculate the true accelerations at the given position
-           dydx(1:3) = yin(4:6)
-           call ip_accel(yin(1), yin(2), yin(3), dydx(4), dydx(5), dydx(6))
-        else
-           ! Rotating frame with Omega pattern speed (BT)
-           dydx(1) =  yin(4) + Omega*yin(2)  ! extra terms for integration in co-rotating frame
-           dydx(2) =  yin(5) - Omega*yin(1)
-           dydx(3) =  yin(6)
-
-           call ip_accel(yin(1),yin(2),yin(3),dydx(4),dydx(5),dydx(6))
-
-           dydx(4) =  dydx(4) + Omega*yin(5)
-           dydx(5) =  dydx(5) - Omega*yin(4)
-           dydx(6) =  dydx(6)
-        end if
+        ! First calculate the true accelerations at the given position
+        dydx(1:3) = yin(4:6)
+        call ip_accel(yin(1), yin(2), yin(3), dydx(4), dydx(5), dydx(6))
 
     end subroutine derivs
 
@@ -726,7 +619,7 @@ contains
         IF (NR == 1) THEN
             ! Start storing the orbit after 1+? steps to avoid aliasing
             rnd = ran1(1)
-            ! call random_number(rnd) ! 0 < rnd < 1
+!         call random_number(rnd) ! 0 < rnd < 1
             XOUT = X + step*(1.0_dp + rnd)
             count = 0
             IPAR(1) = 0
@@ -749,13 +642,11 @@ contains
     END SUBROUTINE SOLOUT
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    subroutine integrator_find_orbtype(type, moments, moments2, pos, vel) ! (BT)
+    subroutine integrator_find_orbtype(type, moments, pos, vel)
         integer(kind=i4b), intent(out) :: type
-        real(kind=dp), intent(out), dimension(:) :: moments, moments2 ! (BT)
+        real(kind=dp), intent(out), dimension(:) :: moments
         real(kind=dp), intent(in), dimension(:, :) :: pos
         real(kind=dp), intent(in), dimension(size(pos, 1), 3) :: vel
-        real (kind=dp),dimension(size(pos,1)) :: vr, vt, vz ! (BT)
-        real (kind=dp) :: sd_vr, sd_vt, sd_vz, mean_vr, mean_vt, mean_vz, n ! (BT)
         !----------------------------------------------------------------------
         real(kind=dp) :: lxc, lyc, lzc
         real(kind=dp), dimension(size(pos, 1)) :: t
@@ -800,39 +691,15 @@ contains
                               + vel(:, 3)*vel(:, 1)))/size(pos, 1)
 
         !print*,moments(3),moments(5),moments(3)/moments(4)/sqrt(moments(5))
-
-        ! convert velocity to cylinderical  (anisotropy) (BT)
-        vr = ( pos(:,1) * vel(:,1) +  pos(:,2) * vel(:,2) ) / sqrt(pos(:,1)**2+pos(:,2)**2)
-        vt = ( pos(:,1) * vel(:,2) +  pos(:,2) * vel(:,1) ) / sqrt(pos(:,1)**2+pos(:,2)**2)
-        vz = vel(:,3)
-
-        N = size(pos,1)
-        mean_vr = sum(vr) / N
-        sd_vr = sqrt(sum((vr-mean_vr)**2) / N)
-
-        mean_vt = sum(vt) / N
-        sd_vt = sqrt(sum((vt-mean_vt)**2) / N)
-
-        mean_vz = sum(vz) / N
-        sd_vz = sqrt(sum((vz-mean_vz)**2) / N)
-
-        moments2(1) =  sd_vr
-        moments2(2) =  sd_vt
-        moments2(3) =  sd_vz
-
     end subroutine integrator_find_orbtype
 
     subroutine computer_energy(Y, E)
-      use initial_parameters, only: Omega ! (BT)
-        ! Compute the energy of a particle.
+! Compute the energy of a particle.
         use interpolpot, only: ip_potent
         real(kind=dp), intent(in), dimension(6) :: Y
         real(kind=dp), intent(out) :: E
         real(kind=dp) :: ep
         call ip_potent(y(1), y(2), y(3), Ep)
-        if (Omega /= 0.0_dp ) then
-           ep = ep + Omega*(y(1)*y(5)-y(2)*y(4)) ! check the conservation of effective potential (BT)
-        end if
         E = ep - 0.5_dp*(y(4)**2 + y(5)**2 + y(6)**2)
     end subroutine computer_energy
 
@@ -927,8 +794,7 @@ contains
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine project_n(type, pos, vel, proj, losvel, n)
-      use initial_parameters, only :  Omega ! (BT)
-        ! use initial_parameters, only : theta_view, phi_view
+!  use initial_parameters, only : theta_view, phi_view
         ! pos( :, (r,z) )
         real(kind=dp), intent(in), dimension(:, :)   :: pos
         ! vel (:, (r,z,theta))
@@ -941,21 +807,18 @@ contains
         !----------------------------------------------------------------------
         real(kind=dp)              :: t1, t2, t3, theta, phi
 
-        real (kind=dp),dimension(3,8,5) ::vsgn          ! (BT)
-        real (kind=dp),dimension(3,8) ::psgn            ! (BT)
-
         ! Signs of the (vx,vy,vz) for each Projection and type of Orbit
         real(kind=dp), dimension(3, 8, 5), &
-            parameter :: vsgn1 = reshape((/ &
+            parameter :: vsgn = reshape((/ &
                                         ! X tubes
-                                        1, 1, 1, -1, 1, 1, 1, 1, -1, -1, 1, -1, &
-                                        -1, -1, 1, 1, -1, 1, -1, -1, -1, 1, -1, -1, &
+                                        1, 1, 1, -1, 1, 1, -1, 1, -1, 1, 1, -1, &
+                                        1, -1, 1, -1, -1, 1, -1, -1, -1, 1, -1, -1, &
                                         ! Y tubes
-                                        1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1, &
-                                        -1, -1, 1, -1, 1, -1, -1, -1, -1, -1, 1, 1, &
+                                        1, 1, 1, 1, 1, -1, 1, -1, -1, 1, -1, 1, &
+                                        -1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, &
                                         ! Z tubes
-                                        1, 1, 1, 1, -1, -1, -1, -1, 1, -1, 1, -1, &
-                                        1, 1, -1, 1, -1, 1, -1, -1, -1, -1, 1, 1, &
+                                        1, 1, 1, 1, -1, 1, -1, -1, 1, -1, 1, 1, &
+                                        1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, -1, &
                                         ! Boxed
                                         1, 1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, &
                                         1, 1, -1, -1, 1, -1, -1, -1, -1, 1, -1, -1, &
@@ -965,41 +828,9 @@ contains
 
         !Signs of the x,y,z for each projection  :psgn( [x,y,z], project )
         real(kind=dp), dimension(3, 8), &
-            parameter :: psgn1 = reshape((/ &
+            parameter :: psgn = reshape((/ &
                                         1, 1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, &
                                         1, 1, -1, -1, 1, -1, -1, -1, -1, 1, -1, -1/), (/3, 8/))
-
-
-        ! Signs of the (vx,vy,vz) for each Projection and type of Orbit
-        ! (BT) 4-fold symmetry same as before
-        real (kind=dp),dimension(3,8,5),parameter :: vsgn2= reshape((/  &
-             ! X tubes
-             1 , 1 , 1    ,1 , 1 , 1  ,  -1 , -1 ,1  ,   -1 , -1 , 1 , &
-             1 ,1 , -1    ,1 ,1 , -1  , -1 ,-1 ,-1  ,  -1 ,-1 , -1 , &
-             ! Y tubes
-             1 , 1 , 1    , 1 , 1 ,1  ,  1 , 1 ,-1  ,  1 , 1 , -1 , &
-             -1 , -1 , 1   ,-1 , -1 ,1  , -1 ,-1 ,-1  , -1 ,-1 , -1 , &
-             ! Z tubes
-             1 , 1 , 1    , 1 ,1 , 1  , -1 ,-1 , 1  , -1 , -1 , 1 , &
-             1 , 1 ,-1    , 1 ,1 ,-1  , -1 ,-1 ,-1  , -1 , -1 ,-1 , &
-             ! Boxed
-             1 , 1 , 1    ,1 , 1 , 1  , -1 ,-1 , 1  ,  -1 ,-1 , 1 , &
-             1 , 1 ,-1    ,1 , 1 ,-1  , -1 ,-1 ,-1  ,  -1 ,-1 ,-1 , &
-             ! Stochastic
-             1 , 1 , 1    ,1 , 1 , 1  , -1 ,-1 , 1  ,  -1 ,-1 , 1 , &
-             1 , 1 ,-1    ,1 , 1 ,-1  , -1 ,-1 ,-1  ,  -1 ,-1 ,-1 /),(/3,8,5/))
-        !Signs of the x,y,z for each projection  :psgn( [x,y,z], project )
-        real (kind=dp),dimension(3,8),parameter :: psgn2= reshape((/  &
-             1 , 1 , 1   , 1 , 1 , 1   , -1 , -1 , 1 ,  -1 , -1 , 1 , &
-             1 , 1 ,-1   , 1 , 1 ,-1  , -1 , -1 ,-1 ,  -1 , -1 ,-1 /),(/3,8/))
-
-        ! Use 8-fold for non-rotating, but 4-fold for rotating (BT)
-        vsgn=vsgn1
-        psgn=psgn1
-        if (Omega /= 0.0_dp ) then
-           vsgn=vsgn2
-           psgn=psgn2
-        endif
 
         theta = theta_proj
         phi = phi_proj
@@ -1078,9 +909,9 @@ contains
 
 end module projection
 
-!#########################################################
-!#########################################################
-!#########################################################
+!######################################################################
+!######################################################################
+!######################################################################
 
 ! $Id: orblib_f.f90,v 1.3 2011/10/25 08:48:45 bosch Exp $
 
@@ -1092,32 +923,32 @@ module psf
     implicit none
     private
 
-    ! * Module for the PSF generation.
-    ! The way PSF are done in this program is quite simple. We just
-    ! take the original point and modify it with a configurable
-    ! random gaussian offset (psf_size).
+! * Module for the PSF generation.
+! The way PSF are done in this program is quite simple. We just
+! take the original point and modify it with a configurable
+! random gaussian offset (psf_size).
 
-    ! how many psf are there?
+! how many psf are there?
     integer(kind=i4b), public                           :: psf_n
-    ! kind of psf(psf_n)
+! kind of psf(psf_n)
     integer(kind=i4b), private, allocatable, dimension(:) :: psf_kind
-    ! size of psf for (n,psf)
+! size of psf for (n,psf)
     real(kind=dp), private, allocatable, dimension(:, :) :: psf_sigma
-    ! intensity of the psf(n,psf)
+! intensity of the psf(n,psf)
     real(kind=dp), private, allocatable, dimension(:, :) :: psf_iten
-    ! (i,j,pf) contains a sigma's in random order for psf pf
+! (i,j,pf) contains a sigma's in random order for psf pf
     real(kind=dp), private, allocatable, dimension(:, :) :: psf_randomsigma
-    ! setupup of psf variables
+! setupup of psf variables
     public :: psf_setup
-    ! generate gaussian psf points of input array.
+! generate gaussian psf points of input array.
     public :: psf_gaussian
 
     public :: psf_stop
 
-    ! Find the sigma of the psf number #.
+! Find the sigma of the psf number #.
     public :: psf_cal_sigma
 
-    ! Generates an array with proportionals sigma's of a MGE-PSF
+! Generates an array with proportionals sigma's of a MGE-PSF
     private:: psf_sigma_map
 
 contains
@@ -1203,7 +1034,7 @@ contains
             do j = 1, size(vec, 1) ! no forall, want this to be serialized...
                 t(j) = ran1(1)
             end do
-            ! call random_number(t(:))
+!         call random_number(t(:))
             ind = t*(size(vec, 1) - 1) + 1 ! n=size(vec,1) random integers in [1,n]
             forall (j=1:2)
                 gaus(:, j) = vec(:, j) + gaus(:, j)*psf_randomsigma(ind(:), pf)
@@ -1287,12 +1118,8 @@ module aperture
 
     ! Total number of apertures
     integer(kind=i4b), public                          :: aperture_n
-    ! Number of apertures with 0d histograms (mass only)
-    integer(kind=i4b), public                          :: ap_hist0d_n
     ! type of aperture (1=poly,2=box)
     integer(kind=i4b), public, allocatable, dimension(:) :: aperture_type
-    ! histogram dimension for each aperture (0=0D, 1=1D, 2=2D)
-    integer(kind=i4b), public, allocatable, dimension(:) :: ap_hist_dim
 
     ! number of bins in aperture
     integer(kind=i4b), public, allocatable, dimension(:) :: aperture_size
@@ -1306,13 +1133,12 @@ contains
 
 !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine aper_stop()
-        !--------------------------------------------------------------
+!----------------------------------------------------------------------
         print *, "  * Stopping aperture module"
         if (allocated(aperture_type)) then
             deallocate (aperture_type)
             deallocate (aperture_size)
             deallocate (aperture_start)
-            deallocate (ap_hist_dim)
         end if
         print *, "  * Aperture module stopped"
 
@@ -1349,7 +1175,7 @@ contains
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine aper_poly_stop()
-        !------------------------------------------------------------------
+        !----------------------------------------------------------------------
         if (allocated(polygon)) then
             deallocate (polygon)
             deallocate (polygon_struct)
@@ -1363,9 +1189,9 @@ contains
         use aperture, only: aperture_type, aperture_size, aperture_start
         integer(kind=i4b), intent(in) :: handle
         integer(kind=i4b), intent(in) :: aper_n
-        !------------------------------------------------------------------
-        integer(kind=i4b), save :: pol_n = 1, pol_s_n = 1
-        integer(kind=i4b) :: i, k, count
+        !----------------------------------------------------------------------
+        integer(kind=i4b), save       :: pol_n = 1, pol_s_n = 1
+        integer(kind=i4b)            :: i, k, count
         !temporary array's
         real(kind=dp), Dimension(:, :), allocatable :: tr
         integer(kind=i4b), Dimension(:, :), allocatable :: ti
@@ -1441,12 +1267,12 @@ contains
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine aperture_poly_find(vec, ap, res)
         use aperture, only: aperture_size, aperture_type, aperture_start
-        real(kind=dp), dimension(:, :), intent(in) :: vec
-        integer(kind=i4b), intent(in) :: ap
-        integer(kind=i4b), intent(out), dimension(size(vec, 1)) :: res
+        real(kind=dp), dimension(:, :), intent(in)                         :: vec
+        integer(kind=i4b), intent(in)                       :: ap
+        integer(kind=i4b), intent(out), dimension(size(vec, 1))            :: res
         !----------------------------------------------------------------------
-        integer(kind=i4b) :: i, k
-        logical :: found
+        integer(kind=i4b)                                               :: i, k
+        logical                                                          :: found
 
         !DEBUG
         if (aperture_type(ap) /= 1) stop "FIXME: BUG in aperture_find_m"
@@ -1663,8 +1489,8 @@ contains
         sx = ap_box_begin(n, 1)
         sy = ap_box_begin(n, 2)
 
-        ! Perform shift after rotation MC, 19/APR/2004
-        ! Meanning of ap_box_begin has changed!
+! Perform shift after rotation MC, 19/APR/2004
+! Meanning of ap_box_begin has changed!
 
         do j = 1, size(vec, 1)
             t = vec(j, 1)
@@ -1753,10 +1579,8 @@ contains
         allocate (aperture_start(aperture_n))
         allocate (aperture_type(aperture_n))
         allocate (aperture_psf(aperture_n))
-        allocate (ap_hist_dim(aperture_n))
         print *, "  * using ", aperture_n, " aperture(s)"
 
-        ap_hist0d_n = 0
         do i = 1, aperture_n
             print *, "  * What's the filename of the ", i, " aperture file ? :"
             read *, file
@@ -1787,17 +1611,6 @@ contains
             if (aperture_psf(i) < 1 .or. aperture_psf(i) > psf_n) then
                 stop " That PSF does not exist!"
             end if
-
-            ! print *, "  * Histogram dimensions for this aperture (0, 1, or 2)?"
-            print *, "  * Histogram dimensions for this aperture (0 or 1)?"
-            read *, ap_hist_dim(i)
-            print *, "  * The histograms are ", ap_hist_dim(i), " dimensional."
-            ! if (ap_hist_dim(i) < 0 .or. ap_hist_dim(i) > 2) then
-            !     stop "  Histogram dimension must be 0, 1, or 2!"
-            if (ap_hist_dim(i) < 0 .or. ap_hist_dim(i) > 1) then
-                stop "  Histogram dimension must be 0 or 1!"
-            end if
-            if (ap_hist_dim(i) == 0) ap_hist0d_n = ap_hist0d_n + 1
         end do
         print *, "  ** aperture setup finished"
 
@@ -2058,38 +1871,38 @@ module histograms
     implicit none
     private
 
-    ! histogram data (aperture,vel)
+! histogram data (aperture,vel)
     real(kind=dp), Dimension(:, :), private, allocatable  :: histogram
-    ! hist_basic(n,i) n=aperture number, i=width,center,#bins
+! hist_basic(n,i) n=aperture number, i=width,center,#bins
     real(kind=dp), Dimension(:, :), public, allocatable  :: hist_basic
-    ! Are the velocity bins all the same?
+! Are the velocity bins all the same?
     logical, public                                      :: hist_thesame
-    !h_beg,h_end : begin/end of histogram
-    !h_bin,width : amount of / width of histogram pixels
+!h_beg,h_end : begin/end of histogram
+!h_bin,width : amount of / width of histogram pixels
     real(kind=dp), Dimension(:), private, allocatable  :: h_beg, h_end, h_width
     integer(kind=i4b), Dimension(:), private, allocatable:: h_bin
-    ! h_start(n)  :  where start the first histogram of aperture n
+! h_start(n)  :  where start the first histogram of aperture n
     integer(kind=i4b), Dimension(:), private, allocatable:: h_start
-    ! number of polygons/bins in each histogram for each aperture
+! number of polygons/bins in each histogram for each aperture
     integer(kind=i4b), Dimension(:), private, allocatable:: h_blocks
-    ! number of histograms
+! number of histograms
     integer(kind=i4b), private                           :: h_n
-    ! number of points stored in histogram ( Used in normalising. )
+! number of points stored in histogram ( Used in normalising. )
     real(kind=dp), Dimension(:), private, allocatable     :: h_n_stored
-    ! total number of histograms/constraints  after binning
+! total number of histograms/constraints  after binning
     integer(kind=i4b), private                           :: h_nconstr
 
-    ! routines for writing histogram part of output files
+! routines for writing histogram part of output files
     public :: histogram_write, histogram_setup_write
     public :: histogram_write_compat_sparse, histogram_setup_write_mass
 
-    ! Store velocities in the histogram(n).
+! Store velocities in the histogram(n).
     public :: histogram_store
 
-    ! Calculate the velocity bin from the losvd
+! Calculate the velocity bin from the losvd
     public :: histogram_velbin
 
-    ! function to reset the histogram for the next orbit
+! function to reset the histogram for the next orbit
     public :: histogram_reset
 
     public :: histogram_stop
@@ -2127,10 +1940,9 @@ contains
     end subroutine histogram_setup_write_mass
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    subroutine histogram_write(handle, handle_pops)
-        use aperture, only: ap_hist_dim
+    subroutine histogram_write(handle)
         use binning, only: binning_bin
-        integer(kind=i4b), intent(in) :: handle, handle_pops
+        integer(kind=i4b), intent(in) :: handle
         !----------------------------------------------------------------------
         integer(kind=i4b)            :: i, bg, ed
         print *, "  * Normalising and Writing histogram data."
@@ -2148,12 +1960,7 @@ contains
             ed = h_start(i) - 1 + ed
             !conversion normalizing
             histogram(bg:ed, 1:h_bin(i)) = h_n_stored(i)*histogram(bg:ed, 1:h_bin(i))
-            if (handle_pops > 0 .and. ap_hist_dim(i) == 0) then
-                if (h_bin(i) /= 1) stop " 0d histogram must have 1 bin only."
-                write (unit=handle_pops) histogram(bg:ed, 1:h_bin(i))
-            else
-                call histogram_write_compat_sparse(handle, histogram(bg:ed, 1:h_bin(i)))
-            end if
+            call histogram_write_compat_sparse(handle, histogram(bg:ed, 1:h_bin(i)))
         end do
     end subroutine histogram_write
 
@@ -2258,7 +2065,7 @@ contains
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine histogram_setup()
-        use aperture, only: aperture_n, aperture_size, aperture_psf, ap_hist_dim
+        use aperture, only: aperture_n, aperture_size, aperture_psf
         use binning, only: binning_setup, bin_max
         use psf, only: psf_n
         !----------------------------------------------------------------------
@@ -2309,12 +2116,10 @@ contains
         ! Figure out how many histograms there are.
         h_nconstr = 0
         do ap = 1, h_n
-            if (ap_hist_dim(ap) == 1) then  ! only count 1d histograms (required by LegacyWeightSolver)
-                if (bin_max(ap) == 0) then
-                    h_nconstr = h_nconstr + aperture_size(ap)
-                else
-                    h_nconstr = h_nconstr + bin_max(ap)
-                end if
+            if (bin_max(ap) == 0) then
+                h_nconstr = h_nconstr + aperture_size(ap)
+            else
+                h_nconstr = h_nconstr + bin_max(ap)
             end if
         end do
 
@@ -2332,8 +2137,7 @@ contains
             print *, "  * All velocity-bins are the same"
         else
             print *, "  * Velocity-bins are not the same. The standard NNLS will not"
-            print *, "  * understand the ouput correctly (exception: pops data "
-            print *, "  * velocity-bins may differ)."
+            print *, "  * Understand the ouput correctly."
         end if
         print *, "  ** Histogram module setup finished"
 
@@ -2446,7 +2250,6 @@ contains
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine qgrid_store(proj, vel, type)
-      use initial_parameters, only :  Omega ! (BT)
         ! proj (n, (x,y,z) )
         real(kind=dp), dimension(:, :), intent(in) :: proj, vel
         integer(kind=i4b), intent(in)                       :: type
@@ -2455,23 +2258,18 @@ contains
         integer(kind=i4b) :: i, j, n1, n2, n3, store_type
         integer(kind=i4b), save ::ir = 1, ith = 1, iph = 1
 
-        real (kind=dp),dimension(3,8,5) ::vsgn
-        real (kind=dp),dimension(3,8) ::psgn
-
-
         ! Signs of the (vx,vy,vz) for each Projection and type of Orbit
-        ! (BT) 8-fold symmetry same as before
         real(kind=dp), dimension(3, 8, 5), &
-            parameter :: vsgn1 = reshape((/ &
+            parameter :: vsgn = reshape((/ &
                                         ! X tubes
-                                        1, 1, 1, -1, 1, 1, 1, 1, -1, -1, 1, -1, &
-                                        -1, -1, 1, 1, -1, 1, -1, -1, -1, 1, -1, -1, &
+                                        1, 1, 1, -1, 1, 1, -1, 1, -1, 1, 1, -1, &
+                                        1, -1, 1, -1, -1, 1, -1, -1, -1, 1, -1, -1, &
                                         ! Y tubes
-                                        1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1, &
-                                        -1, -1, 1, -1, 1, -1, -1, -1, -1, -1, 1, 1, &
+                                        1, 1, 1, 1, 1, -1, 1, -1, -1, 1, -1, 1, &
+                                        -1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, &
                                         ! Z tubes
-                                        1, 1, 1, 1, -1, -1, -1, -1, 1, -1, 1, -1, &
-                                        1, 1, -1, 1, -1, 1, -1, -1, -1, -1, 1, 1, &
+                                        1, 1, 1, 1, -1, 1, -1, -1, 1, -1, 1, 1, &
+                                        1, 1, -1, 1, -1, -1, -1, -1, -1, -1, 1, -1, &
                                         ! Boxed
                                         1, 1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, &
                                         1, 1, -1, -1, 1, -1, -1, -1, -1, 1, -1, -1, &
@@ -2481,41 +2279,9 @@ contains
 
         !Signs of the x,y,z for each projection  :psgn( [x,y,z], project )
         real(kind=dp), dimension(3, 8), &
-            parameter :: psgn1 = reshape((/ &
+            parameter :: psgn = reshape((/ &
                                         1, 1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1, &
                                         1, 1, -1, -1, 1, -1, -1, -1, -1, 1, -1, -1/), (/3, 8/))
-
-        ! Signs of the (vx,vy,vz) for each Projection and type of Orbit
-        ! (BT) 4-fold symmetry in case of rotating frame
-        real (kind=dp),dimension(3,8,5),parameter :: vsgn2= reshape((/  &
-             ! X tubes
-             1 , 1 , 1    ,1 , 1 , 1  ,  -1 , -1 ,1  ,   -1 , -1 , 1 , &
-             1 ,1 , -1    ,1 ,1 , -1  , -1 ,-1 ,-1  ,  -1 ,-1 , -1 , &
-             ! Y tubes
-             1 , 1 , 1    , 1 , 1 ,1  ,  1 , 1 ,-1  ,  1 , 1 , -1 , &
-             -1 , -1 , 1   ,-1 , -1 ,1  , -1 ,-1 ,-1  , -1 ,-1 , -1 , &
-             ! Z tubes
-             1 , 1 , 1    , 1 ,1 , 1  , -1 ,-1 , 1  , -1 , -1 , 1 , &
-             1 , 1 ,-1    , 1 ,1 ,-1  , -1 ,-1 ,-1  , -1 , -1 ,-1 , &
-             ! Boxed
-             1 , 1 , 1    ,1 , 1 , 1  , -1 ,-1 , 1  ,  -1 ,-1 , 1 , &
-             1 , 1 ,-1    ,1 , 1 ,-1  , -1 ,-1 ,-1  ,  -1 ,-1 ,-1 , &
-             ! Stochastic
-             1 , 1 , 1    ,1 , 1 , 1  , -1 ,-1 , 1  ,  -1 ,-1 , 1 , &
-             1 , 1 ,-1    ,1 , 1 ,-1  , -1 ,-1 ,-1  ,  -1 ,-1 ,-1 /),(/3,8,5/))
-
-        !Signs of the x,y,z for each projection  :psgn( [x,y,z], project )
-        real (kind=dp),dimension(3,8),parameter :: psgn2= reshape((/  &
-             1 , 1 , 1   , 1 , 1 , 1   , -1 , -1 , 1 ,  -1 , -1 , 1 , &
-             1 , 1 ,-1   , 1 , 1 ,-1  , -1 , -1 ,-1 ,  -1 , -1 ,-1 /),(/3,8/))
-
-        ! Use 8-fold for non-rotating, but 4-fold for rotating (BT)
-        vsgn=vsgn1
-        psgn=psgn1
-        if (Omega /= 0.0_dp ) then
-           vsgn=vsgn2
-           psgn=psgn2
-        endif
 
         ! Hunt assumes open boundaries, but our boundaries are closed
         ! So we dont give the outer boundaries to hunt.
@@ -2648,8 +2414,7 @@ module output
     private
 
     integer(kind=i4b), private :: out_handle = 0_i4b
-    character(len=80), public  :: out_file_qgrid, out_file_pops &
-                                  , out_file_losvd, out_file_orbclass
+    character(len=80), public  :: out_file
     character(len=84), private :: out_tmp_file
 
     public :: output_setup
@@ -2664,7 +2429,6 @@ contains
     subroutine output_setup()
         use integrator, only: integrator_setup_write, integrator_set_current,&
              &                   integrator_current
-        use aperture, only: ap_hist0d_n
         use histograms, only: histogram_setup_write
         use histograms, only: histogram_setup_write_mass
         use quadrantgrid, only: qgrid_setup_write
@@ -2675,30 +2439,14 @@ contains
         integer(kind=i4b)  :: error, tmp
 
         print *, "  ** Setting up output module"
-        print *, "  * Give the name of the qgrid outputfile:"
-        ! read (unit=*, fmt="(a80)"), out_file
-        read *, out_file_qgrid
-        print *, out_file_qgrid
+        print *, "  * Give the name of the histogram outputfile:"
+        read (unit=*, fmt="(a80)"), out_file
 
-        if (ap_hist0d_n > 0) then
-            print *, "  * Give the name of the pops '0d histogram' outputfile:"
-            read *, out_file_pops
-            print *, out_file_pops
-        end if
+        out_file = adjustl(out_file)
+        print *, out_file
 
-        print *, "  * Give the name of the 1d losvd histogram outputfile:"
-        read *, out_file_losvd
-        print *, out_file_losvd
-
-        print *, "  * Give the name of the orbit classification outputfile:"
-        read *, out_file_orbclass
-        print *, out_file_orbclass
-
-        ! out_file = adjustl(out_file)
-        ! print *, out_file
-
-        out_tmp_file = out_file_qgrid
-        out_tmp_file(len_trim(out_file_qgrid) + 1:len_trim(out_file_qgrid) + 4) = ".tmp"
+        out_tmp_file = out_file
+        out_tmp_file(len_trim(out_file) + 1:len_trim(out_file) + 4) = ".tmp"
         print *, out_tmp_file
 
         call date_and_time(date=d, time=t, zone=g)
@@ -2713,23 +2461,13 @@ contains
 
             if (error /= 0) stop "  Error opening file."
             ! Write orbit library header in *binary* (typically orblib.dat)
-            open (unit=out_handle, iostat=error, file=out_file_qgrid, action="write", &
+            open (unit=out_handle, iostat=error, file=out_file, action="write", &
                   status="new", form="unformatted")
             call integrator_setup_write(out_handle)
             call qgrid_setup_write(out_handle)
-            close (unit=out_handle, iostat=error)
-            if (error /= 0) stop "  Error closing qgrid file."
-            if (ap_hist0d_n > 0) then
-                open (unit=out_handle, iostat=error, file=out_file_pops, action="write", &
-                    status="new", form="unformatted")
-                close (unit=out_handle, iostat=error)  ! no setup, just create file
-                if (error /= 0) stop "  Error closing pops file."
-            end if
-            open (unit=out_handle, iostat=error, file=out_file_losvd, action="write", &
-                  status="new", form="unformatted")
             call histogram_setup_write(out_handle)
             close (unit=out_handle, iostat=error)
-            if (error /= 0) stop "  Error closing losvd file."
+            if (error /= 0) stop "  Error closing file."
 
             ! Write status file
             write (unit=out_handle + 1, fmt=*, iostat=error) integrator_current
@@ -2750,7 +2488,7 @@ contains
             if (error /= 0) stop "  Error closing status file."
 
             ! Checking if orbit library file exists
-            open (unit=out_handle, iostat=error, file=out_file_qgrid, action="write", &
+            open (unit=out_handle, iostat=error, file=out_file, action="write", &
                  & status="old", position="append", form="unformatted")
             if (error /= 0) stop "  Error opening library file. Does it exist?"
             close (unit=out_handle, iostat=error)
@@ -2758,43 +2496,27 @@ contains
             print *, "  * Resuming with orbit :", tmp + 1
         end if
 
-        open (unit=30, file=out_file_orbclass, status="replace", action="write")
+        open (unit=30, file=trim(out_file)//"_orbclass.out", status="replace", &
+              action="write")
 
-        print *, "  ** Output file setup finished."
+        print *, "  ** Ouput file setup finished."
 
     end subroutine output_setup
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine output_close()
         use integrator, only: integrator_current
-        use aperture, only: ap_hist0d_n
         !----------------------------------------------------------------------
         integer :: error
         print *, "  * Closing files and stopping output module"
         if (out_handle /= 0) then
-            open (unit=out_handle, iostat=error, file=out_file_qgrid, action="write", &
+            open (unit=out_handle, iostat=error, file=out_file, action="write", &
                  & status="old", position="append", form="unformatted")
-            if (error /= 0) stop "  Error opening qgrid file."
+            if (error /= 0) stop "  Error opening file."
             write (unit=out_handle, iostat=error) " "
-            if (error /= 0) stop "  Error writing to qgrid file. Disk full?"
+            if (error /= 0) stop "  Error writing to file. Disk full?"
             close (unit=out_handle, iostat=error)
-            if (error /= 0) stop "  Error closing qgrid file."
-            if (ap_hist0d_n > 0) then
-                open (unit=out_handle, iostat=error, file=out_file_pops, action="write", &
-                    & status="old", position="append", form="unformatted")
-                if (error /= 0) stop "  Error opening pops file."
-                write (unit=out_handle, iostat=error) " "
-                if (error /= 0) stop "  Error writing to pops file. Disk full?"
-                close (unit=out_handle, iostat=error)
-                if (error /= 0) stop "  Error closing pops file."
-            end if
-            open (unit=out_handle, iostat=error, file=out_file_losvd, action="write", &
-                 & status="old", position="append", form="unformatted")
-            if (error /= 0) stop "  Error opening losvd file."
-            write (unit=out_handle, iostat=error) " "
-            if (error /= 0) stop "  Error writing to losvd file. Disk full?"
-            close (unit=out_handle, iostat=error)
-            if (error /= 0) stop "  Error closing losvd file."
+            if (error /= 0) stop "  Error closing file."
         end if
 
         ! Update the temp file to finished status
@@ -2807,9 +2529,6 @@ contains
         close (unit=out_handle + 1, iostat=error)
         if (error /= 0) stop "  Error closing status file."
 
-        close(unit=32,iostat=error)                           ! for orbit info (BT)
-        if (error/=0) stop "  Error closing status file."
-
         print *, " * Finished closing files"
 
     end subroutine output_close
@@ -2817,11 +2536,10 @@ contains
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine output_write()
         use histograms, only: histogram_write
-        use aperture, only: ap_hist0d_n
         use quadrantgrid, only: qgrid_write
         use integrator, only: integrator_write, integrator_current
         !----------------------------------------------------------------------
-        integer :: error, out_handle_pops
+        integer :: error
         ! Update the temp file to writing status
         open (unit=out_handle + 1, iostat=error, file=out_tmp_file, action="write", &
              & status="old", position="rewind")
@@ -2833,31 +2551,14 @@ contains
         if (error /= 0) stop "  Error closing status file."
 
         ! Write the orbit to the *binary* output file (typically orblib.dat).
-        open (unit=out_handle, iostat=error, file=out_file_qgrid, action="write", &
+        open (unit=out_handle, iostat=error, file=out_file, action="write", &
              & status="old", position="append", form="unformatted")
-        if (error /= 0) stop "  Error opening qgrid file."
+        if (error /= 0) stop "  Error opening file."
         call integrator_write(out_handle)
         call qgrid_write(out_handle)
+        call histogram_write(out_handle)
         close (unit=out_handle, iostat=error)
-        if (error /= 0) stop "  Error closing qgrid file."
-        if (ap_hist0d_n > 0) then
-            out_handle_pops = out_handle + 10
-            open (unit=out_handle_pops, iostat=error, file=out_file_pops, action="write", &
-                & status="old", position="append", form="unformatted")
-            if (error /= 0) stop "  Error opening pops file."
-        else
-            out_handle_pops = 0
-        end if
-        open (unit=out_handle, iostat=error, file=out_file_losvd, action="write", &
-        & status="old", position="append", form="unformatted")
-        if (error /= 0) stop "  Error opening losvd file."
-        call histogram_write(out_handle, out_handle_pops)
-        if (ap_hist0d_n > 0) then
-            close (unit=out_handle_pops, iostat=error)
-            if (error /= 0) stop "  Error closing pops file."
-        end if
-        close (unit=out_handle, iostat=error)
-        if (error /= 0) stop "  Error closing losvd file."
+        if (error /= 0) stop "  Error closing file."
 
         ! Update the temp file to intermediate status
         open (unit=out_handle + 1, iostat=error, file=out_tmp_file, action="write", &
@@ -2886,8 +2587,8 @@ module high_level
     implicit none
     private
 
-    ! setup/run/stop the program.
-    public :: setup, setup_bar, run, stob
+! setup/run/stop the program.
+    public :: setup, run, stob
 
 contains
 
@@ -2924,40 +2625,7 @@ contains
     end subroutine setup
 
     !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    subroutine setup_bar()
-        use integrator, only: integrator_setup_bar
-        use projection, only: projection_setup
-        use quadrantgrid, only: qgrid_setup
-        use aperture_routines, only: aperture_setup
-        use histograms, only: histogram_setup
-        use psf, only: psf_setup
-        use output, only: output_setup
-        !----------------------------------------------------------------------
-        character(len=80) :: string
-        print *, "  ** Start Setup"
-        print *, "  * Give setup version info: [U for unspecified]"
-        read *, string
-        if (string == "#counterrotation_setupfile_version_1" .or. string == "U") then
-            print *, "  * Setupfile is Version 1"
-            call integrator_setup_bar()
-            call projection_setup()
-            call qgrid_setup()
-            call psf_setup()
-            call aperture_setup()
-            call histogram_setup()
-            call output_setup()
-        else
-            print *, "This version is not understood by this program"
-            STOP "program terminated in high_level:setup"
-        end if
-
-        print *, "  ** Setup Finished"
-
-    end subroutine setup_bar
-
-    !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     subroutine run()
-      use initial_parameters, only: Omega
         use histograms, only: histogram_reset, hist_thesame, &
                               histogram_velbin, histogram_store
         use projection, only: project, projection_symmetry
@@ -2981,7 +2649,6 @@ contains
         real(kind=dp) :: t1, t2
         alldone = .false.
         print *, "  ** Starting Orbit Calculations"
-        if (Omega /= 0.0_dp) print*,"Pattern speed ==================== ", Omega ! (BT)
         do  ! for each orbit
 
             call cpu_time(t1)
