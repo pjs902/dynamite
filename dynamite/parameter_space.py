@@ -1176,10 +1176,12 @@ class BayesOptGenerator(ParameterGenerator):
         self.free_param_names = [p.name for p in self.free_params]
 
         # Position of q / p / u among the FREE parameters (for triaxiality).
+        # Parameter names carry a component suffix (e.g. 'q-stars'), so strip
+        # everything after the first '-' before comparing the base name.
         self._free_qpu_idx = {}
         for axis in ('q', 'p', 'u'):
             for j, p in enumerate(self.free_params):
-                if p.name == axis:
+                if p.name.split('-')[0] == axis:
                     self._free_qpu_idx[axis] = j
                     break
 

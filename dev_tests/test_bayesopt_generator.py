@@ -432,6 +432,24 @@ def test_stopping_converged():
     print('  test_stopping_converged PASSED')
 
 
+def test_free_qpu_idx_with_suffixed_names():
+    """_free_qpu_idx must be populated when param names carry a component suffix
+    (e.g. 'q-stars'), as happens in all real DYNAMITE configs."""
+    q = _mk_param('q-stars', 0.05, 0.99, 0.6)
+    p_ = _mk_param('p-stars', 0.05, 0.999, 0.8)
+    u = _mk_param('u-stars', 0.05, 1.0, 0.9)
+    ml = _mk_param('ml', 1.0, 9.0, 5.0)
+    tri = MockTriaxialComponent('stars', qobs=0.55)
+    tri.parameters = [q, p_, u]
+    system = MockSystem([ml], components=[tri])
+    ps_ = ParameterSpace(system)
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    assert gen._free_qpu_idx == {'q': 0, 'p': 1, 'u': 2}, \
+        f'Expected qpu idx {{q:0,p:1,u:2}}, got {gen._free_qpu_idx}'
+    assert abs(gen.qobs - 0.55) < 1e-9, f'Expected qobs=0.55, got {gen.qobs}'
+    print('  test_free_qpu_idx_with_suffixed_names PASSED')
+
+
 if __name__ == '__main__':
     print('Task 2: pipeline tests')
     test_roundtrip_linear()
@@ -456,3 +474,7 @@ if __name__ == '__main__':
     test_stopping_not_converged()
     test_stopping_converged()
     print('TASK 6 TESTS PASSED')
+    print('Name fix: qpu suffix regression test')
+    test_free_qpu_idx_with_suffixed_names()
+    print('NAME FIX TESTS PASSED')
+    print('ALL BAYESOPT TESTS PASSED')
