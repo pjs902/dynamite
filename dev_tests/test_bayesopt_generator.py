@@ -397,7 +397,7 @@ def test_stopping_no_gp_is_safe():
     gen = _bo_gen_2d()
     gen._gp_model = None
     gen.status = {'stop': False}
-    gen.check_specific_stopping_criteria()
+    gen.check_specific_stopping_critera()
     assert 'gp_max_variance_low' not in gen.status
     assert 'gp_min_ei_low' not in gen.status
     print('  test_stopping_no_gp_is_safe PASSED')
@@ -411,7 +411,7 @@ def test_stopping_not_converged():
     # Set threshold well below that so gp_max_variance_low is False.
     gen.max_gp_variance_threshold = 1e-5
     gen.status = {'stop': False}
-    gen.check_specific_stopping_criteria()
+    gen.check_specific_stopping_critera()
     assert gen.status.get('gp_max_variance_low') is False, gen.status
     assert gen.status.get('gp_min_ei_low') is False, gen.status
     print('  test_stopping_not_converged PASSED')
@@ -425,7 +425,7 @@ def test_stopping_converged():
     # Set threshold above that so gp_max_variance_low is True.
     gen.max_gp_variance_threshold = 1e-4
     gen.status = {'stop': False}
-    gen.check_specific_stopping_criteria()
+    gen.check_specific_stopping_critera()
     assert gen.status.get('gp_max_variance_low') is True, \
         f'expected variance low=True, got status={gen.status}'
     assert gen.status.get('gp_min_ei_low') is True, gen.status

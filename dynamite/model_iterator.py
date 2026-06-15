@@ -310,6 +310,8 @@ class ModelInnerIterator(object):
             Number of staging files deleted.
 
         """
+        if self.do_dummy_run:
+            return 0
         for row in rows:
             f_name = self.all_models.get_model_from_row(row).directory + \
                 'model_done_staging.ecsv'
@@ -492,17 +494,19 @@ class ModelInnerIterator(object):
                 self.logger.warning(w_txt)
         all_done = orb_done and wts_done
         time = str(np.datetime64('now', 'ms'))
-        # Build and write model_done_staging.ecsv
-        current_model_row = table.Table(self.all_models.table[row])
-        for name, value in zip(
-                ['orblib_done','weights_done','chi2',
-                 'kinchi2','kinmapchi2','all_done','time_modified'],
-                [orb_done, wts_done, mod.chi2,
-                 mod.kinchi2, mod.kinmapchi2, all_done, time]):
-            current_model_row[name][0] = value
-        file_name = mod.directory + 'model_done_staging.ecsv'
-        current_model_row.write(file_name, format='ascii.ecsv', overwrite=True)
-        self.logger.info(f'Model {i+1}: {file_name} written.')
+        # Build and write model_done_staging.ecsv (skipped in dummy runs because
+        # the model directory is never created, and restart support is not needed)
+        if not self.do_dummy_run:
+            current_model_row = table.Table(self.all_models.table[row])
+            for name, value in zip(
+                    ['orblib_done','weights_done','chi2',
+                     'kinchi2','kinmapchi2','all_done','time_modified'],
+                    [orb_done, wts_done, mod.chi2,
+                     mod.kinchi2, mod.kinmapchi2, all_done, time]):
+                current_model_row[name][0] = value
+            file_name = mod.directory + 'model_done_staging.ecsv'
+            current_model_row.write(file_name, format='ascii.ecsv', overwrite=True)
+            self.logger.info(f'Model {i+1}: {file_name} written.')
         output = orb_done, wts_done, mod.chi2, \
                  mod.kinchi2, mod.kinmapchi2, all_done, time
         return output

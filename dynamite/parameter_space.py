@@ -1455,14 +1455,14 @@ class BayesOptGenerator(ParameterGenerator):
         raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
         return self._raw_free_matrix_to_model_list(raw_free)
 
-    def check_specific_stopping_criteria(self):
+    def check_specific_stopping_critera(self):
         """BayesOpt convergence signals plus the inherited chi2 backstop.
 
         Calls super() first (the chi2-plateau backstop). Then, if a GP has
         been fitted, checks (1) max posterior variance over a 256-point Sobol
         grid and (2) the last qLogEI batch value.
         """
-        super().check_specific_stopping_criteria()
+        super().check_specific_stopping_critera()
 
         if self._gp_model is None:
             return

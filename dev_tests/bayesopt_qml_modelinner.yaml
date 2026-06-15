@@ -26,6 +26,7 @@ system_components:
                 value: 1.e-3
                 LaTeX: "$a_\\mathrm{BH}$"
         type: "Plummer"
+        contributes_to_potential: True
         include: True
 
     dh:
@@ -51,6 +52,7 @@ system_components:
                 value: 1.0
                 LaTeX: "$\\log(M_{200}/M_\\mathrm{stars})$"
         type: NFW
+        contributes_to_potential: True
         include: True
 
     stars:
@@ -83,6 +85,7 @@ system_components:
                 value: 0.9999
                 LaTeX: "$u_\\mathrm{min}$"
         type: "TriaxialVisibleComponent"
+        contributes_to_potential: False
         mge_pot: "mge.ecsv"
         mge_lum: "mge.ecsv"
         include: True
