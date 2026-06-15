@@ -260,6 +260,104 @@ def test_random_phase_guard_empty_table():
     print('  test_random_phase_guard_empty_table PASSED')
 
 
+# --------------------------------------------------------------------------
+# Task 5 tests: GP acquisition phase
+# --------------------------------------------------------------------------
+def _fill_table(gen, am, landscape, n, seed=0):
+    """Add n completed valid models to am.table by evaluating landscape."""
+    rng = np.random.default_rng(seed)
+    lo = np.array(gen.lo_free, dtype=float)
+    hi = np.array(gen.hi_free, dtype=float)
+    for _ in range(n):
+        raw = lo + (hi - lo) * rng.random(len(lo))
+        model = gen._raw_free_to_model(raw)
+        chi2 = landscape(raw)
+        par_vals = [p.par_value for p in model]
+        row = par_vals + [chi2, chi2, chi2, 'now', True, True, True, 0, '']
+        am.table.add_row(row)
+
+
+def test_gp_phase_count_and_bounds():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    f = _mk_param('f', -1.0, 3.0, 1.0, logarithmic=True)
+    ps_ = make_parspace([ml, f])
+    s = _bo_settings()
+    s['generator_settings']['n_initial_random'] = 4
+    s['generator_settings']['batch_size'] = 4
+    s['generator_settings']['n_ml_per_config'] = 1
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    am = MockAllModels(ps_.par_names)
+    gen.current_models = am
+
+    def landscape(raw):
+        c = np.array([5.0, 1.0])
+        return float(np.sum((raw - c) ** 2))
+
+    _fill_table(gen, am, landscape, n=6, seed=1)
+    gen.specific_generate_method()
+    assert gen._gp_model is not None, 'GP should be fitted in GP phase'
+    assert len(gen.model_list) == gen.batch_size, \
+        f'expected {gen.batch_size} candidates, got {len(gen.model_list)}'
+    for model in gen.model_list:
+        for p in model:
+            if not p.fixed:
+                j = gen.free_param_names.index(p.name)
+                lo, hi = gen.lo_free[j], gen.hi_free[j]
+                assert lo - 1e-5 <= p.raw_value <= hi + 1e-5, \
+                    f'{p.name} raw={p.raw_value} out of [{lo},{hi}]'
+    assert gen._last_acq_value is not None
+    print('  test_gp_phase_count_and_bounds PASSED')
+
+
+def test_gp_phase_triaxiality():
+    """GP candidates must satisfy triaxiality when qobs is set."""
+    q_p = _mk_param('q', 0.05, 0.99, 0.6)
+    p_p = _mk_param('p', 0.05, 0.999, 0.8)
+    u_p = _mk_param('u', 0.05, 1.0, 0.9)
+    tri = MockTriaxialComponent('stars', qobs=0.65)
+    tri.parameters = [q_p, p_p, u_p]
+    system = MockSystem([q_p, p_p, u_p], components=[tri])
+    ps_ = ParameterSpace(system)
+    s = _bo_settings()
+    s['generator_settings']['n_initial_random'] = 4
+    s['generator_settings']['batch_size'] = 4
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    assert gen.qobs == 0.65
+    am = MockAllModels(ps_.par_names)
+    gen.current_models = am
+
+    qobs = 0.65
+    rng = np.random.default_rng(3)
+    added = 0
+    while added < 6:
+        qv = rng.uniform(0.1, 0.8)
+        pv = rng.uniform(max(qv, 0.1), 0.95)
+        u_lo = max(qv / qobs, pv)
+        u_hi = min(pv / qobs, 1.0)
+        if u_hi <= u_lo:
+            continue
+        uv = rng.uniform(u_lo, u_hi)
+        raw = np.array([qv, pv, uv])
+        model = gen._raw_free_to_model(raw)
+        chi2 = float(np.sum((raw - np.array([0.5, 0.7, 0.75])) ** 2))
+        par_vals = [p.par_value for p in model]
+        am.table.add_row(par_vals + [chi2, chi2, chi2, 'now', True, True, True, 0, ''])
+        added += 1
+
+    gen.specific_generate_method()
+    assert len(gen.model_list) == gen.batch_size
+    for model in gen.model_list:
+        d = {p.name: p.raw_value for p in model}
+        qv, pv, uv = d['q'], d['p'], d['u']
+        assert pv >= qv - 1e-4, f'p={pv} < q={qv}'
+        u_lo = max(qv / qobs, pv)
+        u_hi = min(pv / qobs, 1.0)
+        if u_hi > u_lo:
+            assert u_lo - 1e-4 <= uv <= u_hi + 1e-4, \
+                f'u={uv} not in [{u_lo},{u_hi}]'
+    print('  test_gp_phase_triaxiality PASSED')
+
+
 if __name__ == '__main__':
     print('Task 2: pipeline tests')
     test_roundtrip_linear()
@@ -275,3 +373,7 @@ if __name__ == '__main__':
     test_random_phase_count_and_bounds()
     test_random_phase_guard_empty_table()
     print('TASK 4 TESTS PASSED')
+    print('Task 5: GP-phase tests')
+    test_gp_phase_count_and_bounds()
+    test_gp_phase_triaxiality()
+    print('TASK 5 TESTS PASSED')

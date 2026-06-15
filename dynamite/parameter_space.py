@@ -1303,6 +1303,153 @@ class BayesOptGenerator(ParameterGenerator):
 
         self.model_list = self._gp_acquisition_batch()
 
+    # --- triaxiality constraints (normalized space) --------------------
+
+    def _make_triaxiality_constraints(self):
+        """Return (nonlinear_constraints, linear_constraints) over NORMALIZED
+        free-parameter coordinates, or (None, None) if not applicable.
+
+        Constraint callables receive a 1D tensor x of shape (n_free,) —
+        index with x[idx], never x[..., idx]. Each returns >= 0 when feasible.
+        Unnormalization to raw (q,p,u) happens inside the callable.
+        """
+        if self.qobs is None or not all(k in self._free_qpu_idx
+                                        for k in ('q', 'p', 'u')):
+            return None, None
+        import torch
+        lo_raw, hi_raw = self._norm_bounds_arrays()
+        lo_t = torch.tensor(lo_raw, dtype=torch.double)
+        span_t = torch.tensor(hi_raw - lo_raw, dtype=torch.double)
+        jq = self._free_qpu_idx['q']
+        jp = self._free_qpu_idx['p']
+        ju = self._free_qpu_idx['u']
+        qobs = float(self.qobs)
+
+        def _raw(x, j):
+            return lo_t[j] + x[j] * span_t[j]
+
+        def c_p_ge_q(x):
+            return _raw(x, jp) - _raw(x, jq)           # p - q >= 0
+
+        def c_u_lower(x):
+            p_r = _raw(x, jp)
+            q_r = _raw(x, jq)
+            u_r = _raw(x, ju)
+            return u_r - torch.maximum(q_r / qobs, p_r) # u - max(q/qobs,p) >= 0
+
+        def c_u_upper(x):
+            p_r = _raw(x, jp)
+            u_r = _raw(x, ju)
+            upper = torch.clamp(p_r / qobs, max=1.0)
+            return upper - u_r                          # min(p/qobs,1) - u >= 0
+
+        nonlinear = [(c_p_ge_q, True), (c_u_lower, True), (c_u_upper, True)]
+        return nonlinear, None
+
+    def _feasible_ic_generator(self, acq_function, bounds, q, num_restarts,
+                               raw_samples, fixed_features=None, options=None,
+                               inequality_constraints=None,
+                               equality_constraints=None, **kwargs):
+        """Return (num_restarts, q, d) initial conditions, ALL feasible.
+
+        BoTorch 0.18.1 validates that every IC satisfies constraint >= -1e-8
+        before optimization; this generator uses rejection sampling to ensure
+        all returned points pass.
+        """
+        import torch
+        d = bounds.shape[1]
+        lo = bounds[0]
+        hi = bounds[1]
+        need = num_restarts * q
+        collected = []
+        attempts = 0
+        max_attempts = 50
+
+        nonlinear, _ = self._make_triaxiality_constraints()
+
+        while len(collected) < need and attempts < max_attempts:
+            attempts += 1
+            n_try = max(need * 30, 512)
+            unit = torch.rand(n_try, d, dtype=bounds.dtype)
+            unit_np = self._project_unit_to_feasible_qpu(unit.numpy())
+            unit = torch.tensor(unit_np, dtype=bounds.dtype)
+            cand = lo + (hi - lo) * unit
+
+            for i in range(cand.shape[0]):
+                x = cand[i]
+                feasible = True
+                if nonlinear is not None:
+                    for fn, is_intra in nonlinear:
+                        if is_intra:
+                            if fn(x).item() < -1e-8:
+                                feasible = False
+                                break
+                if feasible:
+                    collected.append(x)
+                    if len(collected) >= need:
+                        break
+
+        if len(collected) < need:
+            while len(collected) < need:
+                collected.append(collected[len(collected) % max(1, len(collected))])
+
+        result = torch.stack(collected[:need]).reshape(num_restarts, q, d)
+        return result
+
+    def _gp_acquisition_batch(self):
+        """Fit a GP and maximize qLogEI to produce a batch of models."""
+        import torch
+        from botorch.models import SingleTaskGP, SingleTaskVariationalGP
+        from botorch.fit import fit_gpytorch_mll
+        from botorch.acquisition import qLogExpectedImprovement
+        from botorch.optim import optimize_acqf
+        from gpytorch.mlls import ExactMarginalLogLikelihood, VariationalELBO
+
+        table = self.current_models.table
+        X_norm, y, names, lo_raw, hi_raw = extract_gp_training_data(
+            table, self.par_space, which_chi2=self.chi2)
+
+        assert names == self.free_param_names, \
+            f'param order mismatch: {names} vs {self.free_param_names}'
+
+        X_t = torch.tensor(X_norm, dtype=torch.double)
+        chi2_t = torch.tensor(y, dtype=torch.double).unsqueeze(-1)
+        Y_t = -chi2_t                        # BoTorch maximizes; negate chi2
+
+        n_train = X_t.shape[0]
+        if n_train > 300:
+            model = SingleTaskVariationalGP(X_t, Y_t).to(torch.double)
+            mll = VariationalELBO(model.likelihood, model.model,
+                                  num_data=n_train)
+        else:
+            model = SingleTaskGP(X_t, Y_t).to(torch.double)
+            mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll)
+        self._gp_model = model
+
+        d = len(self.free_par_idx)
+        bounds = torch.stack([
+            torch.zeros(d, dtype=torch.double),
+            torch.ones(d, dtype=torch.double)])
+
+        acqf = qLogExpectedImprovement(model=model, best_f=Y_t.max())
+
+        nonlinear, linear = self._make_triaxiality_constraints()
+        opt_kwargs = dict(
+            acq_function=acqf, bounds=bounds, q=self.batch_size,
+            num_restarts=10, raw_samples=128)
+        if nonlinear is not None:
+            opt_kwargs['nonlinear_inequality_constraints'] = nonlinear
+            opt_kwargs['ic_generator'] = self._feasible_ic_generator
+            opt_kwargs['options'] = {'batch_limit': 1}
+
+        candidates, acq_value = optimize_acqf(**opt_kwargs)
+        self._last_acq_value = float(acq_value.item())
+
+        cand_np = candidates.detach().numpy()
+        raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
+        return self._raw_free_matrix_to_model_list(raw_free)
+
 
 class FullGrid(ParameterGenerator):
     """
