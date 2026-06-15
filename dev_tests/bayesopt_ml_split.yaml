@@ -128,6 +128,9 @@ orblib_settings:
     nI2: 4
     nI3: 3
     dithering: 1
+    quad_nr: 10
+    quad_nth: 6
+    quad_nph: 6
     orbital_periods: 200
     sampling: 50000
     starting_orbit: 1
