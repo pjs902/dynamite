@@ -1191,9 +1191,117 @@ class BayesOptGenerator(ParameterGenerator):
         self._gp_model = None
         self._last_acq_value = None
 
+    # --- candidate <-> Parameter conversion ----------------------------
+
+    def _raw_free_to_model(self, raw_free):
+        """Build one model (list of Parameter, all params) from a raw_free row.
+
+        Fixed parameters keep their canonical raw_value; free parameters take
+        the proposed raw values (in free-parameter order).
+        """
+        new_parset = [copy.deepcopy(p) for p in self.par_space]
+        for j, full_idx in enumerate(self.free_par_idx):
+            new_parset[full_idx].raw_value = float(raw_free[j])
+        return new_parset
+
+    def _raw_free_matrix_to_model_list(self, raw_free_matrix):
+        """Convert a matrix of raw free-parameter values to a model list."""
+        return [self._raw_free_to_model(row) for row in raw_free_matrix]
+
+    def _norm_bounds_arrays(self):
+        """Return (lo_raw, hi_raw) numpy arrays over free parameters."""
+        return (np.array(self.lo_free, dtype=float),
+                np.array(self.hi_free, dtype=float))
+
+    def _sobol_unit(self, n):
+        """Return n Sobol points in the unit cube [0,1]^n_free (numpy)."""
+        import torch
+        from torch.quasirandom import SobolEngine
+        eng = SobolEngine(dimension=len(self.free_par_idx), scramble=True)
+        return eng.draw(n).to(dtype=torch.double).numpy()
+
+    def _project_unit_to_feasible_qpu(self, X_unit):
+        """Project unit-cube samples so (q,p,u) satisfy the triaxiality box.
+
+        Operates in normalized [0,1] space. Converts q/p/u columns to raw
+        values, enforces p>=q and clips u to its feasibility window, then
+        converts back to normalized. No-op if qobs is None or q/p/u not free.
+        """
+        if self.qobs is None or not all(k in self._free_qpu_idx
+                                        for k in ('q', 'p', 'u')):
+            return X_unit
+        lo_raw, hi_raw = self._norm_bounds_arrays()
+        span = hi_raw - lo_raw
+        raw = X_unit * span + lo_raw          # (n, n_free) raw values
+        jq = self._free_qpu_idx['q']
+        jp = self._free_qpu_idx['p']
+        ju = self._free_qpu_idx['u']
+        q = raw[:, jq]
+        p = raw[:, jp]
+        p = np.maximum(p, q)                  # enforce p >= q
+        u_lo = np.maximum(q / self.qobs, p)
+        u_hi = np.minimum(p / self.qobs, 1.0)
+        mid = 0.5 * (u_lo + u_hi)
+        good = u_hi > u_lo
+        u = raw[:, ju].copy()
+        u[good] = np.clip(u[good], u_lo[good], u_hi[good])
+        u[~good] = mid[~good]
+        raw[:, jp] = p
+        raw[:, ju] = u
+        X_proj = (raw - lo_raw) / span
+        return np.clip(X_proj, 0.0, 1.0)
+
+    def _propose_random_batch(self):
+        """Sobol random proposals (warm-up), structured for orblib reuse."""
+        n_orblib = max(1, self.batch_size // max(1, self.n_ml_per_config))
+        lo_raw, hi_raw = self._norm_bounds_arrays()
+        span = hi_raw - lo_raw
+
+        base_unit = self._sobol_unit(n_orblib)
+        base_unit = self._project_unit_to_feasible_qpu(base_unit)
+
+        ml_free_j = None
+        for j, p in enumerate(self.free_params):
+            if p.name == 'ml':
+                ml_free_j = j
+                break
+
+        rows_unit = []
+        for k in range(n_orblib):
+            if ml_free_j is None:
+                rows_unit.append(base_unit[k])
+            else:
+                for m in range(self.n_ml_per_config):
+                    r = base_unit[k].copy()
+                    r[ml_free_j] = (m + 0.5) / self.n_ml_per_config
+                    rows_unit.append(r)
+        rows_unit = np.array(rows_unit[:self.batch_size])
+        raw_free = rows_unit * span + lo_raw
+        return self._raw_free_matrix_to_model_list(raw_free)
+
     def specific_generate_method(self, **kwargs):
-        """Placeholder — BoTorch proposal logic added in a later task."""
-        return
+        """Propose the next batch of models.
+
+        Warm-up: while fewer than n_initial_random completed-and-valid models
+        exist (covers the empty-table and double-call-on-iter-0 cases where
+        new rows have all_done=False / NaN chi2), return Sobol random proposals.
+        Otherwise fit a GP and maximize the acquisition function (Task 5).
+        """
+        table = self.current_models.table
+        if len(table) == 0:
+            n_valid = 0
+        else:
+            done = np.asarray(table['all_done'], dtype=bool)
+            finite = np.isfinite(np.asarray(table[self.chi2], dtype=float))
+            n_valid = int(np.sum(done & finite))
+
+        if n_valid < self.n_initial_random:
+            self._gp_model = None
+            self._last_acq_value = None
+            self.model_list = self._propose_random_batch()
+            return
+
+        self.model_list = self._gp_acquisition_batch()
 
 
 class FullGrid(ParameterGenerator):

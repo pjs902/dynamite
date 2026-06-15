@@ -211,6 +211,55 @@ def test_init_rejects_missing_delta():
     raise AssertionError('expected ValueError for missing chi2-delta option')
 
 
+# --------------------------------------------------------------------------
+# Task 4 tests: random warm-up phase
+# --------------------------------------------------------------------------
+def test_random_phase_count_and_bounds():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    f = _mk_param('f', -1.0, 3.0, 1.0, logarithmic=True)
+    q = _mk_param('q', 0.05, 0.99, 0.6)
+    ps_ = make_parspace([ml, f, q])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings())
+    am = MockAllModels(ps_.par_names)
+    gen.current_models = am
+    gen.specific_generate_method()
+    assert len(gen.model_list) == gen.batch_size, \
+        f'expected {gen.batch_size} models, got {len(gen.model_list)}'
+    for model in gen.model_list:
+        assert len(model) == ps_.n_par, \
+            f'model has {len(model)} params, expected {ps_.n_par}'
+        for p in model:
+            if not p.fixed:
+                j = gen.free_param_names.index(p.name)
+                lo = gen.lo_free[j]
+                hi = gen.hi_free[j]
+                assert lo - 1e-9 <= p.raw_value <= hi + 1e-9, \
+                    f'{p.name} raw_value {p.raw_value} out of [{lo},{hi}]'
+    assert gen._gp_model is None, 'GP should not be fitted in random phase'
+    print('  test_random_phase_count_and_bounds PASSED')
+
+
+def test_random_phase_guard_empty_table():
+    """Second call on iter=0 sees empty-ish table — must still return random."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    s['generator_settings']['batch_size'] = 4
+    s['generator_settings']['n_ml_per_config'] = 1
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    am = MockAllModels(ps_.par_names)
+    gen.current_models = am
+    # Call twice (simulates iter-0 double-call)
+    gen.specific_generate_method()
+    first_batch = list(gen.model_list)
+    gen.specific_generate_method()
+    second_batch = list(gen.model_list)
+    assert len(second_batch) == 4
+    assert gen._gp_model is None
+    print('  test_random_phase_guard_empty_table PASSED')
+
+
 if __name__ == '__main__':
     print('Task 2: pipeline tests')
     test_roundtrip_linear()
@@ -222,3 +271,7 @@ if __name__ == '__main__':
     test_init_rejects_double_delta()
     test_init_rejects_missing_delta()
     print('TASK 3 TESTS PASSED')
+    print('Task 4: random-phase tests')
+    test_random_phase_count_and_bounds()
+    test_random_phase_guard_empty_table()
+    print('TASK 4 TESTS PASSED')
