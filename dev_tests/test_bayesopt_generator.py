@@ -1,13 +1,13 @@
 """Unit + integration tests for BayesOptGenerator and its helpers.
 
-Run with:  /opt/miniconda3/bin/python3 dev_tests/test_bayesopt_generator.py
+Run with:  /opt/miniconda3/envs/main/bin/python3 dev_tests/test_bayesopt_generator.py
 """
 import sys
 import types
-import copy
+import copy  # noqa: F401 — used by BayesOptGenerator methods added in later tasks
 import importlib.util as ilu
-import numpy as np
-from astropy.table import Table, Column
+import numpy as np  # type: ignore[import-untyped]
+from astropy.table import Table, Column  # type: ignore[import-untyped]
 
 # --- Load dynamite.parameter_space without triggering dynamite/__init__ ----
 DYN_ROOT = '/Users/pesmith/research/dynamite'
