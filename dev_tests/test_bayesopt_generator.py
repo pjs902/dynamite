@@ -358,6 +358,80 @@ def test_gp_phase_triaxiality():
     print('  test_gp_phase_triaxiality PASSED')
 
 
+# --------------------------------------------------------------------------
+# Task 6 tests: stopping criteria
+# --------------------------------------------------------------------------
+def _make_fitted_gp(gen, n_points, cluster, seed):
+    """Create a fitted SingleTaskGP for testing stopping criteria."""
+    import torch
+    from botorch.models import SingleTaskGP
+    from botorch.fit import fit_gpytorch_mll
+    from gpytorch.mlls import ExactMarginalLogLikelihood
+    rng = np.random.default_rng(seed)
+    d = len(gen.free_par_idx)
+    if cluster:
+        X = np.clip(0.5 + 0.04 * rng.standard_normal((n_points, d)), 0, 1)
+    else:
+        X = rng.random((n_points, d))
+    y = np.sum((X - 0.5) ** 2, axis=1)
+    X_t = torch.tensor(X, dtype=torch.double)
+    Y_t = -torch.tensor(y, dtype=torch.double).unsqueeze(-1)
+    model = SingleTaskGP(X_t, Y_t).to(torch.double)
+    fit_gpytorch_mll(ExactMarginalLogLikelihood(model.likelihood, model))
+    return model
+
+
+def _bo_gen_2d():
+    """Helper: 2-param BayesOptGenerator with one valid row in the table."""
+    a = _mk_param('a', 0.0, 1.0, 0.5)
+    b = _mk_param('b', 0.0, 1.0, 0.5)
+    ps_ = make_parspace([a, b])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    am = MockAllModels(ps_.par_names)
+    am.table.add_row([0.5, 0.5, 1.0, 1.0, 1.0, 'now', True, True, True, 0, ''])
+    gen.current_models = am
+    return gen
+
+
+def test_stopping_no_gp_is_safe():
+    gen = _bo_gen_2d()
+    gen._gp_model = None
+    gen.status = {'stop': False}
+    gen.check_specific_stopping_criteria()
+    assert 'gp_max_variance_low' not in gen.status
+    assert 'gp_min_ei_low' not in gen.status
+    print('  test_stopping_no_gp_is_safe PASSED')
+
+
+def test_stopping_not_converged():
+    gen = _bo_gen_2d()
+    gen._gp_model = _make_fitted_gp(gen, n_points=20, cluster=False, seed=5)
+    gen._last_acq_value = 0.4
+    # Sparse GP on 2D unit cube: max posterior variance ~0.003 (after Standardize).
+    # Set threshold well below that so gp_max_variance_low is False.
+    gen.max_gp_variance_threshold = 1e-5
+    gen.status = {'stop': False}
+    gen.check_specific_stopping_criteria()
+    assert gen.status.get('gp_max_variance_low') is False, gen.status
+    assert gen.status.get('gp_min_ei_low') is False, gen.status
+    print('  test_stopping_not_converged PASSED')
+
+
+def test_stopping_converged():
+    gen = _bo_gen_2d()
+    gen._gp_model = _make_fitted_gp(gen, n_points=100, cluster=True, seed=7)
+    gen._last_acq_value = -3.0
+    # Clustered GP: max posterior variance ~1e-5 (concentrated training data).
+    # Set threshold above that so gp_max_variance_low is True.
+    gen.max_gp_variance_threshold = 1e-4
+    gen.status = {'stop': False}
+    gen.check_specific_stopping_criteria()
+    assert gen.status.get('gp_max_variance_low') is True, \
+        f'expected variance low=True, got status={gen.status}'
+    assert gen.status.get('gp_min_ei_low') is True, gen.status
+    print('  test_stopping_converged PASSED')
+
+
 if __name__ == '__main__':
     print('Task 2: pipeline tests')
     test_roundtrip_linear()
@@ -377,3 +451,8 @@ if __name__ == '__main__':
     test_gp_phase_count_and_bounds()
     test_gp_phase_triaxiality()
     print('TASK 5 TESTS PASSED')
+    print('Task 6: stopping-criteria tests')
+    test_stopping_no_gp_is_safe()
+    test_stopping_not_converged()
+    test_stopping_converged()
+    print('TASK 6 TESTS PASSED')

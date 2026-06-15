@@ -1450,6 +1450,39 @@ class BayesOptGenerator(ParameterGenerator):
         raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
         return self._raw_free_matrix_to_model_list(raw_free)
 
+    def check_specific_stopping_criteria(self):
+        """BayesOpt convergence signals plus the inherited chi2 backstop.
+
+        Calls super() first (the chi2-plateau backstop). Then, if a GP has
+        been fitted, checks (1) max posterior variance over a 256-point Sobol
+        grid and (2) the last qLogEI batch value.
+        """
+        super().check_specific_stopping_criteria()
+
+        if self._gp_model is None:
+            return
+
+        import torch
+        from torch.quasirandom import SobolEngine
+
+        d = len(self.free_par_idx)
+        sobol = SobolEngine(dimension=d, scramble=True)
+        X_grid = sobol.draw(256).to(dtype=torch.double)
+        with torch.no_grad():
+            posterior = self._gp_model.posterior(X_grid)
+            max_variance = posterior.variance.max().item()
+
+        self.status['gp_max_variance_low'] = (
+            self.max_gp_variance_threshold is not None
+            and max_variance < self.max_gp_variance_threshold)
+
+        if (self._last_acq_value is not None
+                and self.min_ei_threshold is not None):
+            self.status['gp_min_ei_low'] = (
+                self._last_acq_value < self.min_ei_threshold)
+        else:
+            self.status['gp_min_ei_low'] = False
+
 
 class FullGrid(ParameterGenerator):
     """
