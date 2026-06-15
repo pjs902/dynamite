@@ -151,9 +151,74 @@ def test_filtering():
     print('  test_filtering PASSED')
 
 
+# --------------------------------------------------------------------------
+# Task 3 tests: BayesOptGenerator __init__
+# --------------------------------------------------------------------------
+def _bo_settings():
+    return {
+        'which_chi2': 'kinchi2',
+        'generator_type': 'BayesOptGenerator',
+        'generator_settings': {
+            'batch_size': 8, 'n_orblib_configs': 4, 'n_ml_per_config': 2,
+            'n_initial_random': 6, 'acquisition_type': 'qLogEI',
+            'max_gp_variance_threshold': 1.0, 'min_ei_threshold': -1.5,
+        },
+        'stopping_criteria': {
+            'n_max_mods': 200, 'n_max_iter': 30,
+            'min_delta_chi2_abs': 0.001,
+        },
+    }
+
+
+def test_init():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    f = _mk_param('f', -1.0, 3.0, 1.0, logarithmic=True)
+    q = _mk_param('q', 0.05, 0.99, 0.6)
+    ps_ = make_parspace([ml, f, q])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings())
+    assert gen.batch_size == 8
+    assert gen.n_initial_random == 6
+    assert gen.free_param_names == ['ml', 'f', 'q']
+    assert gen._gp_model is None
+    assert gen.qobs is None  # MockComponent carries no qobs
+    print('  test_init PASSED')
+
+
+def test_init_rejects_double_delta():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    s['stopping_criteria']['min_delta_chi2_rel'] = 0.01  # now BOTH present
+    try:
+        ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    except ValueError:
+        print('  test_init_rejects_double_delta PASSED')
+        return
+    raise AssertionError('expected ValueError for two chi2-delta options')
+
+
+def test_init_rejects_missing_delta():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    del s['stopping_criteria']['min_delta_chi2_abs']  # now NEITHER present
+    try:
+        ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    except ValueError:
+        print('  test_init_rejects_missing_delta PASSED')
+        return
+    raise AssertionError('expected ValueError for missing chi2-delta option')
+
+
 if __name__ == '__main__':
     print('Task 2: pipeline tests')
     test_roundtrip_linear()
     test_roundtrip_log()
     test_filtering()
     print('TASK 2 TESTS PASSED')
+    print('Task 3: __init__ tests')
+    test_init()
+    test_init_rejects_double_delta()
+    test_init_rejects_missing_delta()
+    print('TASK 3 TESTS PASSED')

@@ -76,6 +76,24 @@ def raw_to_par_values(raw_values_row, free_params):
     return par_vals
 
 
+def get_qobs_from_system(system):
+    """Return qobs of the TriaxialVisibleComponent, or None if absent.
+
+    Traverses system.cmp_list defensively. Returns None if:
+    - system is None or has no cmp_list
+    - no TriaxialVisibleComponent (exact class, not BarDiskComponent subclass)
+    - qobs is nan or non-finite
+    """
+    if system is None or not hasattr(system, 'cmp_list'):
+        return None
+    for cmp in system.cmp_list:
+        if cmp.__class__.__name__ == 'TriaxialVisibleComponent':
+            qobs = getattr(cmp, 'qobs', None)
+            if qobs is not None and np.isfinite(qobs):
+                return float(qobs)
+    return None
+
+
 class Parameter(object):
     """Parameter of a model
 
@@ -1095,6 +1113,87 @@ class GridWalk(ParameterGenerator):
         # call recursively until all paramaters are done:
         if paridx < self.par_space.n_par - 1:
             self.grid_walk(center=center, par=self.par_space[paridx+1])
+
+
+class BayesOptGenerator(ParameterGenerator):
+    """Bayesian Optimization parameter generator (BoTorch backend).
+
+    Fits a Gaussian Process surrogate to chi2(parameters) in normalized
+    raw_value space and proposes a batch of candidates per iteration by
+    maximizing qLogExpectedImprovement. The triaxiality constraint on
+    (q, p, u) shape parameters is enforced via BoTorch nonlinear
+    inequality constraints when a TriaxialVisibleComponent is present.
+
+    generator_settings keys (with defaults):
+        batch_size : int = 8
+        n_orblib_configs : int = 4
+        n_ml_per_config : int = 2
+        n_initial_random : int = 10
+        acquisition_type : str = 'qLogEI'
+        max_gp_variance_threshold : float = 1.0
+        min_ei_threshold : float = -1.5
+
+    stopping_criteria: exactly one of min_delta_chi2_abs / min_delta_chi2_rel
+    (same rule as GridWalk).
+    """
+
+    def __init__(self, par_space=[], parspace_settings=None):
+        super().__init__(par_space=par_space,
+                         parspace_settings=parspace_settings,
+                         name='BayesOptGenerator')
+        self.logger = logging.getLogger(
+            f'{__name__}.{self.__class__.__name__}')
+
+        gen = (parspace_settings or {}).get('generator_settings') or {}
+        self.batch_size = gen.get('batch_size', 8)
+        self.n_orblib_configs = gen.get('n_orblib_configs', 4)
+        self.n_ml_per_config = gen.get('n_ml_per_config', 2)
+        self.n_initial_random = gen.get('n_initial_random', 10)
+        self.acquisition_type = gen.get('acquisition_type', 'qLogEI')
+        self.max_gp_variance_threshold = \
+            gen.get('max_gp_variance_threshold', 1.0)
+        self.min_ei_threshold = gen.get('min_ei_threshold', -1.5)
+
+        # Exactly one of the chi2-delta backstops (GridWalk pattern).
+        stop_crit = (parspace_settings or {}).get('stopping_criteria') or {}
+        stop_abs = 'min_delta_chi2_abs' in stop_crit
+        stop_rel = 'min_delta_chi2_rel' in stop_crit
+        if (stop_abs and stop_rel) or not (stop_abs or stop_rel):
+            text = ('BayesOptGenerator: specify exactly one of '
+                    'min_delta_chi2_abs, min_delta_chi2_rel '
+                    'in stopping_criteria')
+            self.logger.error(text)
+            raise ValueError(text)
+        self.min_delta_chi2_abs = stop_crit.get('min_delta_chi2_abs')
+        self.min_delta_chi2_rel = stop_crit.get('min_delta_chi2_rel')
+
+        # Free-parameter bookkeeping (indices into the full par_space).
+        self.free_par_idx = [i for i, p in enumerate(self.par_space)
+                             if not p.fixed]
+        self.free_params = [self.par_space[i] for i in self.free_par_idx]
+        self.lo_free = [self.lo[i] for i in self.free_par_idx]
+        self.hi_free = [self.hi[i] for i in self.free_par_idx]
+        self.free_param_names = [p.name for p in self.free_params]
+
+        # Position of q / p / u among the FREE parameters (for triaxiality).
+        self._free_qpu_idx = {}
+        for axis in ('q', 'p', 'u'):
+            for j, p in enumerate(self.free_params):
+                if p.name == axis:
+                    self._free_qpu_idx[axis] = j
+                    break
+
+        # qobs from the system that owns the parameter space (if any).
+        system = getattr(self.par_space, 'system', None)
+        self.qobs = get_qobs_from_system(system)
+
+        # GP state (set lazily during specific_generate_method).
+        self._gp_model = None
+        self._last_acq_value = None
+
+    def specific_generate_method(self, **kwargs):
+        """Placeholder — BoTorch proposal logic added in a later task."""
+        return
 
 
 class FullGrid(ParameterGenerator):
