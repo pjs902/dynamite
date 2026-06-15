@@ -6,6 +6,76 @@ import numpy as np
 from astropy.table import Table
 from dynamite import parameter_space as parspace
 
+# ---------------------------------------------------------------------------
+# Bayesian Optimization: training-data extraction pipeline
+# (used by BayesOptGenerator)
+# ---------------------------------------------------------------------------
+
+def extract_gp_training_data(all_models_table, parspace, which_chi2='kinchi2'):
+    """Extract normalized GP training data from an AllModels.table.
+
+    Parameter columns hold *par_value* (physical units). Converts to
+    *raw_value* (log10 for logarithmic params) and normalizes each free
+    parameter to [0, 1] using par_generator_settings lo/hi (raw space).
+
+    Returns
+    -------
+    X_norm : np.ndarray (n_valid, n_free) in [0, 1]
+    y : np.ndarray (n_valid,)  -- chi2 values
+    free_param_names : list[str]
+    lo_raw, hi_raw : np.ndarray (n_free,)  -- bounds in raw_value space
+    """
+    t = all_models_table
+    done_mask = np.asarray(t['all_done'], dtype=bool)
+    chi2_col = np.asarray(t[which_chi2], dtype=float)
+    finite_mask = np.isfinite(chi2_col)
+    valid_mask = done_mask & finite_mask
+
+    valid_rows = t[valid_mask]
+    y = chi2_col[valid_mask]
+
+    free_params = [p for p in parspace if not p.fixed]
+    free_param_names = [p.name for p in free_params]
+    n_free = len(free_params)
+    n_valid = int(np.sum(valid_mask))
+
+    lo_raw = np.array([p.par_generator_settings['lo'] for p in free_params],
+                      dtype=float)
+    hi_raw = np.array([p.par_generator_settings['hi'] for p in free_params],
+                      dtype=float)
+
+    raw_matrix = np.empty((n_valid, n_free), dtype=float)
+    for j, par in enumerate(free_params):
+        par_values = np.asarray(valid_rows[par.name], dtype=float)
+        if par.logarithmic:
+            raw_matrix[:, j] = np.log10(par_values)
+        else:
+            raw_matrix[:, j] = par_values
+
+    span = hi_raw - lo_raw
+    X_norm = (raw_matrix - lo_raw) / span
+    return X_norm, y, free_param_names, lo_raw, hi_raw
+
+
+def denormalize_to_raw(X_norm, lo_raw, hi_raw):
+    """Convert normalized [0,1] inputs back to raw_value space."""
+    X_norm = np.atleast_2d(X_norm)
+    span = hi_raw - lo_raw
+    return X_norm * span + lo_raw
+
+
+def raw_to_par_values(raw_values_row, free_params):
+    """Convert a single row of raw_values to par_values (physical units)."""
+    raw = np.asarray(raw_values_row, dtype=float)
+    par_vals = np.empty_like(raw)
+    for j, par in enumerate(free_params):
+        if par.logarithmic:
+            par_vals[j] = 10.0 ** raw[j]
+        else:
+            par_vals[j] = raw[j]
+    return par_vals
+
+
 class Parameter(object):
     """Parameter of a model
 
