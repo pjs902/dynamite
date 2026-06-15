@@ -451,9 +451,12 @@ class ModelInnerIterator(object):
         wts_done = False
         if self.do_dummy_run:
             parset = self.all_models.get_parset_from_row(row)
-            mod.chi2 = self.dummy_chi2_function(parset)
-            mod.kinchi2 = np.nan
+            chi2_val = self.dummy_chi2_function(parset)
+            mod.chi2 = chi2_val
+            mod.kinchi2 = chi2_val   # mirrors chi2 so which_chi2='kinchi2' works
             mod.kinmapchi2 = np.nan
+            orb_done = True
+            wts_done = True
         else:
             if not (get_orblib or get_weights):
                 msg = 'Nothing to run, specify get_orblib and/or get_weights'

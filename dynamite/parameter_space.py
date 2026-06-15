@@ -1270,7 +1270,10 @@ class BayesOptGenerator(ParameterGenerator):
 
         rows_unit = []
         for k in range(n_orblib):
-            if ml_free_j is None:
+            if ml_free_j is None or self.n_ml_per_config <= 1:
+                # No ml override: use Sobol-drawn values as-is.
+                # When n_ml_per_config=1, the grid formula (m+0.5)/1=0.5 would
+                # force ALL proposals to ml=midpoint regardless of Sobol.
                 rows_unit.append(base_unit[k])
             else:
                 for m in range(self.n_ml_per_config):
