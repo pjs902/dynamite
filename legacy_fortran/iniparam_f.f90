@@ -64,6 +64,10 @@ module initial_parameters
     ! orbit_dithering is the amount of dithering
     integer(kind=i4b), public :: nEner, nI2, nI3, orbit_dithering
     real(kind=dp), public :: rLogMin, rLogMax
+
+    ! r,th,ph sampling of spherical polar grid recording the intrinsic moments
+    integer(kind=i4b), public :: quad_nr, quad_nth, quad_nph
+
     !1 Solar mass = 1.98892 x 10^30 kg [Wikipedia]
     !1 AU = 1.4959787068d8 km [IAU 1976]
     !1 pc = 1.4959787068d8*(648d3/!dpi) km = 3.0856776e+13 km
@@ -73,11 +77,10 @@ module initial_parameters
     ![http://physics.nist.gov/cgi-bin/cuu/Value?bg|search_for=newtonian]
 
     !           G = 1.33381d11 km^3/(s^2 Msun)
-    !  critical density rho_crit = 3H^2/8piG
     real(kind=dp), parameter, public :: &
         grav_const_km = 6.67428e-11_dp*1.98892e30_dp/1e9_dp, &
-        parsec_km = 1.4959787068d8*(648d3/pi_d), &
-        rho_crit = (3.0_dp*(7.3d-5/parsec_km)**2)/(8.0_dp*pi_d*grav_const_km)
+        parsec_km = 1.4959787068d8*(648d3/pi_d)
+    real(kind=dp), public :: rho_crit
 
     private ! default private
     public :: iniparam, iniparam_bar
@@ -88,8 +91,7 @@ contains
 
         character(len=256) :: infil
         real(kind=dp), dimension(:), allocatable :: surf_pc, sigobs_arcsec
-        real(kind=dp) :: distance, upsilon, softl_arcsec, dm_fraction, concentration
-        real(kind=dp) :: darkmass, dum, dumdum
+        real(kind=dp) :: distance, upsilon, softl_arcsec, H
         integer(kind=i4b) :: j
 
         print *, "Gravitational Constant in km^3/(s^2 Msun)", grav_const_km
@@ -135,15 +137,25 @@ contains
         read (unit=13, fmt=*) nI3
         ! The number of orbital dithering
         read (unit=13, fmt=*) orbit_dithering
+        ! r sampling of spherical polar grid recording the intrinsic moments
+        read (unit=13, fmt=*) quad_nr
+        ! theta sampling of spherical polar grid recording the intrinsic moments
+        read (unit=13, fmt=*) quad_nth
+        ! phi sampling of spherical polar grid recording the intrinsic moments
+        read (unit=13, fmt=*) quad_nph
 
         !added by AW   ! The parameters of the NFW halo: rho_c in solarmass/pc^3 and r_c in arcsec
         !added by JJA, type=5 for gNFW with three inputs: c, DM virial mass in solarmass, and gamma
         read (unit=13, fmt=*) dm_profile_type, n_dmparam
         allocate (dmparam(n_dmparam))
         read (unit=13, fmt=*) dmparam(1:n_dmparam)
+        read (unit=13, fmt=*) H
 
         close (unit=13)
 
+        !  critical density rho_crit = 3H^2/8piG
+        rho_crit = (3.0_dp*(H/parsec_km)**2)/(8.0_dp*pi_d*grav_const_km)
+    
         ! apply dithering to the number of orbits
         Nener = Nener*orbit_dithering
         nI2 = nI2*orbit_dithering
@@ -192,8 +204,7 @@ contains
         real (kind=dp), dimension(:), allocatable :: surf_pc, sigobs_arcsec        ! (BT)
         real (kind=dp), dimension(:), allocatable :: surf_pc_d, sigobs_arcsec_d    ! (BT)
         real (kind=dp), dimension(:), allocatable :: surf_pc_b, sigobs_arcsec_b    ! (BT)
-        real(kind=dp) :: distance, upsilon, softl_arcsec, dm_fraction, concentration
-        real(kind=dp) :: darkmass, dum, dumdum
+        real(kind=dp) :: distance, upsilon, softl_arcsec, H
         integer(kind=i4b) :: j
 
         print *, "Gravitational Constant in km^3/(s^2 Msun)", grav_const_km
@@ -261,6 +272,12 @@ contains
         read (unit=13, fmt=*) nI3
         ! The number of orbital dithering
         read (unit=13, fmt=*) orbit_dithering
+        ! r sampling of spherical polar grid recording the intrinsic moments
+        read (unit=13, fmt=*) quad_nr
+        ! theta sampling of spherical polar grid recording the intrinsic moments
+        read (unit=13, fmt=*) quad_nth
+        ! phi sampling of spherical polar grid recording the intrinsic moments
+        read (unit=13, fmt=*) quad_nph
 
         !added by AW   ! The parameters of the NFW halo: rho_c in solarmass/pc^3 and r_c in arcsec
         !added by JJA, type=5 for gNFW with three inputs: c, DM virial mass in solarmass, and gamma
@@ -268,7 +285,12 @@ contains
         allocate (dmparam(n_dmparam))
         read (unit=13, fmt=*) dmparam(1:n_dmparam)
         read (unit=13, fmt=*) Omega   ! (BT) reading pattern speed
+        read (unit=13, fmt=*) H
+
         close (unit=13)
+
+        !  critical density rho_crit = 3H^2/8piG
+        rho_crit = (3.0_dp*(H/parsec_km)**2)/(8.0_dp*pi_d*grav_const_km)
 
         ! apply dithering to the number of orbits
         Nener = Nener*orbit_dithering
