@@ -89,16 +89,58 @@ Stopping criteria (in `stopping_criteria`): `n_max_mods`, `n_max_iter`, `min_del
 
 ---
 
-## Test coverage
+## Upstream merge (upstream/master → bayesopt, June 2026)
 
-| Test file | What it tests |
-|-----------|--------------|
-| `test_bayesopt_generator.py` | 14 unit tests: parameter encoding, init, Sobol warm-up, GP acquisition, stopping criteria, naming fix regression |
-| `compare_generators.py` | Dummy-mode comparison: BayesOpt vs GridWalk vs LegacyGridSearch on 1D quadratic bowl (ml free). BayesOpt reaches chi2≈15 (true min); grid methods stuck at 65 (step=1.0 resolution) |
-| `test_physical_validity.py` | Monkey-patches `validate_parset` to count rejections during a 2D (q-stars+ml) dummy run; asserts accepted models all have q-stars ≤ qobs |
-| `test_bayesopt_e2e.py` | End-to-end GP learning test via direct `gen.generate()` calls with synthetic chi2 landscape; no ModelIterator |
-| `run_bayesopt_real.py` | Full real DYNAMITE run (orbit + weights); asserts finite chi2 |
-| `run_comparison_real.py` | BayesOpt vs LegacyGridSearch with real orblib; prints per-iteration comparison table |
+### Changes required after merge
+
+The full upstream merge (commit `70faac7`) introduced several breaking changes that required adaptation:
+
+**1. `check_specific_stopping_criteria` typo fixed upstream**
+The base class method was `check_specific_stopping_critera` (typo) and our override matched. Upstream fixed the spelling. Required renaming our override and all test call sites.
+
+**2. `quad_nr` / `quad_nth` / `quad_nph` grid settings**
+Upstream added a spherical polar quadrant grid used for recording intrinsic moments. Changes spanned three layers:
+- `iniparam_f.f90`: new public integer variables + reads after `orbit_dithering` (auto-merge silently dropped these)
+- `orblib.py`: writes `quad_nr`, `quad_nth`, `quad_nph` to `parameters_pot.in` after `dithering`
+- All test YAMLs: `quad_nr: 10`, `quad_nth: 6`, `quad_nph: 6` added under `orblib_settings`
+
+**3. `weight_solvers.py` NameError** (`kins`/`pops` undefined)
+`origin/master` had a partial refactor in `get_observed_mass_constraints()` where `kins`/`pops` were used but never defined. Resolved by taking the full upstream version.
+
+**4. `model_iterator.py` staging files removed + `chi2_ext` added**
+Upstream removed staging files entirely and added optional `chi2_ext` to the output tuple via `self.has_chi2_ext`. Taken from upstream wholesale.
+
+**5. `contributes_to_potential` deprecated**
+Upstream changed this from a required attribute to deprecated (will be ignored). Our test YAMLs already added it during development; the deprecation warnings are benign and the attribute can be removed in a future cleanup.
+
+---
+
+## Comparison: BayesOpt vs GridWalk vs LegacyGridSearch (dummy mode, 2D)
+
+Benchmark on a synthetic 2D landscape: `chi2 = 80*(q-0.4)^2 + 200*(ml-5.5)^2 + 15` with 24–25 model budget. Run via `dev_tests/plot_generator_comparison.py`.
+
+| Generator | Models | Best chi2 | Notes |
+|-----------|--------|-----------|-------|
+| BayesOpt | 25 | ~16–19 | Concentrates near true minimum (q=0.4, ml=5.5) |
+| GridWalk | 18 | 65.03 | Grid resolution limits; steps away from minimum |
+| LegacyGridSearch | 25 | 65.00 | Fixed grid; same resolution issue |
+
+BayesOpt reaches chi2 within ~2–4 units of the true minimum (15); grid methods are stuck at 65 due to coarse step size. The advantage grows with dimensionality and budget constraints.
+
+Output plots: `dev_tests/generator_corner_comparison.png` (proposed models in parameter space, colored by iteration) and `dev_tests/generator_convergence.png` (running-best chi2 vs iteration).
+
+---
+
+## Real orblib test results
+
+`dev_tests/run_bayesopt_real.py` — NGC6278, ml-only free (nE=2, nI2=4, nI3=3, dithering=1), single CPU, 12 model budget.
+
+- Wall time: ~28s (MacBook M3 Pro)
+- Models run: 7 (stopped when `n_max_mods` exhausted across iterations)
+- Best `kinchi2`: ~14,438 at ml≈9.0
+- Iterations: 4 (batch_size=2), each 2 models except the last
+
+The real run confirms end-to-end integration: Fortran binaries read `quad_nr/nth/nph`, Python writes them, and BayesOpt proposes sensible ml values that converge within a small number of iterations.
 
 ---
 
@@ -117,8 +159,12 @@ Expected wall time for `bayesopt_ml_modelinner.yaml` (nE=2, nI2=4, nI3=3, ml onl
 | `dynamite/parameter_space.py:1132` | `BayesOptGenerator` class |
 | `dynamite/model_iterator.py:536` | Dummy run path (do_dummy_run=True) |
 | `dynamite/config_reader.py:1086` | Recognizes `BayesOptGenerator` type |
+| `dynamite/orblib.py:228` | Writes `quad_nr/nth/nph` to `parameters_pot.in` |
+| `legacy_fortran/iniparam_f.f90:69` | `quad_nr/nth/nph` public declarations |
 | `dev_tests/bayesopt_ml_modelinner.yaml` | ml-only, ModelInnerIterator, tiny orblib |
 | `dev_tests/bayesopt_ml_split.yaml` | ml-only, SplitModelIterator |
 | `dev_tests/bayesopt_qml_modelinner.yaml` | q-stars+ml free, validity testing |
 | `dev_tests/gridwalk_ml_modelinner.yaml` | Reference: GridWalk same criteria |
 | `dev_tests/legacygrid_ml_modelinner.yaml` | Reference: LegacyGridSearch same criteria |
+| `dev_tests/plot_generator_comparison.py` | Dummy-mode corner plot + convergence curve |
+| `dev_tests/run_bayesopt_real.py` | Full real orblib integration test |
