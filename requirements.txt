@@ -12,3 +12,5 @@ scipy>=1.11,<1.12
 six
 sparse>=0.14.0
 vorbin>=3.1.4
+# Bayesian Optimization parameter generator (BayesOptGenerator)
+botorch>=0.18.1
