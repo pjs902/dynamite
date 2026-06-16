@@ -189,6 +189,9 @@ def _parspace_bayesopt(nmodels, ncpus):
     # n_initial_random=12 gives 4 random draws per free parameter before the GP fits.
     # discretize_non_ml_params snaps c-dh (step=0.5) and f-dh (step=0.5) to grid
     # points after acquisition, so revisiting the same orbital config reuses the orblib.
+    # min_delta_chi2_abs=-1e6 disables the chi2-improvement stopping criterion so
+    # BayesOpt runs its full n_max_mods budget (it would fire prematurely after
+    # early Sobol draws where the best chi2 barely moves between iterations).
     return {
         'parameter_space_settings': {
             'generator_type': 'BayesOptGenerator',
@@ -202,7 +205,7 @@ def _parspace_bayesopt(nmodels, ncpus):
                 'discretize_non_ml_params': True,
             },
             'stopping_criteria': {
-                'min_delta_chi2_abs': 0.5,
+                'min_delta_chi2_abs': -1e6,
                 'n_max_mods': nmodels,
                 'n_max_iter': 200,
             },
