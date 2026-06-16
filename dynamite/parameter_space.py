@@ -1219,11 +1219,33 @@ class BayesOptGenerator(ParameterGenerator):
                              if self.warmup_mode == 'initial_guess' else [])
 
     def _build_axial_queue(self):
-        """Build axial queue for initial_guess warmup mode.
+        """Build the axial warm-up design as a list of normalized points.
 
-        Stub implementation for Task 1; real implementation in Task 3.
+        Returns [center, center+step_axis0, center-step_axis0,
+                         center+step_axis1, center-step_axis1, ...]
+        Total: 1 + 2*n_free points. All clipped to [0, 1].
         """
-        return []
+        center = self._initial_guess_to_unit()
+        step = self.initial_step_size
+        points = [center.copy()]
+        for j in range(len(self.free_params)):
+            for sign in (+1.0, -1.0):
+                pt = center.copy()
+                pt[j] = np.clip(center[j] + sign * step, 0.0, 1.0)
+                points.append(pt)
+        return points
+
+    def _propose_axial_batch(self):
+        """Pop up to batch_size points from _axial_queue; return model list.
+
+        Mutates self._axial_queue. Caller must check queue is non-empty.
+        """
+        lo_raw, hi_raw = self._norm_bounds_arrays()
+        span = hi_raw - lo_raw
+        taken = self._axial_queue[:self.batch_size]
+        self._axial_queue = self._axial_queue[self.batch_size:]
+        raw_free = np.array(taken) * span + lo_raw
+        return self._raw_free_matrix_to_model_list(raw_free)
 
     # --- candidate <-> Parameter conversion ----------------------------
 

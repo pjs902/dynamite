@@ -313,6 +313,98 @@ def test_initial_guess_to_unit_clips():
 
 
 # --------------------------------------------------------------------------
+# Task 3 tests: _build_axial_queue and _propose_axial_batch
+# --------------------------------------------------------------------------
+def test_build_axial_queue_size():
+    """1 + 2*n_free points in the queue."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    q = _mk_param('q-stars', 0.1, 0.9, 0.5)
+    ps_ = make_parspace([ml, q])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'ml': 5.0, 'q-stars': 0.5}))
+    assert len(gen._axial_queue) == 5  # 1 + 2*2
+    print('  test_build_axial_queue_size PASSED')
+
+
+def test_build_axial_queue_center_is_first():
+    """First point is the normalized center."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)  # 5.0 on [4,6] → 0.5
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'ml': 5.0}, step=0.1))
+    center = gen._axial_queue[0]
+    np.testing.assert_allclose(center, [0.5], atol=1e-12)
+    print('  test_build_axial_queue_center_is_first PASSED')
+
+
+def test_build_axial_queue_axial_steps():
+    """Points 1 and 2 are center ± step."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)  # center → 0.5
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'ml': 5.0}, step=0.1))
+    np.testing.assert_allclose(gen._axial_queue[1], [0.6], atol=1e-12)
+    np.testing.assert_allclose(gen._axial_queue[2], [0.4], atol=1e-12)
+    print('  test_build_axial_queue_axial_steps PASSED')
+
+
+def test_build_axial_queue_clips_at_boundary():
+    """Step that exceeds [0,1] is clipped."""
+    ml = _mk_param('ml', 4.0, 6.0, 6.0)  # center at raw 6.0 → normalized 1.0
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'ml': 6.0}, step=0.2))
+    np.testing.assert_allclose(gen._axial_queue[1], [1.0], atol=1e-12)
+    np.testing.assert_allclose(gen._axial_queue[2], [0.8], atol=1e-12)
+    print('  test_build_axial_queue_clips_at_boundary PASSED')
+
+
+def test_propose_axial_batch_pops_queue():
+    """_propose_axial_batch pops batch_size items from the front."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings_axial(guess={'ml': 5.0}, step=0.1)
+    s['generator_settings']['batch_size'] = 2
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    assert len(gen._axial_queue) == 3
+    models = gen._propose_axial_batch()
+    assert len(models) == 2
+    assert len(gen._axial_queue) == 1
+    print('  test_propose_axial_batch_pops_queue PASSED')
+
+
+def test_propose_axial_batch_partial():
+    """When fewer than batch_size points remain, proposes all remaining."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings_axial(guess={'ml': 5.0}, step=0.1)
+    s['generator_settings']['batch_size'] = 4  # bigger than queue (3)
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    models = gen._propose_axial_batch()
+    assert len(models) == 3
+    assert len(gen._axial_queue) == 0
+    print('  test_propose_axial_batch_partial PASSED')
+
+
+def test_propose_axial_batch_raw_values():
+    """First batch (center) gives correct raw ml value."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)  # center 0.5 → raw 5.0
+    ps_ = make_parspace([ml])
+    s = _bo_settings_axial(guess={'ml': 5.0}, step=0.1)
+    s['generator_settings']['batch_size'] = 1
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    models = gen._propose_axial_batch()
+    assert len(models) == 1
+    ml_param = [p for p in models[0] if p.name == 'ml'][0]
+    np.testing.assert_allclose(ml_param.raw_value, 5.0, atol=1e-10)
+    print('  test_propose_axial_batch_raw_values PASSED')
+
+
+# --------------------------------------------------------------------------
 # Task 4 tests: random warm-up phase
 # --------------------------------------------------------------------------
 def test_random_phase_count_and_bounds():
@@ -557,16 +649,31 @@ if __name__ == '__main__':
     test_roundtrip_log()
     test_filtering()
     print('TASK 2 TESTS PASSED')
-    print('Task 3: __init__ tests')
+    print('Task 3a: __init__ tests')
     test_init()
     test_init_rejects_double_delta()
     test_init_rejects_missing_delta()
-    print('TASK 3 TESTS PASSED')
+    print('TASK 3a TESTS PASSED')
     print('Task 1: warmup_mode tests')
     test_warmup_mode_default_is_sobol()
     test_warmup_mode_initial_guess_parsed()
     test_warmup_mode_invalid_raises()
     print('TASK 1 TESTS PASSED')
+    print('Task 2b: initial_guess_to_unit tests')
+    test_initial_guess_to_unit_midpoint_default()
+    test_initial_guess_to_unit_linear()
+    test_initial_guess_to_unit_log()
+    test_initial_guess_to_unit_clips()
+    print('TASK 2b TESTS PASSED')
+    print('Task 3: _build_axial_queue and _propose_axial_batch tests')
+    test_build_axial_queue_size()
+    test_build_axial_queue_center_is_first()
+    test_build_axial_queue_axial_steps()
+    test_build_axial_queue_clips_at_boundary()
+    test_propose_axial_batch_pops_queue()
+    test_propose_axial_batch_partial()
+    test_propose_axial_batch_raw_values()
+    print('TASK 3 TESTS PASSED')
     print('Task 4: random-phase tests')
     test_random_phase_count_and_bounds()
     test_random_phase_guard_empty_table()
