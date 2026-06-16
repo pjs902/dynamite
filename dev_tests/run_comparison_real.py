@@ -472,8 +472,8 @@ def print_summary(tables):
         chi2 = np.asarray(t['kinchi2'], dtype=float)
         i = int(np.argmin(chi2))
         ml_best = float(_colvals(t, 'ml')[i])
-        c_best  = float(_colvals(t, 'c-dh')[i])
-        f_best  = float(_colvals(t, 'f-dh')[i])
+        c_best  = np.log10(float(_colvals(t, 'c-dh')[i]))  # stored as linear; table in log10
+        f_best  = np.log10(float(_colvals(t, 'f-dh')[i]))
         print(f'{GEN_LABELS.get(gen, gen):<26} {len(t):>9} '
               f'{chi2[i]:>13.2f} {ml_best:>6.2f} {c_best:>7.3f} {f_best:>7.3f}')
     print(f'{"=" * 65}')
