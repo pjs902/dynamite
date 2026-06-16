@@ -1364,10 +1364,11 @@ class BayesOptGenerator(ParameterGenerator):
     def specific_generate_method(self, **kwargs):
         """Propose the next batch of models.
 
-        Warm-up: while fewer than n_initial_random completed-and-valid models
-        exist (covers the empty-table and double-call-on-iter-0 cases where
-        new rows have all_done=False / NaN chi2), return Sobol random proposals.
-        Otherwise fit a GP and maximize the acquisition function (Task 5).
+        Warm-up dispatch:
+          - 'initial_guess' mode: pop from _axial_queue while non-empty,
+            then go straight to GP (queue exhaustion is the warm-up signal).
+          - 'sobol' mode: Sobol random proposals until n_valid >= n_initial_random,
+            then GP.
         """
         table = self.current_models.table
         if len(table) == 0:
@@ -1377,11 +1378,18 @@ class BayesOptGenerator(ParameterGenerator):
             finite = np.isfinite(np.asarray(table[self.chi2], dtype=float))
             n_valid = int(np.sum(done & finite))
 
-        if n_valid < self.n_initial_random:
-            self._gp_model = None
-            self._last_acq_value = None
-            self.model_list = self._propose_random_batch()
-            return
+        if self.warmup_mode == 'initial_guess':
+            if self._axial_queue:
+                self._gp_model = None
+                self._last_acq_value = None
+                self.model_list = self._propose_axial_batch()
+                return
+        else:  # 'sobol'
+            if n_valid < self.n_initial_random:
+                self._gp_model = None
+                self._last_acq_value = None
+                self.model_list = self._propose_random_batch()
+                return
 
         self.model_list = self._gp_acquisition_batch()
 

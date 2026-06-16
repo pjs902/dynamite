@@ -242,7 +242,7 @@ def test_warmup_mode_initial_guess_parsed():
                                    guess={'ml': 5.5}, step=0.15))
     assert gen.warmup_mode == 'initial_guess'
     assert gen.initial_step_size == 0.15
-    # _axial_queue is [] because _build_axial_queue stub returns []
+    # _axial_queue has 3 items (1 center + 2 axial steps for 1 free param)
     assert isinstance(gen._axial_queue, list)
     print('  test_warmup_mode_initial_guess_parsed PASSED')
 
@@ -405,7 +405,71 @@ def test_propose_axial_batch_raw_values():
 
 
 # --------------------------------------------------------------------------
-# Task 4 tests: random warm-up phase
+# Task 4 tests: specific_generate_method dispatch
+# --------------------------------------------------------------------------
+def _make_gen_axial(n_free=1, guess=None, step=0.1, batch_size=1):
+    """Build a BayesOptGenerator in initial_guess mode with empty mock table."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    params = [ml]
+    if n_free == 2:
+        q = _mk_param('q-stars', 0.1, 0.9, 0.5)
+        params.append(q)
+    ps_ = make_parspace(params)
+    names = [p.name for p in params]
+    s = _bo_settings_axial(guess=guess or {'ml': 5.0}, step=step)
+    s['generator_settings']['batch_size'] = batch_size
+    s['generator_settings']['n_initial_random'] = 0
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    gen.current_models = MockAllModels(names)
+    gen.chi2 = 'kinchi2'
+    return gen
+
+
+def test_generate_axial_uses_queue_not_sobol():
+    """specific_generate_method pops from queue while it's non-empty."""
+    gen = _make_gen_axial(batch_size=1)
+    initial_queue_len = len(gen._axial_queue)  # 3 for 1 free param
+    gen.specific_generate_method()
+    assert len(gen._axial_queue) == initial_queue_len - 1
+    assert len(gen.model_list) == 1
+    print('  test_generate_axial_uses_queue_not_sobol PASSED')
+
+
+def test_generate_axial_exhausts_queue_in_order():
+    """All 3 axial points proposed before GP is attempted (1 free param)."""
+    gen = _make_gen_axial(batch_size=1)
+    queue_before = [q.copy() for q in gen._axial_queue]  # 3 points
+    lo_raw, hi_raw = gen._norm_bounds_arrays()
+    span = hi_raw[0] - lo_raw[0]
+    expected_raws = [q[0] * span + lo_raw[0] for q in queue_before]
+    proposed_raws = []
+    for _ in range(3):
+        gen.specific_generate_method()
+        ml_val = [p for p in gen.model_list[0] if p.name == 'ml'][0].raw_value
+        proposed_raws.append(ml_val)
+    assert len(gen._axial_queue) == 0
+    np.testing.assert_allclose(proposed_raws, expected_raws, atol=1e-10)
+    print('  test_generate_axial_exhausts_queue_in_order PASSED')
+
+
+def test_generate_sobol_mode_unchanged():
+    """In sobol mode with n_valid=0, uses Sobol (not axial) and _gp_model stays None."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()   # default sobol mode, n_initial_random=6
+    s['generator_settings']['batch_size'] = 2
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    gen.current_models = MockAllModels(['ml'])
+    gen.chi2 = 'kinchi2'
+    gen.specific_generate_method()
+    assert len(gen.model_list) == 2
+    assert gen._gp_model is None
+    assert gen._axial_queue == []
+    print('  test_generate_sobol_mode_unchanged PASSED')
+
+
+# --------------------------------------------------------------------------
+# Task 5 tests: random warm-up phase (previously mislabeled as Task 4)
 # --------------------------------------------------------------------------
 def test_random_phase_count_and_bounds():
     ml = _mk_param('ml', 4.0, 6.0, 5.0)
