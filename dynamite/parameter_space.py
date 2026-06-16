@@ -1167,6 +1167,13 @@ class BayesOptGenerator(ParameterGenerator):
         self.max_gp_variance_threshold = \
             gen.get('max_gp_variance_threshold', 1.0)
         self.min_ei_threshold = gen.get('min_ei_threshold', -1.5)
+        self.warmup_mode = gen.get('warmup_mode', 'sobol')
+        if self.warmup_mode not in ('sobol', 'initial_guess'):
+            raise ValueError(
+                f"BayesOptGenerator: warmup_mode must be 'sobol' or "
+                f"'initial_guess', got {self.warmup_mode!r}")
+        self.initial_step_size = float(gen.get('initial_step_size', 0.1))
+        self._initial_guess_phys = gen.get('initial_guess', {})
 
         # Exactly one of the chi2-delta backstops (GridWalk pattern).
         stop_crit = (parspace_settings or {}).get('stopping_criteria') or {}
@@ -1206,6 +1213,17 @@ class BayesOptGenerator(ParameterGenerator):
         # GP state (set lazily during specific_generate_method).
         self._gp_model = None
         self._last_acq_value = None
+
+        # Build axial queue after free_params bookkeeping is complete.
+        self._axial_queue = (self._build_axial_queue()
+                             if self.warmup_mode == 'initial_guess' else [])
+
+    def _build_axial_queue(self):
+        """Build axial queue for initial_guess warmup mode.
+
+        Stub implementation for Task 1; real implementation in Task 3.
+        """
+        return []
 
     # --- candidate <-> Parameter conversion ----------------------------
 

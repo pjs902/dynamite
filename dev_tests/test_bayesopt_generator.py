@@ -212,6 +212,55 @@ def test_init_rejects_missing_delta():
 
 
 # --------------------------------------------------------------------------
+# Task 1 tests: warmup_mode parsing
+# --------------------------------------------------------------------------
+def _bo_settings_axial(guess=None, step=0.1):
+    """Settings dict for initial_guess warmup mode."""
+    s = _bo_settings()
+    s['generator_settings']['warmup_mode'] = 'initial_guess'
+    s['generator_settings']['initial_step_size'] = step
+    if guess is not None:
+        s['generator_settings']['initial_guess'] = guess
+    return s
+
+
+def test_warmup_mode_default_is_sobol():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    assert gen.warmup_mode == 'sobol'
+    assert gen.initial_step_size == 0.1
+    assert gen._axial_queue == []
+    print('  test_warmup_mode_default_is_sobol PASSED')
+
+
+def test_warmup_mode_initial_guess_parsed():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'ml': 5.5}, step=0.15))
+    assert gen.warmup_mode == 'initial_guess'
+    assert gen.initial_step_size == 0.15
+    # _axial_queue is [] because _build_axial_queue stub returns []
+    assert isinstance(gen._axial_queue, list)
+    print('  test_warmup_mode_initial_guess_parsed PASSED')
+
+
+def test_warmup_mode_invalid_raises():
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    s['generator_settings']['warmup_mode'] = 'bad_mode'
+    try:
+        ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    except ValueError:
+        print('  test_warmup_mode_invalid_raises PASSED')
+        return
+    raise AssertionError('expected ValueError for invalid warmup_mode')
+
+
+# --------------------------------------------------------------------------
 # Task 4 tests: random warm-up phase
 # --------------------------------------------------------------------------
 def test_random_phase_count_and_bounds():
@@ -461,6 +510,11 @@ if __name__ == '__main__':
     test_init_rejects_double_delta()
     test_init_rejects_missing_delta()
     print('TASK 3 TESTS PASSED')
+    print('Task 1: warmup_mode tests')
+    test_warmup_mode_default_is_sobol()
+    test_warmup_mode_initial_guess_parsed()
+    test_warmup_mode_invalid_raises()
+    print('TASK 1 TESTS PASSED')
     print('Task 4: random-phase tests')
     test_random_phase_count_and_bounds()
     test_random_phase_guard_empty_table()
