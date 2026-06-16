@@ -166,7 +166,7 @@ Output plots: `dev_tests/generator_corner_comparison.png` (proposed models in pa
 
 ## Production comparison script
 
-`dev_tests/run_comparison_real.py` — full real-orblib comparison of all three generators on NGC6278 with 3 free parameters (ml, q-stars, c-dh).
+`dev_tests/run_comparison_real.py` — full real-orblib comparison of all three generators on NGC6278 with 3 free parameters (ml, c-dh, f-dh — both NFW halo params; stars shape q fixed to avoid triaxiality validity conflicts at batch_size=1).
 
 ```bash
 # Basic run — adjust ncpus and nmodels to match the server

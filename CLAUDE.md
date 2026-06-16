@@ -132,7 +132,7 @@ Located in `parameter_space.py:~1132`. Requires `botorch`, `gpytorch`, `torch`.
 
 **Tests:** `dev_tests/test_bayesopt_generator.py` — run with `pytest dev_tests/test_bayesopt_generator.py` (38 tests). Reference YAMLs: `dev_tests/bayesopt_ml_modelinner.yaml`, `dev_tests/bayesopt_qml_modelinner.yaml`.
 
-**Production comparison script:** `dev_tests/run_comparison_real.py` — runs BayesOpt, GridWalk, and LegacyGridSearch on NGC6278 with 3 free params (ml, q-stars, c-dh) and generates corner/convergence/chi2-surface plots.
+**Production comparison script:** `dev_tests/run_comparison_real.py` — runs BayesOpt, GridWalk, and LegacyGridSearch on NGC6278 with 3 free params (ml, c-dh, f-dh — both NFW halo params) and generates corner/convergence/chi2-surface plots. Stars shape (q) is fixed to avoid triaxiality validity conflicts at batch_size=1.
 
 ```bash
 python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60

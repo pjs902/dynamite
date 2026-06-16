@@ -2,8 +2,9 @@
 """
 Real-data comparison: BayesOptGenerator vs GridWalk vs LegacyGridSearch on NGC6278.
 
-Three free parameters: ml (mass-to-light), q-stars (intrinsic axis ratio),
-c-dh (NFW halo concentration, log-space).
+Three free parameters: ml (mass-to-light), c-dh (NFW concentration, log-space),
+f-dh (NFW mass ratio M200/M_stars, log-space). Stars shape fixed to avoid
+triaxiality validity conflicts at batch_size=1.
 
 Usage:
     python run_comparison_real.py [options]
@@ -23,6 +24,9 @@ import argparse
 import datetime
 import pathlib
 import sys
+
+import matplotlib
+matplotlib.use('Agg')  # headless — must be set before any pyplot import
 
 import numpy as np
 import yaml
@@ -54,7 +58,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 def _system_block():
-    """NGC6278 galaxy components. Free params: ml, q-stars, c-dh."""
+    """NGC6278 galaxy components. Free params: ml, c-dh, f-dh."""
     return {
         'system_attributes': {'distMPc': 39.96, 'name': 'NGC6278'},
         'system_components': {
@@ -82,7 +86,7 @@ def _system_block():
                         'par_generator_settings': {
                             'lo': 2.0, 'hi': 4.0, 'step': 0.5, 'minstep': 0.1},
                         'logarithmic': True,
-                        'fixed': False,   # FREE
+                        'fixed': False,   # FREE — log10(NFW concentration)
                         'value': 3.0,
                         'LaTeX': '$\\log(c_\\mathrm{NFW})$',
                     },
@@ -90,7 +94,7 @@ def _system_block():
                         'par_generator_settings': {
                             'lo': 0.0, 'hi': 2.0, 'step': 0.5, 'minstep': 0.1},
                         'logarithmic': True,
-                        'fixed': True,
+                        'fixed': False,   # FREE — log10(M200/M_stars)
                         'value': 1.0,
                         'LaTeX': '$\\log(M_{200}/M_\\star)$',
                     },
@@ -106,7 +110,7 @@ def _system_block():
                     'q': {
                         'par_generator_settings': {
                             'lo': 0.05, 'hi': 0.99, 'step': 0.1, 'minstep': 0.02},
-                        'fixed': False,   # FREE
+                        'fixed': True,  # fixed — avoids triaxiality validity conflicts
                         'value': 0.54,
                         'LaTeX': '$q_\\star$',
                     },
@@ -183,7 +187,7 @@ def _shared_block(input_dir, output_dir, ncpus, nE, nI2, nI3, dithering):
 
 def _parspace_bayesopt(nmodels, ncpus):
     # n_initial_random=12 gives 4 random draws per free parameter before the GP fits.
-    # discretize_non_ml_params snaps q-stars (step=0.1) and c-dh (step=0.5) to grid
+    # discretize_non_ml_params snaps c-dh (step=0.5) and f-dh (step=0.5) to grid
     # points after acquisition, so revisiting the same orbital config reuses the orblib.
     return {
         'parameter_space_settings': {
@@ -289,11 +293,11 @@ def run_generator(gen_name, cfg, gen_outdir, cfg_path):
 # Load results
 # ---------------------------------------------------------------------------
 
-FREE_PARAMS  = ['ml', 'q-stars', 'c-dh']
+FREE_PARAMS  = ['ml', 'c-dh', 'f-dh']
 PARAM_LATEX  = {
-    'ml':      r'$\Upsilon_r$',
-    'q-stars': r'$q_\star$',
-    'c-dh':    r'$\log(c_\mathrm{NFW})$',
+    'ml':    r'$\Upsilon_r$',
+    'c-dh':  r'$\log(c_\mathrm{NFW})$',
+    'f-dh':  r'$\log(M_{200}/M_\star)$',
 }
 GEN_LABELS = {
     'bayesopt':   'BayesOpt (GP + qLogEI)',
@@ -334,7 +338,7 @@ def _colvals(t, param):
 def make_corner_plot(tables, outpath):
     import matplotlib.pyplot as plt
 
-    pairs = [('ml', 'q-stars'), ('ml', 'c-dh'), ('q-stars', 'c-dh')]
+    pairs = [('ml', 'c-dh'), ('ml', 'f-dh'), ('c-dh', 'f-dh')]
     gens  = [g for g in ('bayesopt', 'gridwalk', 'legacygrid') if tables.get(g) is not None]
     n_gen, n_pair = len(gens), len(pairs)
 
@@ -452,9 +456,9 @@ def make_chi2_surfaces_plot(tables, outpath):
 
 def print_summary(tables):
     print(f'\n{"=" * 65}')
-    print('SUMMARY — NGC6278 real orblib comparison (ml, q-stars, c-dh free)')
+    print('SUMMARY — NGC6278 real orblib comparison (ml, c-dh, f-dh free)')
     print(f'{"=" * 65}')
-    hdr = f'{"Generator":<26} {"N models":>9} {"Best kinchi2":>13} {"ml":>6} {"q":>6} {"log c":>7}'
+    hdr = f'{"Generator":<26} {"N models":>9} {"Best kinchi2":>13} {"ml":>6} {"log c":>7} {"log f":>7}'
     print(hdr)
     print('-' * 65)
     for gen in ('bayesopt', 'gridwalk', 'legacygrid'):
@@ -464,11 +468,11 @@ def print_summary(tables):
             continue
         chi2 = np.asarray(t['kinchi2'], dtype=float)
         i = int(np.argmin(chi2))
-        ml_best  = float(_colvals(t, 'ml')[i])
-        q_best   = float(_colvals(t, 'q-stars')[i])
-        c_best   = float(_colvals(t, 'c-dh')[i])
+        ml_best = float(_colvals(t, 'ml')[i])
+        c_best  = float(_colvals(t, 'c-dh')[i])
+        f_best  = float(_colvals(t, 'f-dh')[i])
         print(f'{GEN_LABELS.get(gen, gen):<26} {len(t):>9} '
-              f'{chi2[i]:>13.2f} {ml_best:>6.2f} {q_best:>6.3f} {c_best:>7.3f}')
+              f'{chi2[i]:>13.2f} {ml_best:>6.2f} {c_best:>7.3f} {f_best:>7.3f}')
     print(f'{"=" * 65}')
 
 
