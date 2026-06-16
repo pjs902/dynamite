@@ -261,6 +261,58 @@ def test_warmup_mode_invalid_raises():
 
 
 # --------------------------------------------------------------------------
+# Task 2 tests: _initial_guess_to_unit
+# --------------------------------------------------------------------------
+def test_initial_guess_to_unit_midpoint_default():
+    """Parameters absent from initial_guess → 0.5."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    q = _mk_param('q-stars', 0.1, 0.9, 0.5)
+    ps_ = make_parspace([ml, q])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(guess={}))
+    center = gen._initial_guess_to_unit()
+    np.testing.assert_allclose(center, [0.5, 0.5], atol=1e-12)
+    print('  test_initial_guess_to_unit_midpoint_default PASSED')
+
+
+def test_initial_guess_to_unit_linear():
+    """ml=4.5 on [4,6] → normalized 0.25."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'ml': 4.5}))
+    center = gen._initial_guess_to_unit()
+    np.testing.assert_allclose(center, [0.25], atol=1e-12)
+    print('  test_initial_guess_to_unit_linear PASSED')
+
+
+def test_initial_guess_to_unit_log():
+    """Logarithmic param f: raw bounds [0,2] (physical 1..100).
+    Physical 10 → raw 1.0 → normalized (1-0)/(2-0) = 0.5."""
+    f = _mk_param('f', 0.0, 2.0, 1.0, logarithmic=True)
+    ps_ = make_parspace([f])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'f': 10.0}))
+    center = gen._initial_guess_to_unit()
+    np.testing.assert_allclose(center, [0.5], atol=1e-12)
+    print('  test_initial_guess_to_unit_log PASSED')
+
+
+def test_initial_guess_to_unit_clips():
+    """Values outside bounds are clipped to [0,1]."""
+    ml = _mk_param('ml', 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_,
+                               parspace_settings=_bo_settings_axial(
+                                   guess={'ml': 99.0}))
+    center = gen._initial_guess_to_unit()
+    np.testing.assert_allclose(center, [1.0], atol=1e-12)
+    print('  test_initial_guess_to_unit_clips PASSED')
+
+
+# --------------------------------------------------------------------------
 # Task 4 tests: random warm-up phase
 # --------------------------------------------------------------------------
 def test_random_phase_count_and_bounds():

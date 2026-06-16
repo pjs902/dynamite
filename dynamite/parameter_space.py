@@ -1247,6 +1247,29 @@ class BayesOptGenerator(ParameterGenerator):
         return (np.array(self.lo_free, dtype=float),
                 np.array(self.hi_free, dtype=float))
 
+    def _initial_guess_to_unit(self):
+        """Convert initial_guess dict (physical values) to normalized center.
+
+        Parameters absent from initial_guess default to 0.5 (midpoint).
+        Values outside [lo, hi] are clipped and a warning is logged.
+        Returns np.ndarray of shape (n_free,) with values in [0, 1].
+        """
+        lo_raw, hi_raw = self._norm_bounds_arrays()
+        center = np.full(len(self.free_params), 0.5)
+        for j, p in enumerate(self.free_params):
+            if p.name not in self._initial_guess_phys:
+                continue
+            phys = self._initial_guess_phys[p.name]
+            raw = p.get_raw_value_from_par_value(phys)
+            span = hi_raw[j] - lo_raw[j]
+            norm = (raw - lo_raw[j]) / span if span > 0 else 0.5
+            if norm < 0.0 or norm > 1.0:
+                self.logger.warning(
+                    f'initial_guess {p.name}={phys} normalizes to {norm:.3f}, '
+                    f'clipping to [0, 1]')
+            center[j] = np.clip(norm, 0.0, 1.0)
+        return center
+
     def _sobol_unit(self, n):
         """Return n Sobol points in the unit cube [0,1]^n_free (numpy)."""
         import torch
