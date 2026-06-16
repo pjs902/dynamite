@@ -1214,6 +1214,10 @@ class BayesOptGenerator(ParameterGenerator):
         self._gp_model = None
         self._last_acq_value = None
 
+        # Snap non-ml GP proposals to the grid defined by par_generator_settings.step.
+        self.discretize_non_ml_params = gen.get('discretize_non_ml_params', False)
+        self._norm_steps = self._build_norm_steps() if self.discretize_non_ml_params else None
+
         # Build axial queue after free_params bookkeeping is complete.
         self._axial_queue = (self._build_axial_queue()
                              if self.warmup_mode == 'initial_guess' else [])
@@ -1268,6 +1272,42 @@ class BayesOptGenerator(ParameterGenerator):
         """Return (lo_raw, hi_raw) numpy arrays over free parameters."""
         return (np.array(self.lo_free, dtype=float),
                 np.array(self.hi_free, dtype=float))
+
+    def _build_norm_steps(self):
+        """Build per-free-param step sizes in normalized [0,1] space.
+
+        ml is excluded (step=0) so it stays continuous — only potential-shape
+        params are discretized. Returns np.ndarray of shape (n_free,).
+        """
+        lo_raw, hi_raw = self._norm_bounds_arrays()
+        steps = np.zeros(len(self.free_params))
+        for j, p in enumerate(self.free_params):
+            if p.name == 'ml':
+                continue
+            pgs = p.par_generator_settings or {}
+            step_raw = pgs.get('step', 0.0) or 0.0
+            span = hi_raw[j] - lo_raw[j]
+            if step_raw > 0 and span > 0:
+                steps[j] = step_raw / span
+        return steps
+
+    def _snap_to_grid(self, unit_matrix):
+        """Snap non-ml columns of unit_matrix to their normalized grid steps.
+
+        unit_matrix : np.ndarray of shape (n_candidates, n_free), values in [0,1].
+        Returns a copy with snapped values, clamped to [0, 1].
+        Only active when discretize_non_ml_params=True; otherwise returns
+        unit_matrix unchanged.
+        """
+        if not self.discretize_non_ml_params or self._norm_steps is None:
+            return unit_matrix
+        result = unit_matrix.copy()
+        for j, step in enumerate(self._norm_steps):
+            if step <= 0:
+                continue
+            result[:, j] = np.clip(
+                np.round(result[:, j] / step) * step, 0.0, 1.0)
+        return result
 
     def _initial_guess_to_unit(self):
         """Convert initial_guess dict (physical values) to normalized center.
@@ -1536,7 +1576,7 @@ class BayesOptGenerator(ParameterGenerator):
         candidates, acq_value = optimize_acqf(**opt_kwargs)
         self._last_acq_value = float(acq_value.item())
 
-        cand_np = candidates.detach().numpy()
+        cand_np = self._snap_to_grid(candidates.detach().numpy())
         raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
         return self._raw_free_matrix_to_model_list(raw_free)
 

@@ -708,6 +708,104 @@ def test_free_qpu_idx_with_suffixed_names():
 
 
 # --------------------------------------------------------------------------
+# discretize_non_ml_params tests (_build_norm_steps, _snap_to_grid)
+# --------------------------------------------------------------------------
+def _mk_param_with_step(name, lo, hi, step, value, logarithmic=False, fixed=False):
+    return Parameter(name=name, fixed=fixed, logarithmic=logarithmic,
+                     value=value,
+                     par_generator_settings={'lo': lo, 'hi': hi, 'step': step})
+
+
+def _bo_settings_discrete():
+    s = _bo_settings()
+    s['generator_settings']['discretize_non_ml_params'] = True
+    return s
+
+
+def test_build_norm_steps_excludes_ml():
+    """ml step is always 0 regardless of par_generator_settings."""
+    ml = _mk_param_with_step('ml', 4.0, 6.0, step=0.5, value=5.0)
+    q  = _mk_param_with_step('q-stars', 0.2, 0.8, step=0.1, value=0.5)
+    ps_ = make_parspace([q, ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings_discrete())
+    # q-stars step in normalized: 0.1 / (0.8-0.2) = 1/6 ≈ 0.1667
+    # ml step should be 0 (excluded)
+    assert gen.discretize_non_ml_params is True
+    assert gen._norm_steps is not None
+    ml_j = [j for j, p in enumerate(gen.free_params) if p.name == 'ml'][0]
+    q_j  = [j for j, p in enumerate(gen.free_params) if p.name == 'q-stars'][0]
+    assert gen._norm_steps[ml_j] == 0.0, f'ml norm_step should be 0, got {gen._norm_steps[ml_j]}'
+    np.testing.assert_allclose(gen._norm_steps[q_j], 0.1 / 0.6, rtol=1e-9)
+    print('  test_build_norm_steps_excludes_ml PASSED')
+
+
+def test_build_norm_steps_disabled():
+    """_norm_steps is None when discretize_non_ml_params is False (default)."""
+    ml = _mk_param_with_step('ml', 4.0, 6.0, step=0.5, value=5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    assert gen.discretize_non_ml_params is False
+    assert gen._norm_steps is None
+    print('  test_build_norm_steps_disabled PASSED')
+
+
+def test_snap_to_grid_snaps_non_ml():
+    """_snap_to_grid snaps q-stars to nearest grid step; ml stays continuous."""
+    ml = _mk_param_with_step('ml', 4.0, 6.0, step=0.5, value=5.0)
+    q  = _mk_param_with_step('q-stars', 0.0, 1.0, step=0.25, value=0.5)
+    ps_ = make_parspace([q, ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings_discrete())
+    # q-stars step in normalized = 0.25 / 1.0 = 0.25
+    # proposal: q_norm=0.37 → nearest grid 0.25; ml_norm=0.63 → stays 0.63
+    unit = np.array([[0.37, 0.63]])
+    snapped = gen._snap_to_grid(unit)
+    q_j  = [j for j, p in enumerate(gen.free_params) if p.name == 'q-stars'][0]
+    ml_j = [j for j, p in enumerate(gen.free_params) if p.name == 'ml'][0]
+    np.testing.assert_allclose(snapped[0, q_j], 0.25, atol=1e-9)
+    np.testing.assert_allclose(snapped[0, ml_j], 0.63, atol=1e-9)
+    print('  test_snap_to_grid_snaps_non_ml PASSED')
+
+
+def test_snap_to_grid_clamps_to_unit():
+    """Values that would snap outside [0,1] are clamped."""
+    q = _mk_param_with_step('q-stars', 0.0, 1.0, step=0.3, value=0.5)
+    ps_ = make_parspace([q])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings_discrete())
+    # step=0.3; nearest grid to 0.95 is round(0.95/0.3)*0.3 = 3*0.3 = 0.9; ok
+    # nearest grid to 0.99 is round(0.99/0.3)*0.3 = 3*0.3 = 0.9; ok
+    # nearest grid to 1.0  is round(1.0/0.3)*0.3  = 3*0.3 = 0.9; ok not >1
+    unit = np.array([[0.99], [1.0]])
+    snapped = gen._snap_to_grid(unit)
+    assert np.all(snapped >= 0.0) and np.all(snapped <= 1.0), \
+        f'Snapped values outside [0,1]: {snapped}'
+    print('  test_snap_to_grid_clamps_to_unit PASSED')
+
+
+def test_snap_to_grid_passthrough_when_disabled():
+    """_snap_to_grid returns unchanged array when discretize_non_ml_params=False."""
+    q = _mk_param_with_step('q-stars', 0.0, 1.0, step=0.25, value=0.5)
+    ps_ = make_parspace([q])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    unit = np.array([[0.37]])
+    result = gen._snap_to_grid(unit)
+    np.testing.assert_array_equal(result, unit)
+    print('  test_snap_to_grid_passthrough_when_disabled PASSED')
+
+
+def test_snap_to_grid_no_step_defined():
+    """Params without a step key in par_generator_settings are not snapped."""
+    # _mk_param (not _mk_param_with_step) has no 'step' key
+    q = _mk_param('q-stars', 0.0, 1.0, value=0.5)
+    ps_ = make_parspace([q])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings_discrete())
+    assert gen._norm_steps[0] == 0.0, 'no step → norm_step should be 0'
+    unit = np.array([[0.37]])
+    result = gen._snap_to_grid(unit)
+    np.testing.assert_array_equal(result, unit)
+    print('  test_snap_to_grid_no_step_defined PASSED')
+
+
+# --------------------------------------------------------------------------
 # Task 5 tests: dummy-mode integration for initial_guess warm-up
 # --------------------------------------------------------------------------
 def test_axial_warmup_dummy_run():

@@ -85,7 +85,19 @@ Minimum required keys in `generator_settings`:
 
 Recognized by `config_reader.py` under `generator_type: BayesOptGenerator`.
 
-Additional optional keys: `acquisition_type` (default `qLogEI`), `max_gp_variance_threshold`, `min_ei_threshold`.
+Additional optional keys:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `acquisition_type` | `qLogEI` | Acquisition function type |
+| `max_gp_variance_threshold` | 1.0 | GP variance stopping threshold |
+| `min_ei_threshold` | -1.5 | Log-EI stopping threshold |
+| `warmup_mode` | `sobol` | `sobol` or `initial_guess` |
+| `initial_guess` | `{}` | Dict of physical param values for axial center |
+| `initial_step_size` | 0.1 | Axial step in normalized [0,1] space |
+| `discretize_non_ml_params` | `False` | Snap non-ml GP proposals to par grid steps |
+
+`discretize_non_ml_params: true` snaps each non-ml free parameter's GP proposals to the nearest value on its grid (defined by `par_generator_settings.step`). `ml` is never snapped — it stays continuous. When two GP proposals snap to the same potential-parameter grid cell, DYNAMITE's `is_new_orblib()` logic reuses the existing orblib for the second model, running only the weight solve. This can cut wall time by `n_ml_per_config`× when orblib runs dominate.
 
 Stopping criteria (in `stopping_criteria`): `n_max_mods`, `n_max_iter`, `min_delta_chi2_abs`, `gp_max_variance_low`, `gp_min_ei_low`.
 

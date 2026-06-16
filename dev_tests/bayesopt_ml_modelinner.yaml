@@ -166,6 +166,12 @@ parameter_space_settings:
         # initial_guess:
         #     ml: 5.5          # physical value; unmapped params default to center
         # initial_step_size: 0.1
+        #
+        # Snap non-ml GP proposals to the parameter grid defined by each
+        # par_generator_settings.step, encouraging orblib reuse across ml values.
+        # ml stays continuous; all other free params snap to their nearest grid point.
+        # Requires step to be set in par_generator_settings for each non-ml param.
+        # discretize_non_ml_params: false
         n_initial_random: 4   # random warm-up models before GP kicks in (sobol mode)
         batch_size: 2         # models proposed per iteration
         n_orblib_configs: 2   # distinct orblib configs per batch
