@@ -156,7 +156,17 @@ parameter_space_settings:
     generator_type: "BayesOptGenerator"
     which_chi2: "kinchi2"
     generator_settings:
-        n_initial_random: 4   # random warm-up models before GP kicks in
+        # warmup_mode controls the initial exploration strategy:
+        #   'sobol'         (default) — n_initial_random quasi-random Sobol draws
+        #   'initial_guess' — 1 center point + ±step per free param (1+2*n_free total)
+        #                     provide 'initial_guess' dict with physical param values
+        #                     and 'initial_step_size' (normalized [0,1], default 0.1)
+        # Example for initial_guess mode:
+        # warmup_mode: initial_guess
+        # initial_guess:
+        #     ml: 5.5          # physical value; unmapped params default to center
+        # initial_step_size: 0.1
+        n_initial_random: 4   # random warm-up models before GP kicks in (sobol mode)
         batch_size: 2         # models proposed per iteration
         n_orblib_configs: 2   # distinct orblib configs per batch
         n_ml_per_config: 1    # ml values per orblib config

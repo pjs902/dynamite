@@ -707,6 +707,92 @@ def test_free_qpu_idx_with_suffixed_names():
     print('  test_free_qpu_idx_with_suffixed_names PASSED')
 
 
+# --------------------------------------------------------------------------
+# Task 5 tests: dummy-mode integration for initial_guess warm-up
+# --------------------------------------------------------------------------
+def test_axial_warmup_dummy_run():
+    """Full dummy loop: 2 free params → 5 axial proposals before GP."""
+    import yaml
+    import tempfile
+    import os
+    import importlib
+
+    # The module-level setup stubs 'dynamite' to avoid loading the full package.
+    # For this integration test we need the real package. Remove the stub
+    # temporarily, import the real dynamite, then reload the submodules so
+    # the stub in sys.modules['dynamite'] is replaced by the real package.
+    import sys as _sys
+
+    # The test file stubs sys.modules['dynamite'] to avoid loading the full
+    # package. ModelIterator uses multiprocess, whose workers deserialize
+    # pickled objects referencing dynamite submodules (e.g. dynamite.data).
+    # The real package must stay in sys.modules for the entire ModelIterator
+    # call — restore the stub only after the run completes.
+    _stub = _sys.modules.pop('dynamite', None)
+    import dynamite as _dyn
+    _sys.modules['dynamite'] = _dyn
+    config_reader = importlib.import_module('dynamite.config_reader')
+    model_iterator = importlib.import_module('dynamite.model_iterator')
+
+    try:
+        base_yaml = '/Users/pesmith/research/dynamite/dev_tests/bayesopt_qml_modelinner.yaml'
+        with open(base_yaml) as f:
+            cfg = yaml.safe_load(f)
+
+        gs = cfg['parameter_space_settings']['generator_settings']
+        gs['warmup_mode'] = 'initial_guess'
+        gs['initial_guess'] = {'ml': 5.0, 'q-stars': 0.5}
+        gs['initial_step_size'] = 0.1
+        gs['batch_size'] = 2
+        gs['n_orblib_configs'] = 2
+        gs['n_ml_per_config'] = 1
+        cfg['parameter_space_settings']['stopping_criteria']['n_max_mods'] = 12
+        cfg['parameter_space_settings']['stopping_criteria']['n_max_iter'] = 10
+        # min_delta_chi2 fires when an axial probe explores a bad direction; set to
+        # a large negative so it never triggers (exactly one must be present)
+        cfg['parameter_space_settings']['stopping_criteria']['min_delta_chi2_abs'] = -1e6
+        cfg['parameter_space_settings']['stopping_criteria'].pop('min_delta_chi2_rel', None)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg['io_settings']['output_directory'] = tmpdir + '/'
+            cfg['io_settings']['input_directory'] = (
+                '/Users/pesmith/research/dynamite/dev_tests/NGC6278_input/')
+            cfg_path = os.path.join(tmpdir, 'test_axial.yaml')
+            with open(cfg_path, 'w') as f:
+                yaml.dump(cfg, f)
+
+            def _chi2(parset):
+                q  = float(parset['q-stars'])
+                ml = float(parset['ml'])
+                return 80.0 * (q - 0.4)**2 + 200.0 * (ml - 5.5)**2 + 15.0
+
+            print('  [axial test] Config loaded, starting dummy ModelIterator...')
+            c = config_reader.Configuration(cfg_path, reset_logging=False)
+            model_iterator.ModelIterator(c, do_dummy_run=True,
+                                         dummy_chi2_function=_chi2,
+                                         plots=False)
+
+            table = c.all_models.table
+            done = [row for row in table if row['all_done']]
+            print(f'  [axial test] Completed models: {len(done)}')
+            for i, row in enumerate(done):
+                q_val = float(row['q-stars']) if 'q-stars' in table.colnames else float('nan')
+                print(f'    [{i}] q={q_val:.3f}  ml={float(row["ml"]):.3f}  '
+                      f'kinchi2={float(row["kinchi2"]):.2f}  '
+                      f'phase={"axial" if i < 5 else "GP"}')
+            assert len(done) >= 5, (
+                f'Expected ≥5 completed models (1+2*2=5 axial points), '
+                f'got {len(done)}')
+            finite_chi2 = [r for r in done if np.isfinite(float(r['kinchi2']))]
+            assert len(finite_chi2) >= 1, 'Expected at least 1 finite kinchi2'
+    finally:
+        # Restore stub so remaining unit tests are unaffected
+        if _stub is not None:
+            _sys.modules['dynamite'] = _stub
+
+    print('  test_axial_warmup_dummy_run PASSED')
+
+
 if __name__ == '__main__':
     print('Task 2: pipeline tests')
     test_roundtrip_linear()
@@ -754,4 +840,7 @@ if __name__ == '__main__':
     print('Name fix: qpu suffix regression test')
     test_free_qpu_idx_with_suffixed_names()
     print('NAME FIX TESTS PASSED')
+    print('Task 5 integration: axial dummy-mode test')
+    test_axial_warmup_dummy_run()
+    print('TASK 5 INTEGRATION TESTS PASSED')
     print('ALL BAYESOPT TESTS PASSED')

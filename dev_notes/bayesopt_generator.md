@@ -8,9 +8,30 @@
 
 ## Architecture
 
+### Warm-up modes
+
+`warmup_mode` (generator setting, default `'sobol'`) controls the initial exploration strategy before the GP is fit.
+
+#### `sobol` (default)
+
+Quasi-random Sobol space-filling draws until `n_done_finite >= n_initial_random`. The GP is not fit during warm-up; `specific_generate_method` calls `_propose_random_batch`. This is equivalent to the original behaviour.
+
+#### `initial_guess`
+
+Axial design centred on a user-provided physical point: 1 center point + 2 axial perturbations per free parameter = `1 + 2 * n_free` warm-up models total. With 5 free params this is 11 models — fits the ~10-model RAM budget before GP kicks in.
+
+Configuration keys:
+- `warmup_mode: initial_guess`
+- `initial_guess` (dict): physical parameter values for the center; omitted params default to normalized midpoint (0.5)
+- `initial_step_size` (float, default 0.1): step size in normalized [0,1] space for axial probes
+
+The queue is built at `__init__` time by `_build_axial_queue()` and consumed by `_propose_axial_batch()`. When the queue is empty, `specific_generate_method` falls through to `_gp_acquisition_batch()`.
+
+**Important**: set `min_delta_chi2_abs` to a large negative value (e.g. −1 × 10⁶) when using `initial_guess` mode, because axial probes deliberately explore bad directions and would trigger the stopping criterion prematurely. Only `n_max_mods` and `n_max_iter` should govern the axial phase.
+
 ### Warm-up + GP phases
 
-Generation proceeds in two phases controlled by `n_initial_random`:
+Generation proceeds in two phases controlled by `n_initial_random` (sobol mode) or the axial queue (initial_guess mode):
 
 1. **Sobol warm-up** (while `n_done_finite < n_initial_random`): quasi-random space-filling via `SobolEngine(scramble=True)`. The GP is not fit yet; there are no acquisition calls.
 2. **GP phase**: `SingleTaskGP` fit via BOTORCH's `fit_gpytorch_mll`; `qLogEI` acquisition maximized with `optimize_acqf`. Proposes `batch_size` candidates per iteration.
