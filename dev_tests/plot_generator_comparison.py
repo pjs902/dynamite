@@ -236,7 +236,7 @@ ax_ml.set_xlim(ML_LO, ML_HI)
 ax_ml.legend(fontsize=8, loc='upper right')
 
 out_path = 'generator_corner_comparison.png'
-fig.savefig(out_path, dpi=150, bbox_inches='tight')
+fig.savefig(out_path, dpi=250, bbox_inches='tight')
 print(f'\nSaved {out_path}')
 plt.close(fig)
 
@@ -266,7 +266,7 @@ ax2.set_yscale('log')
 ax2.grid(True, alpha=0.3)
 
 conv_path = 'generator_convergence.png'
-fig2.savefig(conv_path, dpi=150, bbox_inches='tight')
+fig2.savefig(conv_path, dpi=250, bbox_inches='tight')
 print(f'Saved {conv_path}')
 plt.close(fig2)
 

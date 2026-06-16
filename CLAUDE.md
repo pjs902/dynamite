@@ -132,4 +132,14 @@ Located in `parameter_space.py:~1132`. Requires `botorch`, `gpytorch`, `torch`.
 
 **Tests:** `dev_tests/test_bayesopt_generator.py` — run with `pytest dev_tests/test_bayesopt_generator.py` (38 tests). Reference YAMLs: `dev_tests/bayesopt_ml_modelinner.yaml`, `dev_tests/bayesopt_qml_modelinner.yaml`.
 
+**Production comparison script:** `dev_tests/run_comparison_real.py` — runs BayesOpt, GridWalk, and LegacyGridSearch on NGC6278 with 3 free params (ml, q-stars, c-dh) and generates corner/convergence/chi2-surface plots.
+
+```bash
+python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60
+# or with larger orblib:
+python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60 --nE 7 --nI2 7 --nI3 7 --dithering 3
+# resume a partial run (completed generators are skipped):
+python dev_tests/run_comparison_real.py --output-dir comparison_20260616_120000 --ncpus 8 --nmodels 60
+```
+
 **Upstream merge note:** `iniparam_f.f90` must declare `quad_nr`, `quad_nth`, `quad_nph` as public integers and read them from unit 13. `orblib.py` must write them after `dithering`. All config YAMLs need `quad_nr: 10`, `quad_nth: 6`, `quad_nph: 6` under `orblib_settings`.

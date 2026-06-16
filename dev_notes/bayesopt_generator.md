@@ -164,16 +164,47 @@ Output plots: `dev_tests/generator_corner_comparison.png` (proposed models in pa
 
 ---
 
-## Real orblib test results
+## Production comparison script
+
+`dev_tests/run_comparison_real.py` — full real-orblib comparison of all three generators on NGC6278 with 3 free parameters (ml, q-stars, c-dh).
+
+```bash
+# Basic run — adjust ncpus and nmodels to match the server
+python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60
+
+# Larger orblib (more realistic chi2 surface)
+python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60 --nE 7 --nI2 7 --nI3 7 --dithering 3
+
+# Resume a partial run (completed generators are skipped automatically)
+python dev_tests/run_comparison_real.py --output-dir comparison_20260616_120000 --ncpus 8 --nmodels 60
+
+# Regenerate plots only from existing results
+python dev_tests/run_comparison_real.py --output-dir comparison_20260616_120000 --skip-runs
+```
+
+Defaults: ncpus=4, nmodels=60, orblib=(5,5,5), dithering=1. Output goes to a timestamped directory `comparison_YYYYMMDD_HHMMSS/` containing:
+
+| File | Contents |
+|------|----------|
+| `config_{gen}.yaml` | DYNAMITE config used for each generator |
+| `{gen}/all_models.ecsv` | Full model table per generator |
+| `corner_proposals.png` | Parameter-space proposals coloured by model index |
+| `convergence.png` | Running-minimum chi2 vs cumulative model count |
+| `chi2_surfaces.png` | Marginal chi2 vs each free parameter |
+
+BayesOpt runs with `discretize_non_ml_params=True` (orblib reuse) and `n_initial_random=12` (4 per free param). GridWalk starts from parameter default values and walks ±step. LegacyGridSearch seeds from all models within 4 chi2 units of the current minimum.
+
+---
+
+## Real orblib test results (dev, 1D)
 
 `dev_tests/run_bayesopt_real.py` — NGC6278, ml-only free (nE=2, nI2=4, nI3=3, dithering=1), single CPU, 12 model budget.
 
 - Wall time: ~28s (MacBook M3 Pro)
-- Models run: 7 (stopped when `n_max_mods` exhausted across iterations)
+- Models run: 7
 - Best `kinchi2`: ~14,438 at ml≈9.0
-- Iterations: 4 (batch_size=2), each 2 models except the last
 
-The real run confirms end-to-end integration: Fortran binaries read `quad_nr/nth/nph`, Python writes them, and BayesOpt proposes sensible ml values that converge within a small number of iterations.
+Confirms end-to-end integration: Fortran binaries read `quad_nr/nth/nph`, Python writes them, BayesOpt proposes sensible values.
 
 ---
 

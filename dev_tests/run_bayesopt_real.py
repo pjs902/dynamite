@@ -15,8 +15,8 @@ import dynamite as dyn
 import warnings
 warnings.filterwarnings('ignore')
 
-print('Loading bayesopt_ml_modelinner.yaml ...', flush=True)
-c = dyn.config_reader.Configuration('bayesopt_ml_modelinner.yaml')
+print('Loading bayesopt_qml_modelinner.yaml ...', flush=True)
+c = dyn.config_reader.Configuration('bayesopt_qml_modelinner.yaml')
 free = [p.name for p in c.parspace if not p.fixed]
 n_max = c.settings.parameter_space_settings['stopping_criteria']['n_max_mods']
 print(f'Free parameters: {free}')
