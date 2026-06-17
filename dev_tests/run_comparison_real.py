@@ -297,6 +297,7 @@ def run_generator(gen_name, cfg, gen_outdir, cfg_path):
 # ---------------------------------------------------------------------------
 
 FREE_PARAMS  = ['ml', 'c-dh', 'f-dh']
+LOG_PARAMS   = {'c-dh', 'f-dh'}   # stored as linear in all_models; take log10 before plotting
 PARAM_LATEX  = {
     'ml':    r'$\Upsilon_r$',
     'c-dh':  r'$\log(c_\mathrm{NFW})$',
@@ -360,6 +361,10 @@ def make_corner_plot(tables, outpath):
             ax = axes[row][col]
             xv = _colvals(t, xp)
             yv = _colvals(t, yp)
+            if xp in LOG_PARAMS:
+                xv = np.log10(np.asarray(xv, dtype=float))
+            if yp in LOG_PARAMS:
+                yv = np.log10(np.asarray(yv, dtype=float))
             sc = ax.scatter(xv, yv, c=np.arange(n), cmap='coolwarm',
                             s=45, alpha=0.85, edgecolors='k', linewidths=0.3,
                             vmin=0, vmax=max(n - 1, 1), zorder=3)
@@ -403,7 +408,7 @@ def make_convergence_plot(tables, outpath):
 
     ax.set_xlabel('Cumulative models evaluated', fontsize=11)
     ax.set_ylabel(r'Running minimum $\chi^2_\mathrm{kin}$', fontsize=11)
-    ax.set_title('NGC6278 — Convergence (3 free params: ml, $q_\\star$, $\\log c$)',
+    ax.set_title(r'NGC6278 — Convergence (3 free params: $\Upsilon_r$, $\log c_\mathrm{NFW}$, $\log(M_{200}/M_\star)$)',
                  fontsize=11)
     ax.legend(fontsize=9, framealpha=0.9)
     ax.grid(True, lw=0.4, alpha=0.5)
@@ -436,6 +441,8 @@ def make_chi2_surfaces_plot(tables, outpath):
         for col, par in enumerate(FREE_PARAMS):
             ax = axes[row][col]
             xv = _colvals(t, par)
+            if par in LOG_PARAMS:
+                xv = np.log10(np.asarray(xv, dtype=float))
             ax.scatter(xv, chi2, c=np.arange(n), cmap='coolwarm',
                        s=35, alpha=0.75, edgecolors='k', linewidths=0.3,
                        vmin=0, vmax=max(n - 1, 1))
