@@ -135,11 +135,11 @@ Located in `parameter_space.py:~1132`. Requires `botorch`, `gpytorch`, `torch`.
 **Production comparison script:** `dev_tests/run_comparison_real.py` — runs BayesOpt, GridWalk, and LegacyGridSearch on NGC6278 with 3 free params (ml, c-dh, f-dh — both NFW halo params) and generates corner/convergence/chi2-surface plots. Stars shape (q) is fixed to avoid triaxiality validity conflicts at batch_size=1.
 
 ```bash
-python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60
-# or with larger orblib:
-python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60 --nE 7 --nI2 7 --nI3 7 --dithering 3
-# resume a partial run (completed generators are skipped):
-python dev_tests/run_comparison_real.py --output-dir comparison_20260616_120000 --ncpus 8 --nmodels 60
+python dev_tests/run_comparison_real.py --ncpus 48 --nmodels 100 --nE 11 --nI2 7 --nI3 5 --dithering 3
+# resume / regenerate plots only:
+python dev_tests/run_comparison_real.py --output-dir comparison_YYYYMMDD_HHMMSS --skip-runs
 ```
+
+**Results (2026-06-17, large orblib):** BayesOpt 5814 chi2 at ml=3.88 vs GridWalk 6352 at ml=4.0 — ~540 unit advantage, and finds non-grid ml values. Small orblib (nE≤5) gives wrong landscape; use nE≥11. `LOG_PARAMS={'c-dh','f-dh'}` controls log10-transform for plotting (all_models stores linear values).
 
 **Upstream merge note:** `iniparam_f.f90` must declare `quad_nr`, `quad_nth`, `quad_nph` as public integers and read them from unit 13. `orblib.py` must write them after `dithering`. All config YAMLs need `quad_nr: 10`, `quad_nth: 6`, `quad_nph: 6` under `orblib_settings`.

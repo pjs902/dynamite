@@ -172,13 +172,13 @@ Output plots: `dev_tests/generator_corner_comparison.png` (proposed models in pa
 # Basic run — adjust ncpus and nmodels to match the server
 python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60
 
-# Larger orblib (more realistic chi2 surface)
-python dev_tests/run_comparison_real.py --ncpus 8 --nmodels 60 --nE 7 --nI2 7 --nI3 7 --dithering 3
+# Large orblib (recommended for real science)
+python dev_tests/run_comparison_real.py --ncpus 48 --nmodels 100 --nE 11 --nI2 7 --nI3 5 --dithering 3
 
 # Resume a partial run (completed generators are skipped automatically)
 python dev_tests/run_comparison_real.py --output-dir comparison_20260616_120000 --ncpus 8 --nmodels 60
 
-# Regenerate plots only from existing results
+# Regenerate plots only from existing results (e.g. after pulling plot fixes)
 python dev_tests/run_comparison_real.py --output-dir comparison_20260616_120000 --skip-runs
 ```
 
@@ -192,7 +192,29 @@ Defaults: ncpus=4, nmodels=60, orblib=(5,5,5), dithering=1. Output goes to a tim
 | `convergence.png` | Running-minimum chi2 vs cumulative model count |
 | `chi2_surfaces.png` | Marginal chi2 vs each free parameter |
 
-BayesOpt runs with `discretize_non_ml_params=True` (orblib reuse) and `n_initial_random=12` (4 per free param). GridWalk starts from parameter default values and walks ±step. LegacyGridSearch seeds from all models within 4 chi2 units of the current minimum.
+BayesOpt runs with `discretize_non_ml_params=True` (orblib reuse), `n_initial_random=12`, and `min_delta_chi2_abs=-1e6` (runs to n_max_mods; chi2-improvement criterion fires prematurely during Sobol warm-up). GridWalk starts from parameter default values and walks ±step. LegacyGridSearch seeds from all models within 4 chi2 units of the current minimum.
+
+**Important:** `LOG_PARAMS = {'c-dh', 'f-dh'}` in the script controls which parameters are log10-transformed before plotting (DYNAMITE stores physical/linear values in all_models.ecsv even for logarithmic parameters).
+
+---
+
+## Real orblib comparison results (NGC6278, 2026-06-17)
+
+Full run on server: `--ncpus 48 --nmodels 100 --nE 11 --nI2 7 --nI3 5 --dithering 3`
+
+| Generator | Models | Best kinchi2 | ml | log c | log f |
+|-----------|--------|-------------|-----|-------|-------|
+| BayesOpt | 144 | 5813.54 | 3.88 | 2.00 | 0.50 |
+| GridWalk | 46 | 6351.99 | 4.00 | 2.00 | 0.00 |
+| LegacyGridSearch | 22 | 6459.82 | 5.00 | 2.00 | 0.00 |
+
+**Key findings:**
+- BayesOpt wins by ~540 chi2 units and finds ml=3.88 (between grid points — impossible for grid methods)
+- Convergence structure: Sobol warm-up flat at ~10k chi2 for first 48 models, GP drops to ~6k at model 48, slow refinement to 5.8k by model 144
+- All generators agree: ml≈4, log_c at lower boundary (=2.0), log_f poorly constrained
+- **Small orblib (nE=5) gave a completely wrong chi2 landscape** (minimum at upper boundary, chi2~16500) — the large orblib is essential
+- log_c=2.0 is the lower boundary for all three generators — parameter range should be extended: try lo=1.0 for log_c
+- log_f≈0–0.5 is also near the lower boundary — dark matter total mass is poorly constrained by inner kinematics (expected)
 
 ---
 
