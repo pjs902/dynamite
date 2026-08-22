@@ -19,7 +19,7 @@ sparse>=0.14.0
 vorbin>=3.1.4
 numba<0.63
 # Bayesian Optimization parameter generator (BayesOptGenerator)
-botorch>=0.18.1
+botorch>=0.18.1,<0.21
 
 # Coordinate-descent BVLS solver (nnls_solver: adelie)
 adelie>=1.1
