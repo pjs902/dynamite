@@ -1071,6 +1071,33 @@ def test_exploration_schedule():
     print("  test_exploration_schedule PASSED")
 
 
+def test_annealed_members_concentrate():
+    """With a linear mean in x, small tau draws must sit near x=1."""
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    s["generator_settings"]["n_annealed_members"] = 4
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+
+    class FakeGP:
+        def posterior(self, X):
+            return types.SimpleNamespace(mean=X.sum(dim=-1))
+
+    gen._gp_model = FakeGP()
+    pts = gen._sample_annealed_members(n=8, tau=0.01)
+    assert pts.shape == (8, 1)
+    assert np.all(pts > 0.9), pts
+    print("  test_annealed_members_concentrate PASSED")
+
+
+def test_annealed_default_count():
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    assert gen.n_annealed_members == 2  # ceil(8/4)
+    print("  test_annealed_default_count PASSED")
+
+
 class _ListHandler(logging.Handler):
     def __init__(self, out):
         super().__init__()
@@ -1159,4 +1186,8 @@ if __name__ == "__main__":
     print("v2 Task 6: exploration schedule tests")
     test_exploration_schedule()
     print("V2 TASK 6 TESTS PASSED")
+    print("v2 Task 7: annealed member tests")
+    test_annealed_members_concentrate()
+    test_annealed_default_count()
+    print("V2 TASK 7 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")

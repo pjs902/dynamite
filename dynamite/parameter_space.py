@@ -1139,6 +1139,12 @@ class BayesOptGenerator(ParameterGenerator):
         self.beta_end = float(gen.get("beta_end", 0.2))
         self.anneal_batches = int(gen.get("anneal_batches", 10))
         self._gp_batches_done = 0
+        # R2: tempered-posterior batch members (SALE annealed objective).
+        self.n_annealed_members = int(gen.get("n_annealed_members", max(1, self.batch_size // 4)))
+        self.tau_start = float(gen.get("tau_start", 1.0))
+        self.tau_decay = float(gen.get("tau_decay", 0.7))
+        self.tau_min = float(gen.get("tau_min", 0.05))
+        self.annealed_max_draws = int(gen.get("annealed_max_draws", 200000))
         self.warmup_mode = gen.get("warmup_mode", "sobol")
         if self.warmup_mode not in ("sobol", "initial_guess"):
             raise ValueError(
@@ -1699,8 +1705,49 @@ class BayesOptGenerator(ParameterGenerator):
         self._gp_batches_done += 1
 
         cand_np = self._dedup_and_fill(self._snap_to_grid(candidates.detach().numpy()))
+        if self.n_annealed_members > 0:
+            tau = max(self.tau_min, self.tau_start * (self.tau_decay**self._gp_batches_done))
+            n_annealed = min(self.n_annealed_members, self.batch_size - 1)
+            annealed = self._sample_annealed_members(n_annealed, tau)
+            cand_np = np.vstack([cand_np[: self.batch_size - n_annealed], annealed])
+            cand_np = self._dedup_and_fill(cand_np)
         raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
         return self._raw_free_matrix_to_model_list(raw_free)
+
+    def _gp_posterior_mean(self, X_unit_t):
+        """Posterior mean of the fitted GP at unit-space points (torch)."""
+        import torch
+
+        with torch.no_grad():
+            return self._gp_model.posterior(X_unit_t).mean
+
+    def _sample_annealed_members(self, n, tau):
+        """Draw n feasible unit-space points ~ exp(mu(x)/tau) by rejection
+        (SALE's annealed objective, mean-only; spec R2).
+
+        Diversity without the homogenization of joint-qEI batches; robust
+        to spurious narrow GP spikes. Falls back to projected Sobol draws
+        if acceptance is too low within `annealed_max_draws` candidates.
+        """
+        import torch
+
+        chunk = max(256, 16 * n)
+        out = []
+        total = 0
+        while len(out) < n and total < self.annealed_max_draws:
+            cand = self._project_unit_to_feasible_qpu(self._sobol_unit(min(chunk, self.annealed_max_draws - total)))
+            total += cand.shape[0]
+            mu = self._gp_posterior_mean(torch.tensor(cand, dtype=torch.double)).numpy().ravel()
+            w = np.exp((mu - mu.max()) / tau)
+            acc = np.random.random(cand.shape[0]) < w
+            out.extend(cand[acc].tolist())
+        if len(out) < n:
+            self.logger.warning(
+                f"annealed sampling accepted {len(out)}/{n}; filling remainder with projected Sobol draws"
+            )
+            fill = self._project_unit_to_feasible_qpu(self._sobol_unit(n - len(out)))
+            out.extend(fill.tolist())
+        return np.array(out[:n])
 
     def _exploration_beta(self, n_gp_batches_done):
         """qLogEI exploration weight; None -> BoTorch heuristic (constant
