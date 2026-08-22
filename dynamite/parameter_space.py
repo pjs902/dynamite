@@ -1152,6 +1152,19 @@ class BayesOptGenerator(ParameterGenerator):
         self.pred_eps_abs = float(gen.get("pred_eps_abs", 0.0))
         self._pending_predictions = {}
         self._pred_streak = 0
+        # R4: TuRBO-lite single trust region (off by default).
+        self.trust_region = bool(gen.get("trust_region", False))
+        self.tr_trigger_frac = float(gen.get("tr_trigger_frac", 0.1))
+        self.tr_side_init = float(gen.get("tr_side_init", 0.3))
+        self.tr_grow = float(gen.get("tr_grow", 1.3))
+        self.tr_shrink = float(gen.get("tr_shrink", 0.7))
+        self.tr_min_side = float(gen.get("tr_min_side", 0.05))
+        self.tr_max_side = float(gen.get("tr_max_side", 0.6))
+        self.tr_patience = int(gen.get("tr_patience", 2))
+        self._tr_side = self.tr_side_init
+        self._tr_center = None
+        self._tr_stale_batches = 0
+        self._tr_best_seen = None
         self.warmup_mode = gen.get("warmup_mode", "sobol")
         if self.warmup_mode not in ("sobol", "initial_guess"):
             raise ValueError(
@@ -1695,7 +1708,14 @@ class BayesOptGenerator(ParameterGenerator):
         self._gp_model = model
 
         d = len(self.free_par_idx)
-        bounds = torch.stack([torch.zeros(d, dtype=torch.double), torch.ones(d, dtype=torch.double)])
+        tr = self._tr_bounds()
+        if tr is not None:
+            self.logger.info(
+                f"trust region active: side={self._tr_side:.3f} around {np.round(self._tr_center, 3).tolist()}"
+            )
+            bounds = torch.tensor(tr, dtype=torch.double)
+        else:
+            bounds = torch.stack([torch.zeros(d, dtype=torch.double), torch.ones(d, dtype=torch.double)])
         beta = self._exploration_beta(self._gp_batches_done)
         acqf = (
             qLogExpectedImprovement(model=model, best_f=Y_t.max())
@@ -1773,6 +1793,59 @@ class BayesOptGenerator(ParameterGenerator):
             return None
         frac = min(1.0, n_gp_batches_done / max(1, self.anneal_batches))
         return self.beta_start + frac * (self.beta_end - self.beta_start)
+
+    def _knn_radius(self, X_norm):
+        """Mean distance from the incumbent to its 5 nearest evaluated
+        neighbours, as a fraction of the box diagonal (SALE's local
+        resolution proxy, curvature dropped for v1)."""
+        chi2 = np.asarray(self.current_models.table[self.chi2], dtype=float)
+        i0 = int(np.nanargmin(np.where(np.isfinite(chi2), chi2, np.inf)))
+        diffs = X_norm - X_norm[i0]
+        dist = np.linalg.norm(diffs, axis=1)
+        order = np.argsort(dist)
+        knn = [dist[j] for j in order[1:6] if dist[j] > 0][:5]
+        if not knn:
+            return np.inf
+        return float(np.mean(knn)) / np.sqrt(len(self.free_par_idx))
+
+    def _maybe_update_tr(self, table):
+        """Grow/shrink the trust region from batch outcomes (TuRBO-lite)."""
+        if not self.trust_region:
+            return
+        done = np.asarray(table["all_done"], dtype=bool)
+        chi2 = np.asarray(table[self.chi2], dtype=float)
+        best = float(np.nanmin(np.where(done & np.isfinite(chi2), chi2, np.inf)))
+        if self._tr_center is not None:
+            if best < self._tr_best_seen - 1e-12:
+                self._tr_side = min(self._tr_side * self.tr_grow, self.tr_max_side)
+                self._tr_stale_batches = 0
+            else:
+                self._tr_stale_batches += 1
+                if self._tr_stale_batches >= self.tr_patience:
+                    self._tr_side = max(self._tr_side * self.tr_shrink, self.tr_min_side)
+                    self._tr_stale_batches = 0
+        self._tr_best_seen = best
+
+    def _tr_bounds(self):
+        """Unit-space acquisition box: trust region if active+triggered,
+        else None (full box)."""
+        if not self.trust_region:
+            return None
+        table = self.current_models.table
+        X_norm, _, _, _, _ = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
+        if X_norm.shape[0] < 10:
+            return None
+        if self._knn_radius(X_norm) > self.tr_trigger_frac:
+            return None
+        self._maybe_update_tr(table)
+        center = self._best_known_unit(table)
+        if center is None:
+            return None
+        self._tr_center = center
+        half = self._tr_side / 2.0
+        lo = np.clip(center - half, 0.0, 1.0)
+        hi = np.clip(center + half, 0.0, 1.0)
+        return np.stack([lo, hi])
 
     def _record_predictions(self, X_unit, mu_neg_chi2):
         """Store GP predictions (as NEGATIVE chi2) keyed by snapped unit

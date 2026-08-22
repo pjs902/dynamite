@@ -1124,6 +1124,37 @@ def test_prediction_accuracy_counter():
     print("  test_prediction_accuracy_counter PASSED")
 
 
+def test_trust_region_lifecycle():
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    s["generator_settings"].update(
+        {"trust_region": True, "tr_trigger_frac": 0.1, "tr_side_init": 0.3, "tr_min_side": 0.05, "tr_max_side": 0.6}
+    )
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    am = MockAllModels(["ml"])
+    for i, dv in enumerate([0.0, 0.02, -0.02, 0.01, 0.03, -0.01, 0.015, -0.025, 0.005, -0.005, 0.025, -0.015]):
+        am.table.add_row([5.0 + dv, 3.0 + i * 0.1, 3.0 + i * 0.1, float("nan"), "", True, True, True, 0, "d"])
+    gen.current_models = am
+    bounds = gen._tr_bounds()
+    assert bounds is not None, "clustered points -> TR active"
+    assert bounds[0, 0] >= 0.0 and bounds[1, 0] <= 1.0
+    side0 = bounds[1, 0] - bounds[0, 0]
+    gen._tr_stale_batches = gen.tr_patience  # simulate stale batches
+    gen._maybe_update_tr(am.table)
+    assert gen._tr_side < side0, "stale -> shrink"
+    print("  test_trust_region_lifecycle PASSED")
+
+
+def test_trust_region_off_by_default():
+    gen = ps.BayesOptGenerator(
+        par_space=make_parspace([_mk_param("ml", 4.0, 6.0, 5.0)]), parspace_settings=_bo_settings()
+    )
+    assert gen.trust_region is False
+    assert gen._tr_bounds() is None
+    print("  test_trust_region_off_by_default PASSED")
+
+
 class _ListHandler(logging.Handler):
     def __init__(self, out):
         super().__init__()
@@ -1219,4 +1250,8 @@ if __name__ == "__main__":
     print("v2 Task 8: prediction-accuracy counter tests")
     test_prediction_accuracy_counter()
     print("V2 TASK 8 TESTS PASSED")
+    print("v2 Task 9: trust-region tests")
+    test_trust_region_lifecycle()
+    test_trust_region_off_by_default()
+    print("V2 TASK 9 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")
