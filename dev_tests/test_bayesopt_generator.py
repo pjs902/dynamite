@@ -1036,6 +1036,8 @@ def test_axial_center_defaults_to_best():
 
 def test_dedup_and_fill():
     q = _mk_param("q", 0.3, 0.9, 0.6)
+    q.par_generator_settings["step"] = 0.04
+    q.par_generator_settings["minstep"] = 0.02
     ml = _mk_param("ml", 4.0, 6.0, 5.0)
     ps_ = make_parspace([q, ml])  # q is the snappable non-ml column
     s = _bo_settings()
@@ -1045,10 +1047,10 @@ def test_dedup_and_fill():
     dup = np.array([[0.501, 5.0], [0.509, 4.6], [0.30, 5.2]])
     out = gen._dedup_and_fill(dup)
     assert out.shape == (3, 2)
+    np.testing.assert_allclose(out[0], dup[0])  # best row kept verbatim
     step = gen._norm_steps[0]
-    cells = [round(v[0] / step) for v in out if step > 0]
+    cells = [round(v[0] / step) for v in out]
     assert len(set(cells)) == len(cells), "cells must be unique"
-    np.testing.assert_allclose(out[0, 0], [0.5], atol=1e-9)  # best kept
     print("  test_dedup_and_fill PASSED")
 
 

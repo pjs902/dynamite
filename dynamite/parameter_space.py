@@ -1412,44 +1412,48 @@ class BayesOptGenerator(ParameterGenerator):
         return np.clip(X_proj, 0.0, 1.0)
 
     def _cell_keys(self, X_unit):
-        """Integer cell ids of snapped non-ml columns; continuous columns
-        (step<=0 or ml) enter the key unrounded."""
+        """Cell ids over SNAPPED (non-ml) columns only.
+
+        Two candidates in the same non-ml cell with different ml are the
+        desired orblib-reuse pairing, NOT duplicates — ml/continuous
+        columns (step<=0) are excluded from the key.
+        """
         steps = np.asarray(self._norm_steps, dtype=float)
-        keys = np.empty_like(X_unit)
-        for j in range(X_unit.shape[1]):
-            if steps[j] > 0:
-                keys[:, j] = np.round(X_unit[:, j] / steps[j])
-            else:
-                keys[:, j] = X_unit[:, j]
-        return np.round(keys, 9)
+        cols = [j for j in range(X_unit.shape[1]) if steps[j] > 0]
+        if not cols:
+            return None
+        return np.round(X_unit[:, cols] / steps[cols])
 
     def _dedup_and_fill(self, X_unit):
         """Keep the first candidate per snapped non-ml cell; refill freed
         slots with feasible Sobol draws so the batch stays full.
 
         Duplicate snapped cells would integrate identical orbit libraries,
-        wasting orblib slots (spec B1). With discretize disabled this is a
-        no-op passthrough of the input.
+        wasting orblib slots (spec B1). No-op when discretize is disabled
+        or no column has a step.
         """
         if not self.discretize_non_ml_params or self._norm_steps is None:
             return X_unit
         X_unit = np.asarray(X_unit, dtype=float)
         keys = self._cell_keys(X_unit)
+        if keys is None:
+            return X_unit
+        n_target = X_unit.shape[0]
         _, first_idx = np.unique(keys, axis=0, return_index=True)
         keep = X_unit[np.sort(first_idx)]
         guard = 0
-        while keep.shape[0] < self.batch_size and guard < 100:
+        while keep.shape[0] < n_target and guard < 100:
             guard += 1
-            filler = self._project_unit_to_feasible_qpu(self._sobol_unit(self.batch_size))
+            filler = self._project_unit_to_feasible_qpu(self._sobol_unit(n_target))
             fkeys = self._cell_keys(filler)
             existing = self._cell_keys(keep)
             for row, k in zip(filler, fkeys):
-                if keep.shape[0] >= self.batch_size:
+                if keep.shape[0] >= n_target:
                     break
                 if not np.any(np.all(existing == k, axis=1)):
                     keep = np.vstack([keep, row[None, :]])
                     existing = np.vstack([existing, k[None, :]])
-        return keep[: self.batch_size]
+        return keep[:n_target]
 
     def _propose_random_batch(self):
         """Sobol random proposals (warm-up), structured for orblib reuse."""
