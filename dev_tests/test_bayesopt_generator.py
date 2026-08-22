@@ -1102,7 +1102,7 @@ def test_prediction_accuracy_counter():
     ml = _mk_param("ml", 4.0, 6.0, 5.0)
     ps_ = make_parspace([ml])
     gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
-    gen._pred_hits_needed = 2
+    gen.pred_hits_needed = 2
     am = MockAllModels(["ml"])
     # row ml=5.0 -> unit 0.5; GP predicted -3.0 (i.e. chi2 3.0): exact hit
     gen._pending_predictions = {(0.5,): -3.0}
