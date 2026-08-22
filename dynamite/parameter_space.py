@@ -1131,6 +1131,14 @@ class BayesOptGenerator(ParameterGenerator):
         self.acquisition_type = gen.get("acquisition_type", "qLogEI")
         self.max_gp_variance_threshold = gen.get("max_gp_variance_threshold", 1.0)
         self.min_ei_threshold = gen.get("min_ei_threshold", -1.5)
+        # R1: dimension-scaled exploration schedule (GPry zeta-analogue).
+        self.exploration_schedule = gen.get("exploration_schedule", "constant")
+        if self.exploration_schedule not in ("constant", "annealed"):
+            raise ValueError("exploration_schedule must be 'constant' or 'annealed'")
+        self.beta_start = float(gen.get("beta_start", 8.0))
+        self.beta_end = float(gen.get("beta_end", 0.2))
+        self.anneal_batches = int(gen.get("anneal_batches", 10))
+        self._gp_batches_done = 0
         self.warmup_mode = gen.get("warmup_mode", "sobol")
         if self.warmup_mode not in ("sobol", "initial_guess"):
             raise ValueError(
@@ -1672,8 +1680,12 @@ class BayesOptGenerator(ParameterGenerator):
 
         d = len(self.free_par_idx)
         bounds = torch.stack([torch.zeros(d, dtype=torch.double), torch.ones(d, dtype=torch.double)])
-
-        acqf = qLogExpectedImprovement(model=model, best_f=Y_t.max())
+        beta = self._exploration_beta(self._gp_batches_done)
+        acqf = (
+            qLogExpectedImprovement(model=model, best_f=Y_t.max())
+            if beta is None
+            else qLogExpectedImprovement(model=model, best_f=Y_t.max(), beta=beta)
+        )
 
         nonlinear, linear = self._make_triaxiality_constraints()
         opt_kwargs = dict(acq_function=acqf, bounds=bounds, q=self.batch_size, num_restarts=10, raw_samples=128)
@@ -1684,10 +1696,21 @@ class BayesOptGenerator(ParameterGenerator):
 
         candidates, acq_value = optimize_acqf(**opt_kwargs)
         self._last_acq_value = float(acq_value.item())
+        self._gp_batches_done += 1
 
         cand_np = self._dedup_and_fill(self._snap_to_grid(candidates.detach().numpy()))
         raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
         return self._raw_free_matrix_to_model_list(raw_free)
+
+    def _exploration_beta(self, n_gp_batches_done):
+        """qLogEI exploration weight; None -> BoTorch heuristic (constant
+        mode). Annealed mode linearly decays beta_start -> beta_end over
+        `anneal_batches` GP batches (GPry-style dimension-scaled
+        exploration, spec R1)."""
+        if self.exploration_schedule == "constant":
+            return None
+        frac = min(1.0, n_gp_batches_done / max(1, self.anneal_batches))
+        return self.beta_start + frac * (self.beta_end - self.beta_start)
 
     def check_specific_stopping_criteria(self):
         """BayesOpt convergence signals plus the inherited chi2 backstop.

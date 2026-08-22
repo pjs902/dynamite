@@ -1054,6 +1054,23 @@ def test_dedup_and_fill():
     print("  test_dedup_and_fill PASSED")
 
 
+def test_exploration_schedule():
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    s["generator_settings"]["exploration_schedule"] = "annealed"
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    b0 = gen._exploration_beta(0)
+    b5 = gen._exploration_beta(5)
+    b20 = gen._exploration_beta(20)
+    assert abs(b0 - 8.0) < 1e-12 and abs(b20 - 0.2) < 1e-9
+    assert 0.2 < b5 < 8.0
+    s["generator_settings"]["exploration_schedule"] = "constant"
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    assert gen._exploration_beta(0) is None
+    print("  test_exploration_schedule PASSED")
+
+
 class _ListHandler(logging.Handler):
     def __init__(self, out):
         super().__init__()
@@ -1139,4 +1156,7 @@ if __name__ == "__main__":
     print("v2 Task 5: dedup tests")
     test_dedup_and_fill()
     print("V2 TASK 5 TESTS PASSED")
+    print("v2 Task 6: exploration schedule tests")
+    test_exploration_schedule()
+    print("V2 TASK 6 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")
