@@ -1173,6 +1173,71 @@ def _capture_logs(gen):
     return records
 
 
+def test_e2e_split_iterator():
+    """Dummy e2e under SplitModelIterator: batch completes and paired
+    proposals reuse orbit libraries (fewer orblib dirs than models)."""
+    import yaml
+    import tempfile
+    import os
+    import importlib
+
+    # Same real-package dance as test_axial_warmup_dummy_run: ModelIterator
+    # workers unpickle dynamite submodules, so the real package must be in
+    # sys.modules for the whole run.
+    import sys as _sys
+
+    _stub = _sys.modules.pop("dynamite", None)
+    import dynamite as _dyn
+
+    _sys.modules["dynamite"] = _dyn
+    config_reader = importlib.import_module("dynamite.config_reader")
+    model_iterator = importlib.import_module("dynamite.model_iterator")
+
+    try:
+        base_yaml = "/Users/pesmith/research/dynamite/dev_tests/bayesopt_ml_split.yaml"
+        with open(base_yaml) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["multiprocessing_settings"]["modeliterator"] == "SplitModelIterator"
+
+        gs = cfg["parameter_space_settings"]["generator_settings"]
+        gs["discretize_non_ml_params"] = True
+        # Free q-stars too: with ml alone, forced ml-pairing would propose
+        # exact duplicate parsets (filtered). A second free axis gives
+        # distinct potential configs sharing paired mls - the reuse case.
+        cfg["system_components"]["stars"]["parameters"]["q"]["fixed"] = False
+        cfg["parameter_space_settings"]["stopping_criteria"]["n_max_mods"] = 12
+        # drive to the budget rather than stopping on a plateau
+        cfg["parameter_space_settings"]["stopping_criteria"]["min_delta_chi2_abs"] = -1e6
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg["io_settings"]["output_directory"] = tmpdir + "/"
+            cfg["io_settings"]["input_directory"] = "/Users/pesmith/research/dynamite/dev_tests/NGC6278_input/"
+            cfg_path = os.path.join(tmpdir, "test_split.yaml")
+            with open(cfg_path, "w") as f:
+                yaml.dump(cfg, f)
+
+            def _chi2(parset):
+                q = float(parset["q-stars"])
+                ml = float(parset["ml"])
+                return 80.0 * (q - 0.4) ** 2 + 200.0 * (ml - 5.5) ** 2 + 15.0
+
+            c = config_reader.Configuration(cfg_path, reset_logging=False)
+            model_iterator.ModelIterator(c, do_dummy_run=True, dummy_chi2_function=_chi2, plots=False)
+
+            table = c.all_models.table
+            dirs = [d for d in table["directory"] if d]
+            assert len(dirs) >= 8, f"expected >=8 models, got {len(dirs)}"
+            n_orblibs = len({d.split("/ml")[0] for d in dirs})
+            assert n_orblibs < len(dirs), (
+                f"paired proposals must reuse orbit libraries: {n_orblibs} libs for {len(dirs)} models"
+            )
+    finally:
+        if _stub is not None:
+            _sys.modules["dynamite"] = _stub
+
+    print("  test_e2e_split_iterator PASSED")
+
+
 if __name__ == "__main__":
     print("Task 2: pipeline tests")
     test_roundtrip_linear()
@@ -1254,4 +1319,7 @@ if __name__ == "__main__":
     test_trust_region_lifecycle()
     test_trust_region_off_by_default()
     print("V2 TASK 9 TESTS PASSED")
+    print("v2 Task 10: split-iterator e2e")
+    test_e2e_split_iterator()
+    print("V2 TASK 10 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")
