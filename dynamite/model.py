@@ -380,7 +380,7 @@ class AllModels(object):
                     ws_type=self.config.settings.weight_solver_settings['type']
                     weight_solver = getattr(ws, ws_type)(
                                             config=self.config,
-                                            directory_with_ml=mod.directory)
+                                            model=mod)
                     orblib = mod.get_orblib()
                     _, _, _, row[which_chi2] = weight_solver.solve(orblib)
                     self.logger.info(f'Model {row_id}: {which_chi2} = '

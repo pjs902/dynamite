@@ -17,19 +17,19 @@
 !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 ! The code related to the bar/disk decomposition is in the subroutine iniparam_bar.
 ! The observational parameters (from MGE) and intrinsic parameters (p,q,u)
-! are sorted and calculated for disk and bar separately, 
+! are sorted and calculated for disk and bar separately,
 ! then it is superposed to build the whole galaxy.
 !
 ! The first line in parameters.in is changed to be included 4 parameters
 ! e.g (12   1   5   7)
 ! The first one is the number of all Gaussians,
 ! the second one is to choose whether you need one component.
-! deprojection (=0  it is the old version of code) or you need 
+! deprojection (=0  it is the old version of code) or you need
 ! two-component deprojection (=1  it is the new deprojection for barred galaxies).
-! In the case of two-component deprojection, the third and fourth parameters 
+! In the case of two-component deprojection, the third and fourth parameters
 ! are the number of Gaussians of the barred bulge and the disk, respectively.
-! Put these two zero if you choose old deeprojection. 
-! The last line in parameters.in is a new added parameter which is pattern speed (in unit of km/s/kpc) 
+! Put these two zero if you choose old deeprojection.
+! The last line in parameters.in is a new added parameter which is pattern speed (in unit of km/s/kpc)
 ! Note that if you use a positive Omega kinematic maps should be set to be counter-clockwise
 !
 ! adapted from Behzad Tahmasebzadeh's code, July 2023
@@ -243,12 +243,12 @@ contains
               read (unit=13, fmt=*) surf_pc_b(j),sigobs_arcsec_b(j),qobs_b(j),psi_obs_b(j)
               print*, "bulge",surf_pc_b(j),sigobs_arcsec_b(j),qobs_b(j),psi_obs_b(j)
            end do
-           
+
            do j=1, ngaus_disk          ! (BT)
               read (unit=13, fmt=*) surf_pc_d(j),sigobs_arcsec_d(j),qobs_d(j),psi_obs_d(j)
               print*, "disk", surf_pc_d(j),sigobs_arcsec_d(j),qobs_d(j),psi_obs_d(j)
            end do
-           
+
         else
            print*, "choose 0 or 1 for decomposed parameter"
         end if
@@ -311,9 +311,9 @@ contains
 
         ! surface brightness in L_sun/km^2
         if (decmposed == 0) then          ! (BT)
-           surf_km(:) = surf_pc(:)/parsec_km**2      
+           surf_km(:) = surf_pc(:)/parsec_km**2
         else if (decmposed == 1) then
-           surf_km_d(:) = surf_pc_d(:)/parsec_km**2                           
+           surf_km_d(:) = surf_pc_d(:)/parsec_km**2
            surf_km_b(:) = surf_pc_b(:)/parsec_km**2
         else
            print*, "choose 0 or 1 for decomposed parameter"
@@ -322,9 +322,9 @@ contains
         ! from surface brightness to surface density in M_sun/km^2
         ! NB: assuming constant mass-to-light ratio
         if (decmposed == 0) then           ! (BT)
-           surf_km(:) = surf_km(:) * upsilon      
+           surf_km(:) = surf_km(:) * upsilon
         else if (decmposed == 1) then
-           surf_km_d(:) = surf_km_d(:) * upsilon                                 
+           surf_km_d(:) = surf_km_d(:) * upsilon
            surf_km_b(:) = surf_km_b(:) * upsilon
         else
            print*, "choose 0 or 1 for decomposed parameter"
@@ -333,7 +333,7 @@ contains
 
         ! dispersion in km
         if (decmposed == 0) then            ! (BT)
-           sigobs_km(:) = sigobs_arcsec(:)*conversion_factor     
+           sigobs_km(:) = sigobs_arcsec(:)*conversion_factor
         else if (decmposed == 1) then
            sigobs_km_d(:) = sigobs_arcsec_d(:)*conversion_factor
            sigobs_km_b(:) = sigobs_arcsec_b(:)*conversion_factor
@@ -346,7 +346,7 @@ contains
 
         ! Apply offset to psi_obs
         if (decmposed == 0) then              ! (BT)
-           psi_obs(:) = psi_obs(:) +  psi_view     
+           psi_obs(:) = psi_obs(:) +  psi_view
         else if (decmposed == 1) then
            psi_obs_d(:) = psi_obs_d(:)  + 90     ! psi_view_disk = pi/2
            psi_obs_b(:) = psi_obs_b(:)  + psi_view
@@ -359,7 +359,7 @@ contains
         phi_view = phi_view*(pi_d/180.0_dp)
 
         if (decmposed == 0) then         ! (BT)
-           psi_obs  = psi_obs    * (pi_d/180.0_dp)     
+           psi_obs  = psi_obs    * (pi_d/180.0_dp)
         else if (decmposed == 1) then
            psi_obs_d  = psi_obs_d    * (pi_d/180.0_dp)    ! (BT) psi_view_disk = pi/2. the bar is aligned in the disk
            psi_obs_b  = psi_obs_b    * (pi_d/180.0_dp)
@@ -374,10 +374,10 @@ contains
 
 
         if (decmposed == 1) then     ! (BT) composition of the bar and the disk to make whole the galaxy
-           surf_km    = [surf_km_d , surf_km_b]                              
-           qobs       = [qobs_d , qobs_b]                                    
-           sigobs_km  = [sigobs_km_d , sigobs_km_b]                          
-           psi_obs    = [psi_obs_d , psi_obs_b]                              
+           surf_km    = [surf_km_d , surf_km_b]
+           qobs       = [qobs_d , qobs_b]
+           sigobs_km  = [sigobs_km_d , sigobs_km_b]
+           psi_obs    = [psi_obs_d , psi_obs_b]
         end if
 
 
