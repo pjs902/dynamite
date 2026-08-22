@@ -1060,14 +1060,14 @@ def test_exploration_schedule():
     s = _bo_settings()
     s["generator_settings"]["exploration_schedule"] = "annealed"
     gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
-    b0 = gen._exploration_beta(0)
-    b5 = gen._exploration_beta(5)
-    b20 = gen._exploration_beta(20)
-    assert abs(b0 - 8.0) < 1e-12 and abs(b20 - 0.2) < 1e-9
-    assert 0.2 < b5 < 8.0
+    e0 = gen._exploration_eta(0)
+    e5 = gen._exploration_eta(5)
+    e20 = gen._exploration_eta(20)
+    assert abs(e0 - 0.1) < 1e-12 and abs(e20 - 1e-3) < 1e-9
+    assert 1e-3 < e5 < 0.1
     s["generator_settings"]["exploration_schedule"] = "constant"
     gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
-    assert gen._exploration_beta(0) is None
+    assert gen._exploration_eta(0) is None
     print("  test_exploration_schedule PASSED")
 
 

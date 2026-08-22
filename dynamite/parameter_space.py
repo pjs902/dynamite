@@ -1135,8 +1135,10 @@ class BayesOptGenerator(ParameterGenerator):
         self.exploration_schedule = gen.get("exploration_schedule", "constant")
         if self.exploration_schedule not in ("constant", "annealed"):
             raise ValueError("exploration_schedule must be 'constant' or 'annealed'")
-        self.beta_start = float(gen.get("beta_start", 8.0))
-        self.beta_end = float(gen.get("beta_end", 0.2))
+        # eta = qLogEI improvement-indicator temperature: LOW eta softens
+        # the indicator (more exploration), HIGH eta sharpens it (greedy).
+        self.eta_start = float(gen.get("eta_start", 0.1))
+        self.eta_end = float(gen.get("eta_end", 1e-3))
         self.anneal_batches = int(gen.get("anneal_batches", 10))
         self._gp_batches_done = 0
         # R2: tempered-posterior batch members (SALE annealed objective).
@@ -1716,11 +1718,11 @@ class BayesOptGenerator(ParameterGenerator):
             bounds = torch.tensor(tr, dtype=torch.double)
         else:
             bounds = torch.stack([torch.zeros(d, dtype=torch.double), torch.ones(d, dtype=torch.double)])
-        beta = self._exploration_beta(self._gp_batches_done)
+        eta = self._exploration_eta(self._gp_batches_done)
         acqf = (
             qLogExpectedImprovement(model=model, best_f=Y_t.max())
-            if beta is None
-            else qLogExpectedImprovement(model=model, best_f=Y_t.max(), beta=beta)
+            if eta is None
+            else qLogExpectedImprovement(model=model, best_f=Y_t.max(), eta=eta)
         )
 
         nonlinear, linear = self._make_triaxiality_constraints()
@@ -1784,15 +1786,15 @@ class BayesOptGenerator(ParameterGenerator):
             out.extend(fill.tolist())
         return np.array(out[:n])
 
-    def _exploration_beta(self, n_gp_batches_done):
-        """qLogEI exploration weight; None -> BoTorch heuristic (constant
-        mode). Annealed mode linearly decays beta_start -> beta_end over
-        `anneal_batches` GP batches (GPry-style dimension-scaled
-        exploration, spec R1)."""
+    def _exploration_eta(self, n_gp_batches_done):
+        """qLogEI indicator temperature; None -> BoTorch default 1e-3
+        (constant mode). Annealed mode linearly decays eta_start -> eta_end
+        over `anneal_batches` GP batches: exploration early, exploitation
+        late (GPry-style dimension-scaled schedule, spec R1)."""
         if self.exploration_schedule == "constant":
             return None
         frac = min(1.0, n_gp_batches_done / max(1, self.anneal_batches))
-        return self.beta_start + frac * (self.beta_end - self.beta_start)
+        return self.eta_start + frac * (self.eta_end - self.eta_start)
 
     def _knn_radius(self, X_norm):
         """Mean distance from the incumbent to its 5 nearest evaluated

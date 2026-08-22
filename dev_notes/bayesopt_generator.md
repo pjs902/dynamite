@@ -254,3 +254,47 @@ Expected wall time for `bayesopt_ml_modelinner.yaml` (nE=2, nI2=4, nI3=3, ml onl
 | `dev_tests/legacygrid_ml_modelinner.yaml` | Reference: LegacyGridSearch same criteria |
 | `dev_tests/plot_generator_comparison.py` | Dummy-mode corner plot + convergence curve |
 | `dev_tests/run_bayesopt_real.py` | Full real orblib integration test |
+
+## v2 modernization (2026-08-22)
+
+Production-driven upgrade, spec: docs/superpowers/specs/2026-08-22-bayesopt-modernization-design.md.
+
+New generator_settings keys (defaults preserve v1 behavior):
+- `exploration_schedule`: 'constant'|'annealed' — anneals qLogEI's indicator
+  temperature eta from eta_start=0.1 down to eta_end=1e-3 over
+  anneal_batches GP batches: explore early, exploit late (R1, GPry-style
+  dimension-scaled schedule).
+- `n_annealed_members`: batch members drawn ~ exp(mu_GP/tau) by rejection
+  over the feasible set, tau annealed tau_start*tau_decay^batch, floor
+  tau_min; falls back to projected Sobol on low acceptance (R2, SALE
+  annealed objective).
+- `trust_region` (+ tr_* keys): TuRBO-lite single trust region, entered when
+  mean kNN distance around the incumbent drops below tr_trigger_frac of the
+  box diagonal; grows on improvement, shrinks after tr_patience stale
+  batches (R4).
+- `pred_eps_rel`/`pred_eps_abs`/`pred_hits_needed`: prediction-accuracy
+  counter; max(4, ceil(d/2)) consecutive accurate GP predictions raise the
+  status flag `gp_predictions_accurate` — a convergence diagnostic, never a
+  stop by itself (R3, GPry CorrectCounter).
+
+Behavior changes (not behind flags):
+- Triaxial feasibility now works for ANY free subset of (q,p,u); fixed axes
+  use their parset values. Production case q,p-free/u-fixed=0.9999 projects
+  Sobol draws and constrains GP proposals with p-q>=0 plus q<=u*qobs bounds.
+- Warm-start: restarting BayesOptGenerator in a populated output_directory
+  trains the GP on all historical rows; out-of-bounds rows are clipped with
+  a warning; axial warm-up centers on the best historical model when
+  initial_guess is absent.
+- Snapped batches are deduplicated per non-ml cell (ml pairing kept - it is
+  intentional orblib reuse); freed slots refill via projected Sobol.
+
+Tests & comparisons:
+- `dev_tests/test_vs_gridwalk.py` — HARD GATES: BayesOpt must reach the
+  chi2 threshold in fewer models than GridWalk and keep GP overhead
+  <10 s/model. Current dummy result: BO 27 fresh models vs GridWalk stalling
+  at 14 without ever reaching it.
+- `dev_tests/run_ablation.py` — matrix incl. GridWalk arm; warm-start arm
+  needs only 16 fresh models (vs 40 cold) thanks to seeded history.
+
+Literature: SALE (arXiv:2608.00841), GPry (2023 JCAP 10 021),
+TuRBO (arXiv:1910.01739), BOLFI (2018), ALABI (2026); full list in spec.

@@ -140,6 +140,8 @@ python dev_tests/run_comparison_real.py --ncpus 48 --nmodels 100 --nE 11 --nI2 7
 python dev_tests/run_comparison_real.py --output-dir comparison_YYYYMMDD_HHMMSS --skip-runs
 ```
 
+**v2 (2026-08-22):** partial-free triaxial feasibility (q,p free with u fixed works), in-place GP warm-start from existing `all_models.ecsv` (switch `generator_type` to `BayesOptGenerator` in the same output_directory — no Sobol burn), batch dedup after grid snapping, and opt-in acquisition upgrades: `exploration_schedule: annealed` (eta schedule), `n_annealed_members`, `trust_region: true`, prediction-accuracy diagnostic (`gp_predictions_accurate` status flag). Hard runtime gates vs GridWalk: `dev_tests/test_vs_gridwalk.py`; variant matrix: `dev_tests/run_ablation.py` (warm-start arm needs ~16 fresh models vs 40 cold on the dummy landscape). Env smoke test: `python dev_tests/test_bayesopt_smoke.py`. Production reference config (NGC5139 xeast): `dev_tests/NGC5139_config_production.yaml` — REQUIRES `modeliterator: SplitModelIterator` (the memory cap only exists in split flow).
+
 **Results (2026-06-17, large orblib):** BayesOpt 5814 chi2 at ml=3.88 vs GridWalk 6352 at ml=4.0 — ~540 unit advantage, and finds non-grid ml values. Small orblib (nE≤5) gives wrong landscape; use nE≥11. `LOG_PARAMS={'c-dh','f-dh'}` controls log10-transform for plotting (all_models stores linear values).
 
 **Upstream merge note:** `iniparam_f.f90` must declare `quad_nr`, `quad_nth`, `quad_nph` as public integers and read them from unit 13. `orblib.py` must write them after `dithering`. All config YAMLs need `quad_nr: 10`, `quad_nth: 6`, `quad_nph: 6` under `orblib_settings`.
