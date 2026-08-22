@@ -1034,6 +1034,24 @@ def test_axial_center_defaults_to_best():
     print("  test_axial_center_defaults_to_best PASSED")
 
 
+def test_dedup_and_fill():
+    q = _mk_param("q", 0.3, 0.9, 0.6)
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([q, ml])  # q is the snappable non-ml column
+    s = _bo_settings()
+    s["generator_settings"]["discretize_non_ml_params"] = True
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    assert gen.discretize_non_ml_params
+    dup = np.array([[0.501, 5.0], [0.509, 4.6], [0.30, 5.2]])
+    out = gen._dedup_and_fill(dup)
+    assert out.shape == (3, 2)
+    step = gen._norm_steps[0]
+    cells = [round(v[0] / step) for v in out if step > 0]
+    assert len(set(cells)) == len(cells), "cells must be unique"
+    np.testing.assert_allclose(out[0, 0], [0.5], atol=1e-9)  # best kept
+    print("  test_dedup_and_fill PASSED")
+
+
 class _ListHandler(logging.Handler):
     def __init__(self, out):
         super().__init__()
@@ -1116,4 +1134,7 @@ if __name__ == "__main__":
     test_best_known_unit()
     test_axial_center_defaults_to_best()
     print("V2 TASK 4 TESTS PASSED")
+    print("v2 Task 5: dedup tests")
+    test_dedup_and_fill()
+    print("V2 TASK 5 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")
