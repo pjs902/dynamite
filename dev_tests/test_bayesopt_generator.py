@@ -1098,6 +1098,32 @@ def test_annealed_default_count():
     print("  test_annealed_default_count PASSED")
 
 
+def test_prediction_accuracy_counter():
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    gen._pred_hits_needed = 2
+    am = MockAllModels(["ml"])
+    # row ml=5.0 -> unit 0.5; GP predicted -3.0 (i.e. chi2 3.0): exact hit
+    gen._pending_predictions = {(0.5,): -3.0}
+    am.table.add_row([5.0, 3.0, 3.0, float("nan"), "", True, True, True, 0, "d"])
+    gen._score_new_predictions(am.table)
+    assert gen._pred_streak == 1 and gen._pending_predictions == {}
+    # second hit at a different coordinate (ml=5.4 -> unit 0.7)
+    am.table.add_row([5.4, 4.0, 4.0, float("nan"), "", True, True, True, 0, "d"])
+    gen._pending_predictions = {(0.7,): -4.0}
+    gen._score_new_predictions(am.table)
+    assert gen._pred_streak == 2
+    assert gen.status.get("gp_predictions_accurate") is True
+    # a miss resets the streak
+    am.table.add_row([5.8, 50.0, 50.0, float("nan"), "", True, True, True, 0, "d"])
+    gen._pending_predictions = {(0.9,): -3.0}
+    gen._score_new_predictions(am.table)
+    assert gen._pred_streak == 0
+    assert gen.status.get("gp_predictions_accurate") is False
+    print("  test_prediction_accuracy_counter PASSED")
+
+
 class _ListHandler(logging.Handler):
     def __init__(self, out):
         super().__init__()
@@ -1190,4 +1216,7 @@ if __name__ == "__main__":
     test_annealed_members_concentrate()
     test_annealed_default_count()
     print("V2 TASK 7 TESTS PASSED")
+    print("v2 Task 8: prediction-accuracy counter tests")
+    test_prediction_accuracy_counter()
+    print("V2 TASK 8 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")

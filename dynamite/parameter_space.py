@@ -1145,6 +1145,13 @@ class BayesOptGenerator(ParameterGenerator):
         self.tau_decay = float(gen.get("tau_decay", 0.7))
         self.tau_min = float(gen.get("tau_min", 0.05))
         self.annealed_max_draws = int(gen.get("annealed_max_draws", 200000))
+        # R3: GPry CorrectCounter — repeated accurate GP predictions as a
+        # convergence diagnostic (zero extra model cost). pred_hits_needed
+        # is finalized after free_par_idx exists (see below).
+        self.pred_eps_rel = float(gen.get("pred_eps_rel", 0.01))
+        self.pred_eps_abs = float(gen.get("pred_eps_abs", 0.0))
+        self._pending_predictions = {}
+        self._pred_streak = 0
         self.warmup_mode = gen.get("warmup_mode", "sobol")
         if self.warmup_mode not in ("sobol", "initial_guess"):
             raise ValueError(
@@ -1172,6 +1179,8 @@ class BayesOptGenerator(ParameterGenerator):
         self.lo_free = [self.lo[i] for i in self.free_par_idx]
         self.hi_free = [self.hi[i] for i in self.free_par_idx]
         self.free_param_names = [p.name for p in self.free_params]
+        # R3 (cont.): consecutive-hit requirement, default max(4, ceil(d/2))
+        self.pred_hits_needed = int(gen.get("pred_hits_needed", max(4, -(-len(self.free_par_idx) // 2))))
 
         # Position of q / p / u among the FREE parameters (for triaxiality).
         # Parameter names carry a component suffix (e.g. 'q-stars'), so strip
@@ -1510,6 +1519,7 @@ class BayesOptGenerator(ParameterGenerator):
             then GP.
         """
         table = self.current_models.table
+        self._score_new_predictions(table)
         if len(table) == 0:
             n_valid = 0
         else:
@@ -1712,6 +1722,11 @@ class BayesOptGenerator(ParameterGenerator):
             cand_np = np.vstack([cand_np[: self.batch_size - n_annealed], annealed])
             cand_np = self._dedup_and_fill(cand_np)
         raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
+        import torch as _torch
+
+        with _torch.no_grad():
+            pred_mu = self._gp_posterior_mean(_torch.tensor(cand_np, dtype=_torch.double)).numpy().ravel()
+        self._record_predictions(cand_np, pred_mu)
         return self._raw_free_matrix_to_model_list(raw_free)
 
     def _gp_posterior_mean(self, X_unit_t):
@@ -1759,6 +1774,43 @@ class BayesOptGenerator(ParameterGenerator):
         frac = min(1.0, n_gp_batches_done / max(1, self.anneal_batches))
         return self.beta_start + frac * (self.beta_end - self.beta_start)
 
+    def _record_predictions(self, X_unit, mu_neg_chi2):
+        """Store GP predictions (as NEGATIVE chi2) keyed by snapped unit
+        coordinates, for scoring in _score_new_predictions once the models
+        finish (spec R3)."""
+        for x, m in zip(X_unit, mu_neg_chi2):
+            self._pending_predictions[tuple(np.round(x, 9))] = float(m)
+
+    def _score_new_predictions(self, table):
+        """Compare finished models' kinchi2 against stored GP predictions.
+
+        Hit: |mu - y| < eps_abs + eps_rel * |y_best - mu| (GPry
+        CorrectCounter). `pred_hits_needed` consecutive hits raise
+        status['gp_predictions_accurate']; this never stops the search on
+        its own.
+        """
+        done = np.asarray(table["all_done"], dtype=bool)
+        chi2 = np.asarray(table[self.chi2], dtype=float)
+        ok = done & np.isfinite(chi2)
+        if not np.any(ok):
+            return
+        X_norm, _, _, _, _ = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
+        rows = table[np.where(ok)[0]]
+        best = float(np.min(np.asarray(rows[self.chi2], dtype=float)))
+        for row, x in zip(rows, X_norm):
+            key = tuple(np.round(x, 9))
+            if key not in self._pending_predictions:
+                continue
+            mu = -self._pending_predictions.pop(key)  # stored as -chi2
+            yv = float(row[self.chi2])
+            if abs(mu - yv) <= (self.pred_eps_abs + self.pred_eps_rel * abs(best - mu)):
+                self._pred_streak += 1
+                self.logger.info(f"GP prediction accurate ({self._pred_streak}/{self.pred_hits_needed} consecutive)")
+            else:
+                self.logger.debug(f"GP prediction missed: mu={mu:.2f} y={yv:.2f}")
+                self._pred_streak = 0
+        self.status["gp_predictions_accurate"] = self._pred_streak >= self.pred_hits_needed
+
     def check_specific_stopping_criteria(self):
         """BayesOpt convergence signals plus the inherited chi2 backstop.
 
@@ -1789,6 +1841,7 @@ class BayesOptGenerator(ParameterGenerator):
             self.status["gp_min_ei_low"] = self._last_acq_value < self.min_ei_threshold
         else:
             self.status["gp_min_ei_low"] = False
+        self.status.setdefault("gp_predictions_accurate", False)
 
 
 class FullGrid(ParameterGenerator):
