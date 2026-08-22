@@ -962,6 +962,33 @@ def test_projection_all_free_unchanged():
     print("  test_projection_all_free_unchanged PASSED")
 
 
+def test_constraints_partial_free():
+    gen = _qpu_gen(free=("q", "p"))
+    import torch
+
+    nonlinear, linear = gen._make_triaxiality_constraints()
+    assert nonlinear is not None and linear is None
+    assert len(nonlinear) == 1, "u fixed -> only p>=q constraint"
+    fn, intra = nonlinear[0]
+    assert intra is True
+    lo, hi = gen._norm_bounds_arrays()
+
+    def unit(vals):
+        x = torch.zeros(len(gen.free_params), dtype=torch.double)
+        for j, p in enumerate(gen.free_params):
+            base = p.name.split("-")[0]
+            k = {"q": 0, "p": 1}[base]
+            x[j] = (vals[base] - lo[k]) / (hi[k] - lo[k])
+        return x
+
+    assert fn(unit({"q": 0.3, "p": 0.95})).item() >= 0.0
+    assert fn(unit({"q": 0.95, "p": 0.9})).item() < 0.0
+    gen = _qpu_gen(free=("u",))
+    nonlinear, _ = gen._make_triaxiality_constraints()
+    assert nonlinear is None, "single free axis -> bounds suffice"
+    print("  test_constraints_partial_free PASSED")
+
+
 if __name__ == "__main__":
     print("Task 2: pipeline tests")
     test_roundtrip_linear()
@@ -1018,4 +1045,7 @@ if __name__ == "__main__":
     test_projection_single_free_axes()
     test_projection_all_free_unchanged()
     print("V2 TASK 2 TESTS PASSED")
+    print("v2 Task 3: partial-free constraints tests")
+    test_constraints_partial_free()
+    print("V2 TASK 3 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")

@@ -1447,38 +1447,51 @@ class BayesOptGenerator(ParameterGenerator):
         Constraint callables receive a 1D tensor x of shape (n_free,) —
         index with x[idx], never x[..., idx]. Each returns >= 0 when feasible.
         Unnormalization to raw (q,p,u) happens inside the callable.
+
+        Handles any free subset of (q, p, u): fixed axes enter the
+        constraint callables as constants from _fixed_qpu_values(). With u
+        fixed, the u-window reduces to bounds on q/p (enforced by
+        _project_unit_to_feasible_qpu), leaving only p - q >= 0.
         """
-        if self.qobs is None or not all(k in self._free_qpu_idx for k in ("q", "p", "u")):
+        if self.qobs is None or not self._free_qpu_idx:
             return None, None
         import torch
 
         lo_raw, hi_raw = self._norm_bounds_arrays()
         lo_t = torch.tensor(lo_raw, dtype=torch.double)
         span_t = torch.tensor(hi_raw - lo_raw, dtype=torch.double)
-        jq = self._free_qpu_idx["q"]
-        jp = self._free_qpu_idx["p"]
-        ju = self._free_qpu_idx["u"]
+        jq = self._free_qpu_idx.get("q")
+        jp = self._free_qpu_idx.get("p")
+        ju = self._free_qpu_idx.get("u")
         qobs = float(self.qobs)
+        fixed = self._fixed_qpu_values()
 
-        def _raw(x, j):
+        def _val(x, axis):
+            j = {"q": jq, "p": jp, "u": ju}[axis]
+            if j is None:
+                return torch.tensor(fixed[axis], dtype=torch.double)
             return lo_t[j] + x[j] * span_t[j]
 
-        def c_p_ge_q(x):
-            return _raw(x, jp) - _raw(x, jq)  # p - q >= 0
+        nonlinear = []
+        if jq is not None and jp is not None:
 
-        def c_u_lower(x):
-            p_r = _raw(x, jp)
-            q_r = _raw(x, jq)
-            u_r = _raw(x, ju)
-            return u_r - torch.maximum(q_r / qobs, p_r)  # u - max(q/qobs,p) >= 0
+            def c_p_ge_q(x):
+                return _val(x, "p") - _val(x, "q")  # p - q >= 0
 
-        def c_u_upper(x):
-            p_r = _raw(x, jp)
-            u_r = _raw(x, ju)
-            upper = torch.clamp(p_r / qobs, max=1.0)
-            return upper - u_r  # min(p/qobs,1) - u >= 0
+            nonlinear.append((c_p_ge_q, True))
+        if ju is not None and jq is not None and jp is not None:
 
-        nonlinear = [(c_p_ge_q, True), (c_u_lower, True), (c_u_upper, True)]
+            def c_u_lower(x):
+                # u - max(q/qobs, p) >= 0
+                return _val(x, "u") - torch.maximum(_val(x, "q") / qobs, _val(x, "p"))
+
+            def c_u_upper(x):
+                upper = torch.clamp(_val(x, "p") / qobs, max=1.0)
+                return upper - _val(x, "u")  # min(p/qobs,1) - u >= 0
+
+            nonlinear.extend([(c_u_lower, True), (c_u_upper, True)])
+        if not nonlinear:
+            return None, None
         return nonlinear, None
 
     def _feasible_ic_generator(
