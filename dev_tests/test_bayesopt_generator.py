@@ -7,6 +7,7 @@ import sys
 import types
 import copy  # noqa: F401 — used by BayesOptGenerator methods added in later tasks
 import importlib.util as ilu
+import logging
 import numpy as np  # type: ignore[import-untyped]
 from astropy.table import Table, Column  # type: ignore[import-untyped]
 
@@ -989,6 +990,68 @@ def test_constraints_partial_free():
     print("  test_constraints_partial_free PASSED")
 
 
+def test_warmstart_clip_and_log():
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    X = np.array([[0.5], [1.5], [-0.2]])  # two out of bounds
+    records = _capture_logs(gen)
+    out = gen._clip_training_to_bounds(X)
+    np.testing.assert_allclose(out, [[0.5], [1.0], [0.0]])
+    assert any("outside" in r for r in records), records
+    print("  test_warmstart_clip_and_log PASSED")
+
+
+def test_best_known_unit():
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
+    am = MockAllModels(["ml"])
+    for v, c in [(4.2, 9.0), (5.0, 3.5), (5.8, 7.0)]:
+        am.table.add_row([v, c, c, float("nan"), "", True, True, True, 0, "d"])
+    gen.current_models = am
+    center = gen._best_known_unit(am.table)
+    np.testing.assert_allclose(center, [0.5], atol=1e-12)  # ml=5.0 -> 0.5
+    print("  test_best_known_unit PASSED")
+
+
+def test_axial_center_defaults_to_best():
+    """No initial_guess + history -> axial queue rebuilt around best row."""
+    ml = _mk_param("ml", 4.0, 6.0, 5.0)
+    ps_ = make_parspace([ml])
+    s = _bo_settings()
+    s["generator_settings"]["warmup_mode"] = "initial_guess"
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    am = MockAllModels(["ml"])
+    for v, c in [(4.2, 9.0), (5.6, 2.0)]:
+        am.table.add_row([v, c, c, float("nan"), "", True, True, True, 0, "d"])
+    gen.current_models = am
+    gen.specific_generate_method()
+    # model_list[0] is a list of Parameter objects; center point has
+    # ml ~ 5.6 (best row), not the midpoint 5.0
+    ml_par = [p for p in gen.model_list[0] if p.name == "ml"][0]
+    np.testing.assert_allclose(ml_par.raw_value, 5.6, atol=0.15)
+    print("  test_axial_center_defaults_to_best PASSED")
+
+
+class _ListHandler(logging.Handler):
+    def __init__(self, out):
+        super().__init__()
+        self.out = out
+
+    def emit(self, record):
+        self.out.append(record.getMessage())
+
+
+def _capture_logs(gen):
+    """Attach a handler to gen.logger, return the message list."""
+    records = []
+    handler = _ListHandler(records)
+    gen.logger.addHandler(handler)
+    gen.logger.setLevel(logging.DEBUG)
+    return records
+
+
 if __name__ == "__main__":
     print("Task 2: pipeline tests")
     test_roundtrip_linear()
@@ -1048,4 +1111,9 @@ if __name__ == "__main__":
     print("v2 Task 3: partial-free constraints tests")
     test_constraints_partial_free()
     print("V2 TASK 3 TESTS PASSED")
+    print("v2 Task 4: warm-start guardrail tests")
+    test_warmstart_clip_and_log()
+    test_best_known_unit()
+    test_axial_center_defaults_to_best()
+    print("V2 TASK 4 TESTS PASSED")
     print("ALL BAYESOPT TESTS PASSED")

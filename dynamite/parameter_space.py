@@ -1183,15 +1183,51 @@ class BayesOptGenerator(ParameterGenerator):
 
         # Build axial queue after free_params bookkeeping is complete.
         self._axial_queue = self._build_axial_queue() if self.warmup_mode == "initial_guess" else []
+        self._initial_guess_explicit = bool(self._initial_guess_phys)
+        self._axial_rebuilt = False
 
-    def _build_axial_queue(self):
+    def _clip_training_to_bounds(self, X_norm):
+        """Clip normalized training rows into [0,1]; warn per axis.
+
+        Historical rows from a warm-start may lie outside the current
+        lo/hi; clipped rows keep the GP anchored at the boundary instead
+        of extrapolating.
+        """
+        X_norm = np.asarray(X_norm, dtype=float)
+        n_lo = np.sum(X_norm < 0.0, axis=0)
+        n_hi = np.sum(X_norm > 1.0, axis=0)
+        for j, name in enumerate(self.free_param_names):
+            if n_lo[j] or n_hi[j]:
+                self.logger.warning(
+                    f"{int(n_lo[j]) + int(n_hi[j])} warm-start training "
+                    f"rows outside [{self.lo_free[j]}, {self.hi_free[j]}] "
+                    f"for {name}; clipping to the bounds"
+                )
+        return np.clip(X_norm, 0.0, 1.0)
+
+    def _best_known_unit(self, table):
+        """Normalized coords of the valid row with the lowest chi2."""
+        done = np.asarray(table["all_done"], dtype=bool)
+        chi2 = np.asarray(table[self.chi2], dtype=float)
+        ok = done & np.isfinite(chi2)
+        if not np.any(ok):
+            return None
+        rows = table[np.where(ok)[0]]
+        X_norm, _, _, _, _ = extract_gp_training_data(rows, self.par_space, which_chi2=self.chi2)
+        chi2v = np.asarray(rows[self.chi2], dtype=float)
+        return X_norm[int(np.argmin(chi2v))]
+
+    def _build_axial_queue(self, center=None):
         """Build the axial warm-up design as a list of normalized points.
 
         Returns [center, center+step_axis0, center-step_axis0,
                          center+step_axis1, center-step_axis1, ...]
         Total: 1 + 2*n_free points. All clipped to [0, 1].
+        `center` defaults to the normalized initial_guess; callers may pass
+        an explicit center (e.g. the best historical model for warm-start).
         """
-        center = self._initial_guess_to_unit()
+        if center is None:
+            center = self._initial_guess_to_unit()
         step = self.initial_step_size
         points = [center.copy()]
         for j in range(len(self.free_params)):
@@ -1424,6 +1460,13 @@ class BayesOptGenerator(ParameterGenerator):
             n_valid = int(np.sum(done & finite))
 
         if self.warmup_mode == "initial_guess":
+            if not self._initial_guess_explicit and not self._axial_rebuilt:
+                self._axial_rebuilt = True
+                if n_valid > 0:
+                    center = self._best_known_unit(table)
+                    if center is not None:
+                        self.logger.info("warm-start: axial warm-up centered on the best historical model")
+                        self._axial_queue = self._build_axial_queue(center=center)
             if self._axial_queue:
                 self._gp_model = None
                 self._last_acq_value = None
@@ -1565,6 +1608,7 @@ class BayesOptGenerator(ParameterGenerator):
 
         table = self.current_models.table
         X_norm, y, names, lo_raw, hi_raw = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
+        X_norm = self._clip_training_to_bounds(X_norm)
 
         assert names == self.free_param_names, f"param order mismatch: {names} vs {self.free_param_names}"
 
