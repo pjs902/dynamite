@@ -1,0 +1,132 @@
+% appendix_bayesopt.tex — methodology appendix for the upcoming paper.
+% Standalone \section; drop into the main .tex or \input{} it.
+% Citations use authoryear keys; add these to the .bib if absent:
+%   vdbosch2019dynamite (DYNAMITE method paper), zhu2018crcut,
+%   eriksson2019turbo, elgammal2023gpry, li2026sale, leclercq2018bolfi.
+%
+% Numbers below come from the runs documented in
+% dev_notes/bayesopt_generator.md (June 2026 NGC6278 comparison; August
+% 2026 surface benchmarks and tuning study). Update them if the final
+% production numbers change.
+
+\section{Bayesian-optimization parameter search}
+\label{app:bayesopt}
+
+\subsection{Problem structure}
+Triaxial Schwarzschild models separate into a cheap inner problem and an
+expensive outer one \citep{vdbosch2019dynamite}. Given a trial potential,
+the orbit-library weights that best reproduce the observed kinematics
+follow from a bounded non-negative least-squares solve, which takes
+seconds. The outer problem, finding the potential parameters that
+minimize the kinematic $\chi^2$, requires one orbit-library integration
+per trial potential and takes hours on a multicore node. Classical
+implementations search the outer parameters with a grid walk
+\citep{zhu2018crcut}: each step proposes axis-aligned neighbours of the
+current best point, so the search cost grows with the number of free
+parameters and the walk can stall when all neighbours are already
+evaluated.
+
+The generator described here, \texttt{BayesOptGenerator}, replaces the
+walk with a Gaussian-process surrogate of $\chi^2$ over the normalized
+parameter cube. The surrogate is refit after every batch of models, and
+the next batch is chosen where the surrogate predicts improvement. The
+approach follows established surrogate-based inference practice
+\citep{leclercq2018bolfi,elgammal2023gpry,li2026sale}; the published
+Schwarzschild-modelling literature searches the outer parameters with
+grids or walks.
+
+\subsection{Algorithm}
+\label{app:bayesopt:algo}
+Each iteration proceeds in four steps.
+
+\paragraph{(i) Training data.} All evaluated models with finite
+$\chi^2$ are collected from the run table. Parameters are normalized to
+the unit cube using their prior bounds; logarithmic parameters
+($M_\mathrm{BH}$, halo mass) enter in log space. Rows outside the
+current bounds, which occur when bounds are tightened between runs, are
+clipped and counted in a warning.
+
+\paragraph{(ii) Surrogate.} A BoTorch \texttt{SingleTaskGP} with
+outcome standardization and an anisotropic Mat\'ern~5/2 kernel is fit by
+empirical Bayes; above 300 training rows the code switches to a
+variational GP for scaling. The GP models $-\chi^2$.
+
+\paragraph{(iii) Batch selection.} The next $q$ candidates maximize
+$\log q$-Expected Improvement \citep[qLogEI;][]{eriksson2019turbo}
+jointly over the cube. Three modifications matter in practice.
+First, exploration is annealed: the indicator temperature $\eta$ of
+qLogEI decays linearly from $0.1$ to $10^{-3}$ over the first ten
+batches, so early batches favour uncertain regions and later batches
+exploit. Second, a fraction $\lceil q/4\rceil$ of each batch is drawn
+not from the acquisition optimizer but by rejection sampling from
+$\exp(\mu_\mathrm{GP}/\tau)$ over the feasible set, with temperature
+$\tau$ annealed from $1.0$ by a factor $0.7$ per batch
+\citep[the annealed objective of][]{li2026sale}. These members keep the
+batch diverse where joint optimization would homogenize it. Third,
+after selection, candidates are deduplicated on the grid cells of the
+non-mass parameters: two candidates in the same cell would integrate
+the same orbit library, and the freed slots are refilled with
+quasi-random draws. Pairs of candidates that share a cell but differ in
+$M_\mathrm{L}$ are kept, since the orbit library is then reused at no
+integration cost.
+
+\paragraph{(iv) Feasibility.} Triaxiality requires $p\ge q$,
+$u \ge \max(q/q_\mathrm{obs}, p)$ and $u \le \min(p/q_\mathrm{obs},1)$
+for the intrinsic flattenings. When all three are free, these enter the
+acquisition optimization as differentiable inequality constraints.
+When only a subset is free, which is the common case (the NGC~5139 run
+of Section~\ref{sec:production} fixes $u$), the fixed values are
+substituted into the constraints and the free axes are projected onto
+the feasible set before any evaluation is proposed.
+
+\paragraph{Warm-up and warm start.} The first $n_\mathrm{init}$
+candidates come from a scrambled Sobol sequence, or, optionally, from an
+axial design around a user-supplied point. When the generator is
+started in an output directory that already contains evaluated models,
+for example after a grid-walk search, the Sobol phase is skipped and
+the GP trains on the full history. The axial design then centres on the
+best historical model. This makes switching from a grid walk to
+Bayesian optimization mid-project free of redundant evaluations.
+
+\paragraph{Convergence diagnostics.} Alongside the standard
+plateau criteria, the generator tracks how often the GP predicts a new
+model's $\chi^2$ within a relative tolerance of the realized value
+\citep[the CorrectCounter of][]{elgammal2023gpry}. A run of
+$\max(4,\lceil d/2\rceil)$ accurate predictions indicates that the
+surrogate has resolved the landscape; we use this as a diagnostic and
+not as a stopping rule. A single trust region
+\citep[TuRBO-style;][]{eriksson2019turbo} can additionally be enabled,
+restricting acquisition to a shrinking box around the incumbent once
+the mean distance to the $k$ nearest evaluated points falls below a
+threshold fraction of the box diagonal.
+
+\subsection{Validation protocol}
+\label{app:bayesopt:valid}
+We validate on three levels. (a) Unit tests cover the feasibility
+projection for all free/non-free subsets of $(q,p,u)$, warm-start
+behaviour, batch deduplication, and each acquisition option; a fuzz
+suite asserts the feasibility invariants over randomized parameter
+spaces. (b) Synthetic $\chi^2$ surfaces calibrated to the ranges of our
+galaxy sample encode the structures that make these searches hard: a
+mass--flattening valley, a black-hole bowl over a correlated shape
+band, and a curved constant-mass degeneracy valley with a secondary
+basin. On the coupled four-parameter surface, Bayesian optimization
+reaches the convergence threshold in a median of 42 fresh models
+against 116 for the grid walk over six seeds, with a better final
+$\chi^2$ (6013 versus 6070); on single-valley surfaces the grid walk
+remains competitive, which bounds the recommendation. A hard acceptance
+test requires the generator to reach the threshold in fewer models than
+the grid walk and keeps surrogate overhead below ten seconds per model.
+(c) On NGC~6278 with three free parameters and equal model budgets, the
+generator reaches $\chi^2=5814$ where the grid walk reaches 6352, and
+finds its optimum between grid points.
+
+\subsection{Recommended settings}
+For the production runs we use batch size $q=4$, which the tuning study
+identifies as the setting with the largest effect at $d=4$ (median
+models-to-threshold 26 versus 41 for $q=8$), consistent with the
+batch-size guideline of \citet{elgammal2023gpry}; $n_\mathrm{init}=8$
+Sobol points; the annealed $\eta$ schedule; $q/4$ tempered-posterior
+members; and trust regions enabled. We advise running a grid walk first
+and switching generators in the same output directory, so that the GP
+starts from the walk's full evaluation history.
