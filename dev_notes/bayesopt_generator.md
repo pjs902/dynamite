@@ -327,3 +327,26 @@ coupled or the valley is hidden from the starting point.
 Real-orblib note: the full Fortran->adelie->chi2 path runs on macOS only
 with `KMP_INIT_AT_FORK=FALSE` exported before numpy import (libomp
 inherited-state deadlock after multiprocessing fork otherwise).
+
+### Tuning study (T1-T5, run_tuning_study.py; T2/T4/T5 pending)
+
+T1 (production-4d, 5 seeds, budget 120) ranking by median
+models-to-threshold:
+1. batch=4            med=26  best=6005   <- GPry "batch ~ min(dims,workers)"
+2. lean(b4,w4,eta,off,off) med=30 best=6006
+3. R2=0               med=38  best=6006
+4. base(b8,w8,eta,r2,TR) med=41 best=6007
+...
+10. batch=16          med=56  best=6013
+
+Takeaways: batch_size=4 (not 8) is the single biggest lever at d=4,
+matching the GPry guideline; warm-up size and eta schedule are neutral
+here; TR=off is slightly worse (46) so keep trust regions on. R2 dose
+neutral at this scale. T3: the R3 prediction-accuracy flag NEVER fired at
+eps_rel=0.01 in any of the 50 runs -> either the tolerance is too tight
+for GP accuracy on these surfaces or the streak requirement (4 consecutive)
+too strict; recalibrate before relying on it as a convergence diagnostic.
+
+Known harness gotcha (bit twice now): all_models tables store PAR values
+(10^raw for log params) - any custom evaluation loop must convert via
+parspace.get_raw_value_from_param_value before calling the landscape.
