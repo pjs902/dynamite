@@ -143,6 +143,7 @@ contains
         read (unit=13, fmt=*) quad_nth
         ! phi sampling of spherical polar grid recording the intrinsic moments
         read (unit=13, fmt=*) quad_nph
+
         !added by AW   ! The parameters of the NFW halo: rho_c in solarmass/pc^3 and r_c in arcsec
         !added by JJA, type=5 for gNFW with three inputs: c, DM virial mass in solarmass, and gamma
         read (unit=13, fmt=*) dm_profile_type, n_dmparam

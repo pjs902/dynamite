@@ -1141,7 +1141,8 @@ class Configuration(object):
         allowed_types = ['GridWalk',
                          'LegacyGridSearch',
                          'FullGrid',
-                         'SpecificModels']
+                         'SpecificModels',
+                         'BayesOptGenerator']
         if gen_type not in allowed_types:
             text = f'Legacy mode: parameter space generator_type ' \
                    f'must be in {allowed_types}'
@@ -1156,6 +1157,14 @@ class Configuration(object):
                               'not both')
             raise ValueError(f'Only specify one of {chi2abs}, {chi2scaled}, '
                              'not both')
+        if gen_type == 'BayesOptGenerator':
+            required_bayes_keys = ['n_initial_random', 'batch_size']
+            for key in required_bayes_keys:
+                if gen_set is None or key not in gen_set:
+                    msg = (f"BayesOptGenerator requires '{key}' in "
+                           f"generator_settings")
+                    self.logger.error(msg)
+                    raise ValueError(msg)
 
         if ws_type == 'LegacyWeightSolver':
             self.logger.warning('LegacyWeightSolver is DEPRECATED and will be '
