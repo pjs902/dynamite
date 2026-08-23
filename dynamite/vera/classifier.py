@@ -14,6 +14,14 @@ MIN_AGE_S_DEFAULT = 60.0  # NFS metadata-lag guard
 ATTEMPT_LIMIT = 3
 
 
+def _noml(model_dir):
+    """Strip the trailing /mlzz.zz/ segment: orbit libraries are shared
+    across ml variants and live one level up (Model.directory_noml)."""
+    import re
+
+    return re.sub(r"/ml[^/]+/?$", "/", str(model_dir))
+
+
 class ModelState(enum.Enum):
     PENDING_INTEGRATION = "pending_integration"
     INTEGRATING = "integrating"
@@ -31,7 +39,7 @@ def _age(path, now_ts):
 
 
 def classify(model_dir, attempts, now_ts, min_age_s=MIN_AGE_S_DEFAULT):
-    sent = os.path.join(model_dir, SENTINEL)
+    sent = os.path.join(_noml(model_dir), SENTINEL)
     wght = os.path.join(model_dir, WEIGHTS)
 
     solved_age = _age(wght, now_ts)

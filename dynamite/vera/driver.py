@@ -12,6 +12,7 @@ Slurm state plus these ledgers.
 
 import argparse
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -21,7 +22,7 @@ import numpy as np
 
 from .classifier import ModelState, classify
 from .pack_integration import pack_libraries
-from .proposal import Result
+from .proposal import Result, validate_parset, SCHEMA_VERSION
 from .slurm import (
     RealRunner,
     build_integration_job_spec,
@@ -60,6 +61,8 @@ class VeraDriver:
         # proposal attribution, owned by the driver (not the proposer):
         self.dir_to_pid = {}
         self.dir_to_row = {}
+        self.rejected = {}
+        self.log = logging.getLogger(f"{__name__}.VeraDriver")
 
     # ------------------------------------------------------------ persistence
     def _load_json(self, name, default):
@@ -97,7 +100,7 @@ class VeraDriver:
         now = time.time()
         for row in self.config.all_models.table:
             d = row["directory"]
-            if not d:
+            if not d or str(d).startswith("rejected"):
                 continue
             full = os.path.join(self.output_root, "models", d)
             states[d] = classify(full, attempts=self.attempts.get(d, 0), now_ts=now)
@@ -119,6 +122,8 @@ class VeraDriver:
         )
         to_sol = sorted(d for d, s in states.items() if s is ModelState.TO_SOLVE)
 
+        for d in list(to_int) + list(to_sol):
+            self._write_parset_file(d)
         submitted = 0
         if to_int:
             submitted += self._submit_wave("int", pack_libraries(to_int), dry_run)
@@ -153,7 +158,11 @@ class VeraDriver:
         else:
             spec = build_solve_job_spec(k=k or self.k_start, n_items=len(new))
             script = os.path.join(os.path.dirname(__file__), "scripts", "solve_task.sh")
-        jid = submit_array(self.runner, spec, script, items)
+        if hasattr(self.runner, "submit_array"):
+            # local backend: execute synchronously, skip slurm argv plumbing
+            jid = self.runner.submit_array(script, items)
+        else:
+            jid = submit_array(self.runner, spec, script, items)
         for i, item in enumerate(items):
             _remember_ledger_jid(self.run_dir, kind, item, jid + i)
         self.inflight.setdefault(kind, []).extend(new)
@@ -170,6 +179,33 @@ class VeraDriver:
         if lf < 1.0:
             return max(4, self.k_start - 4)
         return self.k_start
+
+
+    def _write_parset_file(self, model_dir):
+        """Drop <models>/<dir>/vera_parset.json next to the artifacts.
+
+        Workers are pure functions of (config, parset): they never read the
+        shared all_models table, because every Configuration init runs
+        update_model_table() - whose janitor would delete *other* pending
+        rows it finds there (concurrent readers are outside DYNAMITE's
+        contract). Full par-values, fixed parameters included.
+        """
+        t = self.config.all_models.table
+        match = [i for i, r in enumerate(t) if r["directory"] == model_dir]
+        if not match:
+            return
+        i = match[0]
+        payload = {"schema_version": SCHEMA_VERSION,
+                   "par_names": list(self.config.parspace.par_names),
+                   "values": {n: float(t[n][i])
+                              for n in self.config.parspace.par_names}}
+        target = os.path.join(self.output_root, "models", model_dir,
+                              "vera_parset.json")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target))
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=1)
+        os.replace(tmp, target)
 
     def observe_completions(self):
         states = self.scan()
@@ -205,10 +241,64 @@ class VeraDriver:
         self.observe_completions()
         self.reconcile_and_submit(dry_run=dry_run)
         if self.proposer.quorum_pending() == 0 and not self.proposer.exhausted():
-            for p in self.proposer.propose():
-                self._create_model_entry(p)
+            t = self.config.all_models.table
+            before = len(t)
+            self.proposer.propose()
+            self._assign_directories(range(before, len(t)))
             self.reconcile_and_submit(dry_run=dry_run)
         return not self.proposer.exhausted()
+
+    # ------------------------------------------------------------ model rows
+    def _assign_directories(self, row_indices):
+        """Validate intake, then assign orblib_xxx_yyy/mlzz.zz/ directories.
+
+        Rows come from the proposer's generate(); this method never appends
+        rows - it names them exactly like
+        ModelInnerIterator.assign_model_directories does, then records the
+        dir->pid attribution the observer needs. Rejected proposals keep
+        their row as an audit trail under rejected/<pid>/, are dropped from
+        tracking, and surface as a failed Result.
+        """
+        t = self.config.all_models.table
+        bounds = self._intake_bounds()
+        qobs = self._qobs()
+        u_fixed = self.proposer_u_fixed()
+        sformat = self.config.system.parameters[0].sformat
+
+        row_to_pid = {row: pid for pid, row in
+                      self.proposer.pid_to_row.items()}
+
+        for idx in row_indices:
+            pid = row_to_pid.get(idx)
+            if pid is None:
+                continue
+            parset = {name: float(t[name][idx])
+                      for name in self.proposer.par_names}
+            clipped, violations = validate_parset(
+                parset, bounds, qobs=qobs, u_fixed=u_fixed)
+            if violations:
+                self.log.warning("intake rejected %s: %s", pid, violations)
+                self.rejected[pid] = violations
+                t["directory"][idx] = f"rejected/{pid}/"
+                result = Result(proposal_id=pid,
+                                model_dir=t["directory"][idx],
+                                status="failed")
+                self.proposer.observe([result])
+                del self.proposer.pid_to_row[pid]
+                continue
+            iteration = int(t["which_iter"][idx])
+            prior = t[:idx]
+            n = sum(1 for r in prior
+                    if int(r["which_iter"]) == iteration
+                    and r["directory"]
+                    and not str(r["directory"]).startswith("rejected"))
+            ml_val = float(t["ml"][idx]) if "ml" in t.colnames else 0.0
+            directory = (f"orblib_{iteration:03d}_{n:03d}"
+                         f"/ml{ml_val:{sformat}}/")
+            t["directory"][idx] = directory
+            self.dir_to_pid[directory] = pid
+            self.dir_to_row[directory] = idx
+        self._save_table_atomically()
 
     def run_forever(self, dry_run=False, once=False):
         while True:
@@ -218,38 +308,41 @@ class VeraDriver:
             time.sleep(self.poll_interval)
 
     # ------------------------------------------------------------ model rows
-    def _create_model_entry(self, proposal):
-        """Append one table row per proposal; assign a model directory.
+    def _intake_bounds(self):
+        bounds = {}
+        for p in self.config.parspace:
+            st = getattr(p, "par_generator_settings", None) or {}
+            bounds[p.name] = {"lo": st.get("lo"), "hi": st.get("hi")}
+        return bounds
 
-        Directory scheme mirrors ModelInnerIterator.assign_model_directories:
-        orblib_<iter>_<seq>/ml<value>. The proposer records dir->pid so
-        observe_completions can attribute results.
-        """
-        t = self.config.all_models.table
-        seq = sum(1 for r in t if str(r["directory"]).startswith("orblib_"))
-        which_iter = int(max(t["which_iter"])) + 1 if len(t) else 0
-        ml = proposal.parset.get("ml")
-        ml_tag = f"ml{ml:.2f}" if ml is not None else "ml0.00"
-        directory = f"orblib_{which_iter:03d}_{seq:03d}/{ml_tag}"
-        t.add_row(
-            [
-                *[proposal.parset.get(p.name, np.nan) for p in self.config.parspace],
-                np.nan,
-                np.nan,
-                np.nan,  # chi2 columns
-                str(_now64()),  # time_modified
-                False,
-                False,
-                False,  # flags
-                which_iter,
-                directory,
-            ]
-        )
-        row = len(t) - 1
-        self.dir_to_pid[directory] = proposal.proposal_id
-        self.dir_to_row[directory] = row
-        self._save_table_atomically()
+    def _qobs(self):
+        try:
+            stars = [c for c in self.config.system.cmp_list
+                     if type(c).__name__ == "TriaxialVisibleComponent"]
+            return float(stars[0].qobs) if stars else None
+        except (AttributeError, IndexError, TypeError):
+            return None
 
+    def _intake_bounds(self):
+        bounds = {}
+        for p in self.config.parspace:
+            st = getattr(p, "par_generator_settings", None) or {}
+            bounds[p.name] = {"lo": st.get("lo"), "hi": st.get("hi")}
+        return bounds
+
+    def _qobs(self):
+        try:
+            stars = [c for c in self.config.system.cmp_list
+                     if type(c).__name__ == "TriaxialVisibleComponent"]
+            return float(stars[0].qobs) if stars else None
+        except (AttributeError, IndexError, TypeError):
+            return None
+
+    def proposer_u_fixed(self):
+        for p in self.config.parspace:
+            if p.name == "u" and getattr(p, "fixed", True):
+                return float(p.raw_value)
+        return None
 
 # ------------------------------------------------------------------ helpers
 def _now64():

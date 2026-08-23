@@ -10,5 +10,5 @@ RUNDIR=${VERA_RUN_DIR:?VERA_RUN_DIR must be the driver run directory}
 PY=${VERA_PYTHON:-python}
 
 cd "$RUNDIR"
-printf '%s\n' "${MODELS[@]}" | xargs -P "$VERA_INT_PARALLEL" -n 1 -I{} \
+printf '%s\n' "${MODELS[@]}" | xargs -P "${VERA_INT_PARALLEL:-12}" -n 1 -I{} \
     "$PY" -m dynamite.vera.integrate_one --config "$CONFIG" --model-dir {}

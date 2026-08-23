@@ -14,11 +14,13 @@ WEIGHTS = "orbit_weights.ecsv"  # dyn.constants.weight_file
 def mk(root, sentinel=False, weights=False, fresh=False, other_fresh=False):
     d = root / "orblib_001_000" / "ml02.60"
     (d / "datfil").mkdir(parents=True, exist_ok=True)
+    noml_datfil = root / "orblib_001_000" / "datfil"
+    noml_datfil.mkdir(parents=True, exist_ok=True)
     old = NOW - 3600.0
     new = NOW - 5.0
     ts = new if fresh else old
     if sentinel:
-        f = d / "datfil" / "tube_box_done"
+        f = noml_datfil / "tube_box_done"
         f.write_text("")
         os.utime(f, (ts, ts))
     if weights:
