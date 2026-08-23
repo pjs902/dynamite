@@ -314,3 +314,16 @@ win (threshold crossed at ~45 fresh models vs ~180 for GridWalk, plus a
 (its start point sits near the single valley - 22 models vs 64). Honest
 takeaway: BO pays off when the landscape couples parameters or hides the
 valley from the starting point, not on single-valley problems.
+
+### Seed-replicated comparison (6 seeds, 2026-08-23)
+
+`run_seed_sweep.py` over the three surfaces, models-to-threshold medians:
+grid walk wins shape-ridge (4 vs 26 — its start sits in the valley already)
+and halo-banana (15 vs 25); BayesOpt wins production-4d decisively
+(42 vs 116) with better final chi2 (6013 vs 6070) at lower variance.
+Consistent with the real-data finding: BO pays off when parameters are
+coupled or the valley is hidden from the starting point.
+
+Real-orblib note: the full Fortran->adelie->chi2 path runs on macOS only
+with `KMP_INIT_AT_FORK=FALSE` exported before numpy import (libomp
+inherited-state deadlock after multiprocessing fork otherwise).

@@ -10,6 +10,12 @@ Run: python dev_tests/test_real_minirun.py
 """
 
 import os
+
+# must precede numpy/torch import: prevents the libomp-inherited-state
+# deadlock after multiprocessing fork on macOS
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["KMP_INIT_AT_FORK"] = "FALSE"
+
 import sys
 import tempfile
 
@@ -77,8 +83,9 @@ cfg = {
     },
     "multiprocessing_settings": {
         "modeliterator": "ModelInnerIterator",
-        "total_cores": min(8, os.cpu_count() or 4),
-        "ncpus": min(8, os.cpu_count() or 4),
+        # serial: isolates the macOS Pool hang seen with spawn workers
+        "total_cores": 1,
+        "ncpus": 1,
     },
     "legacy_settings": {"directory": "default"},
 }
@@ -95,8 +102,12 @@ cfg["system_components"]["bh"] = BASE["system_components"]["bh"]
 
 def main():
     with tempfile.TemporaryDirectory() as tmpdir:
-        cfg["io_settings"]["output_directory"] = tmpdir + "/"
-        cfg_path = os.path.join(tmpdir, "mini_real.yaml")
+        import shutil as _sh
+        outdir = "/tmp/minirun_out"
+        _sh.rmtree(outdir, ignore_errors=True)
+        os.makedirs(outdir)
+        cfg["io_settings"]["output_directory"] = outdir + "/"
+        cfg_path = os.path.join(outdir, "mini_real.yaml")
         with open(cfg_path, "w") as f:
             yaml.dump(cfg, f)
 
