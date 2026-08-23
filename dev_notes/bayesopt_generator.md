@@ -298,3 +298,19 @@ Tests & comparisons:
 
 Literature: SALE (arXiv:2608.00841), GPry (2023 JCAP 10 021),
 TuRBO (arXiv:1910.01739), BOLFI (2018), ALABI (2026); full list in spec.
+
+## Surface-based generator comparison (2026-08-22)
+
+`dev_tests/chi2_landscapes.py` defines three realistic chi2 surfaces
+(shape ridge with mass-flattening tilt; production-like 4D with an
+orthogonal BH bowl; the ml-halo constant-mass banana) calibrated to
+NGC6278 ranges. `run_surface_comparison.py` drives GridWalk vs
+BayesOptGenerator over them; `plot_surface_comparison.py` renders
+trajectory projections + convergence curves into `dev_tests/surface_figs/`.
+
+Dummy-scale results (150-model budget): production-4d is BayesOpt's clear
+win (threshold crossed at ~45 fresh models vs ~180 for GridWalk, plus a
+59-chi2-better optimum); shape-ridge is a tie; halo-banana is GridWalk's win
+(its start point sits near the single valley - 22 models vs 64). Honest
+takeaway: BO pays off when the landscape couples parameters or hides the
+valley from the starting point, not on single-valley problems.
