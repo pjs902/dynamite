@@ -1,0 +1,273 @@
+# Server-scale production grid: all three kinematic datasets (MUSE
+# BayesLOSVD + HST ProperMotions + MUSE veldist mean/sigma GaussHermite),
+# same kinematics section as NGC5139_config_smoketest.yaml.
+#
+# Free parameters: bh mass, ml, q, p. GridWalk/n_max_mods=500 follows
+# NGC5139_config_single.yaml's search (the proven single-dataset production
+# setup) rather than the combined configs' all-fixed smoke test.
+# u is fixed at 0.9999: its range was 0.95-1.0 on a 0.01 step, so it only
+# ever offered ~5 grid points and started hard against the upper bound.
+# The NFW halo stays out of the potential (contributes_to_potential: False)
+# with c and f fixed; their par_generator_settings are inert until then.
+#
+# orblib_settings is denser than the laptop-scale "bigger" config
+# (nE=16/nI2=10/nI3=8/dithering=2): nE=30, nI2=25, nI3=20, dithering=3,
+# quad_nr/nth/nph=40/20/20 -- meant for server-scale ncpus, not a laptop.
+#
+# Uses its own input/output dirs (NGC5139_production_input_xeast/,
+# NGC5139_production_output/) so a production run can't collide with any
+# laptop smoke-test output.
+#
+# Copy into NGC5139_production_input_xeast/ (ALL four kinematic sets):
+#   mge.ecsv
+#   veldist_kinematics.ecsv  veldist_aperture.dat  veldist_bins.dat
+#   hst_veldist_pm_2dhist.npz  hst_veldist_aperture.dat  hst_veldist_bins.dat
+#   lvm_kins.ecsv  lvm_aperture.dat  lvm_bins.dat
+#   gaia_veldist_pm_2dhist.npz  gaia_veldist_aperture.dat  gaia_veldist_bins.dat
+
+---
+system_attributes:
+    distMPc: 0.00543
+    name: "NGC5139"
+
+system_components:
+    bh:
+        parameters:
+            m:
+                # Prior: M_BH in [8e3, 6e4] Msun -> log10 in [3.90, 4.78].
+                # Start at the log-centre, log10(22000) = 4.342. Step 0.25 dex
+                # ~= x1.8 mass jumps; minstep 0.05 dex for refinement runs.
+                par_generator_settings:
+                    lo: 3.90
+                    hi: 4.78
+                    step: 0.25
+                    minstep: 0.05
+                fixed: False
+                value: 4.342
+                logarithmic: True
+                LaTeX: "$M_\\mathrm{BH}/M_\\odot$"
+            a:
+                fixed: True
+                value: 0.01
+                LaTeX: "$a_\\mathrm{BHs}$"
+        type: "Plummer"
+        include: True
+        contributes_to_potential: True
+
+    dh:
+        parameters:
+            c: # concentration
+                par_generator_settings:
+                    lo: 0.0
+                    hi: 20.0
+                    step: 2.0
+                    minstep: 0.1
+                fixed: True
+                value: 5.0
+                LaTeX: "$C$"
+            f: # dark-matter fraction M200/M*
+                par_generator_settings:
+                    lo: -10.0
+                    hi: -5.0
+                    step: 0.1
+                    minstep: 0.1
+                logarithmic: True
+                fixed: True
+                value: -6.0
+                LaTeX: "$\\log(M_{200}/M_*)$"
+        type: NFW
+        include: True
+        contributes_to_potential: False
+
+    stars:
+        parameters:
+            q: # intrinsic flattening (C/A)
+                par_generator_settings:
+                    lo: 0.05
+                    # Validity requires q <= u*qobs; with u=0.9999 and
+                    # qobs~0.90 that is q <= 0.89991, so a grid reaching 0.99
+                    # would waste proposals on permanently-invalid models.
+                    # RECOMPUTE this hi from your measured qobs if != 0.90.
+                    hi: 0.89
+                    step: 0.04
+                    minstep: 0.02
+                fixed: False
+                value: 0.5
+                LaTeX: "$q$"
+            p: # intrinsic flattening (B/A)
+                par_generator_settings:
+                    lo: 0.90
+                    hi: 0.999
+                    step: 0.02
+                    minstep: 0.01
+                fixed: False
+                value: 0.99
+                LaTeX: "$p$"
+            u: # sigma_obs / sigma_intrinsic
+                par_generator_settings:
+                    lo: 0.95
+                    hi: 1.0
+                    step: 0.01
+                    minstep: 0.01
+                fixed: True
+                value: 0.9999
+                LaTeX: "$u$"
+        type: "TriaxialVisibleComponent"
+        mge_pot: "mge.ecsv"
+        mge_lum: "mge.ecsv"
+        include: True
+        contributes_to_potential: True
+        kinematics:
+            veldist:
+                weight: 1.0
+                type: BayesLOSVD
+                datafile: "veldist_kinematics.ecsv"
+                aperturefile: "veldist_aperture.dat"
+                binfile: "veldist_bins.dat"
+            hst_pm:
+                weight: 1.0
+                type: ProperMotions
+                datafile: "hst_veldist_pm_2dhist.npz"
+                aperturefile: "hst_veldist_aperture.dat"
+                binfile: "hst_veldist_bins.dat"
+            lvm:
+                weight: 1.0
+                type: GaussHermite
+                datafile: "lvm_kins.ecsv"
+                aperturefile: "lvm_aperture.dat"
+                binfile: "lvm_bins.dat"
+            gaia_pm:
+                weight: 1.0
+                type: ProperMotions
+                datafile: "gaia_veldist_pm_2dhist.npz"
+                aperturefile: "gaia_veldist_aperture.dat"
+                binfile: "gaia_veldist_bins.dat"
+
+system_parameters:
+    ml:
+        par_generator_settings:
+            lo: 1.
+            hi: 5.
+            step: 0.2
+            minstep: 0.1
+        fixed: False
+        value: 2.6
+        LaTeX: "$Y_\\mathrm{r}$"
+
+###############################################################################
+# SECTION 2: SETTINGS
+###############################################################################
+
+orblib_settings:
+    nE: 30
+    logrmin: -2.0
+    logrmax: 3.7
+    nI2: 25 # must be >= 4
+    nI3: 20
+    dithering: 3
+    quad_nr: 40
+    quad_nth: 20
+    quad_nph: 20
+    orbital_periods: 200
+    sampling: 50000
+    starting_orbit: 1
+    number_orbits: -1
+    accuracy: "1.0d-5"
+    random_seed: 4242
+
+weight_solver_settings:
+    type: "NNLS"
+    # adelie (augmented-Lagrangian) rather than scipy. scipy's nnls is
+    # active-set Lawson-Hanson, which is single-threaded and sensitive to
+    # this matrix's row scaling -- its row norms run from a median of ~61
+    # to 3.8e16, the top ~305 rows being the mass constraints, and the
+    # solver only normalises per column so that imbalance survives.
+    nnls_solver: "adelie"
+    # Single precision throughout the solve path (histograms, matrix,
+    # solver arrays): halves every large allocation. Validated end-to-end
+    # on the xeast library - converged kinematic chi2 agrees with float64
+    # to 1.6e-5 relative, within the earlier <0.001%-class tolerance.
+    # Revert to float64 for verification solves (peak 502 GiB instead of
+    # 251 GiB per worker without streaming).
+    nnls_dtype: "float32"
+    # Read orbit-library histograms ONE kinematic set at a time during
+    # assembly (freeing each before reading the next). Bit-identical to
+    # non-streamed construction - proven by sha256 slab digests of X on
+    # the real library - and drops the per-worker peak another ~121 GiB.
+    # Costs ~27 min/model in repeated bz2 decompression over NFS.
+    stream_orblib_reads: true
+    # NB: read by nothing in dynamite -- 'maxiter_factor' appears only in
+    # config files and their comments, never in the code, so scipy runs
+    # with its own default of 3*n. Kept for reference, not effect.
+    maxiter_factor: 3
+    number_GH: 2
+    GH_sys_err: "0.0 0.0 0.0 0.0 0.3 0.3 0.6 0.6"
+    lum_intr_rel_err: 0.01
+    sb_proj_rel_err: 0.02
+
+parameter_space_settings:
+    generator_type: "GridWalk"
+    # To continue with BayesOpt after this GridWalk run: switch
+    # generator_type to "BayesOptGenerator" IN THIS SAME output_directory;
+    # the GP warm-starts from every row of all_models.ecsv (spec H2), so
+    # no Sobol burn is repeated.
+    which_chi2: "kinchi2"
+    generator_settings:
+        threshold_del_chi2_as_frac_of_sqrt2nobs: 0.1
+    stopping_criteria:
+        min_delta_chi2_abs: 0.5
+        n_max_mods: 500
+        n_max_iter: 100
+
+io_settings:
+    # The x-EAST datapack (2026-08-17) - the only frame-valid input set.
+    # NGC5139_production_input/ is the Aug-16 vintage with the flipped-frame
+    # bug; all model output computed from it is void.
+    input_directory: "NGC5139_production_input_xeast/"
+    output_directory: "NGC5139_production_output/"
+    all_models_file: "all_models.ecsv"
+
+multiprocessing_settings:
+    # REQUIRED: weight solves must run in the split flow. Under the default
+    # ModelInnerIterator they run inside the ncpus pool with NO cap -- up
+    # to 45 concurrent solves x ~190 GiB each would exceed the node (~8.5 TB
+    # vs 1416 GB). Only SplitModelIterator honours ncpus_weights below.
+    modeliterator: "SplitModelIterator"
+    # The whole budget. 'auto' chunking sizes itself against this, so it is
+    # the one number to change when moving to a different node.
+    total_cores: 90
+
+    # Concurrent MODELS, each integrating one orbit library. Both orbit
+    # families run at once, so a model occupies orblib_chunks * 2 processes
+    # and the integration phase uses ncpus * orblib_chunks * 2 in total.
+    # At 45 models x 1 chunk x 2 families that is exactly total_cores; when
+    # an iteration offers fewer libraries, 'auto' below widens the chunking
+    # to fill the same 90 rather than leaving cores idle.
+    ncpus: 45
+
+    # Split each orbit family's starting points across this many processes.
+    # 'auto' resolves per iteration as total_cores // (n_orblib * 2), so a
+    # wide iteration that already fills the machine gets no chunking and a
+    # narrow one gets a lot.
+    # Needs a DYNAMITE with the pm_hist merge -- chunking was refused for
+    # any library with ProperMotions before that.
+    orblib_chunks: "auto"
+
+    # Six weight solves at a time. This is a MEMORY cap, not a core cap,
+    # and has to be set explicitly because it otherwise defaults to ncpus.
+    #
+    # Measured on the real xeast library (30x25x20, 45000 orbits, matrix
+    # 371212x45000) with this config's exact solver settings
+    # (adelie + float32 + streamed reads): 190 GiB peak per worker.
+    # Budget: floor(0.85 * 1416 GB / 190 GiB) = 6 workers. If the node is
+    # shared or RSS creeps above ~200 GiB/worker in the first models, drop
+    # to 4 (still 4x the old throughput; float64+no-streaming would cap at
+    # 626 GiB/worker = ncpus_weights: 1).
+    #
+    # Threads: set OMP_NUM_THREADS/RAYON_NUM_THREADS in the launcher BEFORE
+    # numpy is imported - about 192 // ncpus_weights = 32 per worker with
+    # six workers. See run_production_cluster.sh.
+    ncpus_weights: 6
+
+legacy_settings:
+    directory: "default"
