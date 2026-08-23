@@ -20,7 +20,7 @@ sys.path.insert(0, "/Users/pesmith/.opencode/skills/figure-style")
 import kernel  # noqa: E402
 import chi2_landscapes as L  # noqa: E402
 
-kernel.apply_figure_style(sizes=(8, 7, 6))
+kernel.apply_figure_style(frame="boxed", sizes=(8, 7, 6))
 CMAP_TIME = "viridis"  # shared semantics: dark=early, bright=late
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -111,7 +111,6 @@ def trajectory_fig(land):
                 ax.set_ylabel(DISPLAY[land.names[ib]])
             ax.set_xlim(lims[r][0], lims[r][1])
             ax.set_ylim(lims[r][2], lims[r][3])
-            kernel.set_frame(ax)
             ax.tick_params(direction="out", top=False, right=False, labelsize=6, which="both")
             ax.set_xlabel(DISPLAY[land.names[ia]], labelpad=9)
             if c == 0:
@@ -184,7 +183,6 @@ def convergence_fig():
         ax.set_xlabel("models evaluated")
         ax.margins(x=0.04, y=0.12)
         ax.tick_params(direction="out", top=False, right=False, labelsize=6, which="both")
-        kernel.set_frame(ax)
     axes[0].set_ylabel("$\\chi^2$ (best so far)")
     handles = [
         Line2D([], [], color="#2166ac", lw=1.4, label="grid walk"),
