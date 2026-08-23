@@ -299,7 +299,7 @@ compute, not science.
 
 ## 10. Rollout: capability track (local) ⊥ deployment track (VERA)
 
-Governing principle: **strategist capabilities are proven locally; clusters
+Governing principle: **proposer capabilities are proven locally; clusters
 are backends, not milestones.** No capability phase waits on cluster access,
 and deployment may adopt whichever proposer is furthest along at launch time
 (H2 warm-start makes mid-campaign proposer swaps cheap).

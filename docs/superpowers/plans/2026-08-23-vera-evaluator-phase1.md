@@ -1245,7 +1245,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 def test_quorum_fraction_semantics(minimal_config):
-    strat = make_micro_strategist(minimal_config, min_solved_fraction=0.8)
+    strat = make_micro_proposer(minimal_config, min_solved_fraction=0.8)
     props = strat.propose(max_batch=500)          # e.g. 10 proposals
     n = len(props)
     # 0 solved -> quorum_pending == n (nothing may re-center yet)
@@ -1257,7 +1257,7 @@ def test_quorum_fraction_semantics(minimal_config):
 
 
 def test_recenter_uses_only_newly_solved(minimal_config):
-    strat = make_micro_strategist(minimal_config)
+    strat = make_micro_proposer(minimal_config)
     first = strat.propose(max_batch=500)
     _solve_all(strat, first)
     second = strat.propose(max_batch=500)         # re-centered proposals differ
@@ -1265,7 +1265,7 @@ def test_recenter_uses_only_newly_solved(minimal_config):
     assert all(p.proposal_id not in ids_a for p in second)
 ```
 
-Helpers `make_micro_strategist` / `_solve_rows` / `_solve_all` follow Task 5's test-file fixture pattern (`minimal_config`, direct table mutation).
+Helpers `make_micro_proposer` / `_solve_rows` / `_solve_all` follow Task 5's test-file fixture pattern (`minimal_config`, direct table mutation).
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1344,21 +1344,21 @@ pytest.importorskip("botorch")     # BO stack optional for the rest of the suite
 
 
 def test_adapter_maps_generated_rows_to_proposals(minimal_bo_config):
-    strat = make_bo_strategist(minimal_bo_config)      # generator_type BayesOpt
+    strat = make_bo_proposer(minimal_bo_config)      # generator_type BayesOpt
     props = strat.propose(max_batch=4)
     assert 1 <= len(props) <= 4                        # batch_size honored
     assert len({p.proposal_id for p in props}) == len(props)
 
 
 def test_exhausted_or_status_flags(minimal_bo_config):
-    strat = make_bo_strategist(minimal_bo_config)
+    strat = make_bo_proposer(minimal_bo_config)
     strat.propose(max_batch=4)
     assert isinstance(strat.exhausted(), bool)
 
 
 def test_warmstart_trains_from_history(minimal_bo_config, populated_table):
     # populated_table: fixture inserting >= n_initial_random valid rows
-    strat = make_bo_strategist(minimal_bo_config)
+    strat = make_bo_proposer(minimal_bo_config)
     props = strat.propose(max_batch=4)
     assert props                                       # no Sobol warm-up needed
 ```
