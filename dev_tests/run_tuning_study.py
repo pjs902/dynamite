@@ -187,7 +187,23 @@ def t2():
     print(f"\n=== T2: warm-start dose-response on {land.name} ===", flush=True)
     for k in [0, 10, 30, 60]:
         hist = history_pool[:k] if k else None
-        res = summarize(f"history={k:>3}", drive(land, gs, seed_hist=hist), SEEDS)
+        if k == 0:
+            # cold-start baseline: without it the GP trains on 0 rows
+            gs["n_initial_random"] = 8
+        res = summarize(f"history={k:>3} uniform", drive(land, gs, seed_hist=hist), SEEDS)
+    # clustered history: rows near the optimum basin, like a real grid-walk
+    # run leaves behind (this is the production warm-start scenario)
+    for k in [10, 30, 60]:
+        hist = []
+        for _ in range(k):
+            mbh = float(np.clip(rng.normal(4.33, 0.06), 3.9, 4.78))
+            ml = float(np.clip(rng.normal(3.5, 0.35), 1.0, 5.0))
+            q = float(np.clip(rng.normal(0.52, 0.06), 0.3, 0.89))
+            p = float(np.clip(rng.normal(0.965, 0.008), 0.90, 0.999))
+            c = land([[mbh, ml, q, p]])[0]
+            hist.append([mbh, ml, q, p, c, c, float("nan"), "", True, True, True, 0, "d"])
+        gs["n_initial_random"] = 0
+        res = summarize(f"history={k:>3} cluster", drive(land, gs, seed_hist=hist), SEEDS)
 
 
 def t4():
@@ -217,7 +233,7 @@ def t5():
             + L.HALO_BANANA(np.column_stack([X[:, 1], np.full(len(X), 6.0), X[:, 5]])) * 0.5
             + 2900.0
         ),
-        threshold=6120.0,
+        threshold=8950.0,  # floor ~8883 = 0.5*prod + 0.5*halo + 2900
         desc="production 4D x halo (c inert, f coupled)",
     )
     gs = {
