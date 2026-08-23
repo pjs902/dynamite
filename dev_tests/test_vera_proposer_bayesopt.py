@@ -10,7 +10,7 @@ import sys
 import types
 
 import pytest
-from astropy.table import Column
+from astropy.table import Column, Table
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -20,11 +20,13 @@ try:
         Parameter,
         ParameterSpace,
     )
-except ImportError as _e:
+except Exception as _e:  # noqa: BLE001 - any import-order ABI failure counts
     # Known host quirk: once torch loads its own libstdc++/libicu, the
-    # subsequent pymc->sqlite3 C-extension import can fail the ABI check.
-    # The BO stack gets a clean env on VERA (spec section 7); locally we skip.
-    pytest.skip(f"BO stack unusable on this host: {_e}", allow_module_level=True)
+    # subsequent pymc->sqlite3 C-extension import can fail an ABI check -
+    # and depending on which side imports first, different exception types
+    # surface. The BO stack gets a clean env on VERA (spec section 7).
+    pytest.skip(f"BO stack unusable on this host: {_e!r}",
+                allow_module_level=True)
 
 from dynamite.vera.proposer_bayesopt import BayesOptProposer  # noqa: E402
 
