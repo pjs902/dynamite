@@ -22,7 +22,9 @@ try:
     # the whole machine, so it would also discard a restriction the user
     # meant to impose (taskset is not cgroup-enforced, so nothing else
     # would put it back).
-    _saved_affinity = os.sched_getaffinity(0) if hasattr(os, "sched_getaffinity") else None
+    _saved_affinity = (
+        os.sched_getaffinity(0) if hasattr(os, "sched_getaffinity") else None
+    )
     import adelie.solver as _adelie_solver
 
     _ADELIE_AVAILABLE = True
@@ -164,7 +166,9 @@ class WeightSolver(object):
         """
         stars = self.system.get_unique_triaxial_visible_component()
         if any(k.type != "GaussHermite" for k in stars.kinematic_data):
-            self.logger.info("All kinematics must be 'GaussHermite' for kinmapchi2. Value set to nan.")
+            self.logger.info(
+                "All kinematics must be 'GaussHermite' for kinmapchi2. Value set to nan."
+            )
             return float("nan")  # #######################################
         number_gh = self.settings["number_GH"]
         chi2_kinmap = 0.0
@@ -188,7 +192,9 @@ class WeightSolver(object):
             coefs = ["v", "sigma"] + [f"h{i}" for i in range(3, n_gh + 1)]
             # get the model's projected masses=flux (unused) and kinematic data
             a = analysis.Analysis(config=self.config, model=self.model, kin_set=kin_set)
-            model_gh_coef = a.get_gh_model_kinematic_maps(v_sigma_option="fit", weights=weights, orblib=fresh_orblib)
+            model_gh_coef = a.get_gh_model_kinematic_maps(
+                v_sigma_option="fit", weights=weights, orblib=fresh_orblib
+            )
             # get the observed projected masses (unused) and kinematic data
             kinematics_data = kin_data.get_data()
             # calculate chi2_kinmap
@@ -295,7 +301,9 @@ class LegacyWeightSolver(WeightSolver):
         # When varying ml the LOSVD is scaled - no new orbits are calculated.
         # Therefore we need to know the ml that was used for the orbit library.
         # The scaling factor is sqrt(model_ml/original_orblib_ml).
-        ml_scaling_factor = self.config.all_models.get_model_velocity_scaling_factor(model=self.model)
+        ml_scaling_factor = self.config.all_models.get_model_velocity_scaling_factor(
+            model=self.model
+        )
         # -------------------
         # write nn.in
         # -------------------
@@ -335,11 +343,17 @@ class LegacyWeightSolver(WeightSolver):
             + "\n"
         )
         if self.legacy_files:
-            text += 2 * f"datfil/orblib_{self.ml}.dat\n" + 2 * f"datfil/orblibbox_{self.ml}.dat\n"  # yes, really...
+            text += (
+                2 * f"datfil/orblib_{self.ml}.dat\n"
+                + 2 * f"datfil/orblibbox_{self.ml}.dat\n"
+            )  # yes, really...
         else:
             for f in "_qgrid", "_losvd_hist", "box_qgrid", "box_losvd_hist":
                 text += f"datfil/orblib{f}_{self.ml}.dat\n"
-        text += str(self.settings["nnls_solver"]) + "                                  [ nnls solver ]"
+        text += (
+            str(self.settings["nnls_solver"])
+            + "                                  [ nnls solver ]"
+        )
 
         nn_file = open(self.direc_no_ml + f"ml{self.ml:{self.sformat}}/nn.in", "w")
         nn_file.write(text)
@@ -373,7 +387,9 @@ class LegacyWeightSolver(WeightSolver):
         """
         self.logger.info(f"Using WeightSolver: {__class__.__name__}")
         if (not ignore_existing_weights) and self.weight_file_exists():
-            self.logger.info(f"Reading NNLS solution from existing output {self.weight_file}.")
+            self.logger.info(
+                f"Reading NNLS solution from existing output {self.weight_file}."
+            )
             results = ascii.read(self.weight_file)
             weights = results["weights"]
             chi2_tot = results.meta["chi2_tot"]
@@ -403,7 +419,10 @@ class LegacyWeightSolver(WeightSolver):
                             j = line.find(".log")
                             logfile = line[i + 3 : j + 4]
                             break
-                self.logger.info("Fitting orbit library to the kinematic " + f"data: {logfile[: logfile.rindex('/')]}")
+                self.logger.info(
+                    "Fitting orbit library to the kinematic "
+                    + f"data: {logfile[: logfile.rindex('/')]}"
+                )
                 p = subprocess.run(
                     "bash " + cmdstr,
                     stdout=subprocess.PIPE,
@@ -419,7 +438,9 @@ class LegacyWeightSolver(WeightSolver):
                         os.remove(f_name)
                 log_file = f"Logfile: {self.direc_no_ml + logfile}."
                 if not p.stdout.decode("UTF-8"):
-                    self.logger.info(f"...done, NNLS problem solved - {cmdstr} exit code {p.returncode}. {log_file}")
+                    self.logger.info(
+                        f"...done, NNLS problem solved - {cmdstr} exit code {p.returncode}. {log_file}"
+                    )
                 else:
                     text = f"...failed! {cmdstr} exit code {p.returncode}. Message: {p.stdout.decode('UTF-8')}"
                     if p.returncode == 127:  # command not found
@@ -437,7 +458,9 @@ class LegacyWeightSolver(WeightSolver):
                 # into model directory
                 self.config.copy_config_file(self.direc_with_ml)
             else:  # If legacy output files exist, just create the weight file
-                self.logger.info("Reading NNLS solution from existing legacy output and converting to weights file.")
+                self.logger.info(
+                    "Reading NNLS solution from existing legacy output and converting to weights file."
+                )
             # Now the legacy result files exist -> read, calculate
             # kinmapchi2, and save to the weight file.
             weights, chi2_tot, chi2_kin = self.get_weights_and_chi2_from_orbmat_file()
@@ -737,7 +760,9 @@ class NNLS(WeightSolver):
         # constraint-row scaling differs from NGC6278/omega Cen - adelie_mu
         # itself carries the same caveat (see solve_adelie_alm docstring).
         nnls_dtype = self.settings.get("nnls_dtype", "float64")
-        assert nnls_dtype in ("float32", "float64"), "nnls_dtype must be 'float32' or 'float64'"
+        assert nnls_dtype in ("float32", "float64"), (
+            "nnls_dtype must be 'float32' or 'float64'"
+        )
         self.nnls_dtype = np.float32 if nnls_dtype == "float32" else np.float64
         # Stream orbit-library histogram reads set-by-set in the fused adelie
         # constructor. Pure memory setting: results are bit-identical either
@@ -827,7 +852,10 @@ class NNLS(WeightSolver):
         # and it avoids growing orbmat by np.vstack per kinematic set, which
         # reallocates and copies the whole matrix each time (~125 GiB for
         # omega Cen). The results are kept and reused in the loop below.
-        obs_values = [kins.get_observed_values_and_uncertainties(self.settings) for kins in stars.kinematic_data]
+        obs_values = [
+            kins.get_observed_values_and_uncertainties(self.settings)
+            for kins in stars.kinematic_data
+        ]
         n_rows = self.n_mass_constraints + sum(np.size(v) for v, _ in obs_values)
         con = np.zeros(n_rows, dtype=dtype)
         econ = np.zeros(n_rows, dtype=dtype)
@@ -860,7 +888,9 @@ class NNLS(WeightSolver):
         econ[idx] = np.abs(self.projected_masses * self.projected_mass_error)
         orbmat[idx, :] = np.hstack(orblib.projected_masses).T
         # add kinematics to con, econ, orbmat
-        kins_and_orb_veldist = zip(stars.kinematic_data, orblib.vel_histograms, obs_values)
+        kins_and_orb_veldist = zip(
+            stars.kinematic_data, orblib.vel_histograms, obs_values
+        )
         idx_ap_start = 0
         idx_row = self.n_mass_constraints
         for kins, orb_veldist, tmp in kins_and_orb_veldist:
@@ -869,7 +899,9 @@ class NNLS(WeightSolver):
             idx_ap_end = idx_ap_start + n_ap
             prj_mass_i = self.projected_masses[idx_ap_start:idx_ap_end]
             idx_ap_start += n_ap
-            obs_kins, obs_kins_err, orb_kins = self._prepare_kinematic_block(kins, orb_veldist, tmp, prj_mass_i)
+            obs_kins, obs_kins_err, orb_kins = self._prepare_kinematic_block(
+                kins, orb_veldist, tmp, prj_mass_i
+            )
             # append constraints/errors/orbits to con/econ/orbmat
             n_orb_constraints = orb_kins.size // orblib.n_orbs
             idx_row_end = idx_row + obs_kins.size
@@ -940,7 +972,10 @@ class NNLS(WeightSolver):
         stars = self.system.get_unique_triaxial_visible_component()
         # observed values depend only on the kinematic data; same pre-pass,
         # kept and reused, as in construct_nnls_matrix_and_rhs
-        obs_values = [kins.get_observed_values_and_uncertainties(self.settings) for kins in stars.kinematic_data]
+        obs_values = [
+            kins.get_observed_values_and_uncertainties(self.settings)
+            for kins in stars.kinematic_data
+        ]
         n_rows = self.n_mass_constraints + sum(np.size(v) for v, _ in obs_values)
         sqrt_mu = np.sqrt(self.adelie_mu)
         con = np.zeros(n_rows, dtype=dtype)
@@ -958,7 +993,8 @@ class NNLS(WeightSolver):
                 orblib.intrinsic_masses = orblib.intrinsic_masses.astype(np.float32)
             if getattr(orblib, "projected_masses", None) is not None:
                 orblib.projected_masses = [
-                    p.astype(np.float32) if p is not None else None for p in orblib.projected_masses
+                    p.astype(np.float32) if p is not None else None
+                    for p in orblib.projected_masses
                 ]
 
         if self.stream_reads:
@@ -991,7 +1027,9 @@ class NNLS(WeightSolver):
                     orblib.read_vel_histograms(kin_sets=[si], skip_density=True)
                     _downcast_orblib_data()
                 orb_veldist = orblib.vel_histograms[si]
-                assert orb_veldist is not None, f"streamed read returned no histogram for set {si}"
+                assert orb_veldist is not None, (
+                    f"streamed read returned no histogram for set {si}"
+                )
                 prj_parts_i = orblib.projected_masses[si]
                 assert prj_parts_i is not None
                 proj_parts[si] = prj_parts_i
@@ -1045,14 +1083,18 @@ class NNLS(WeightSolver):
             econ[idx] = np.abs(self.projected_masses * self.projected_mass_error)
             X[idx, :] = np.hstack(orblib.projected_masses).T
             # kinematics: identical block sequence to construct_nnls_matrix_and_rhs
-            kins_and_orb_veldist = zip(stars.kinematic_data, orblib.vel_histograms, obs_values)
+            kins_and_orb_veldist = zip(
+                stars.kinematic_data, orblib.vel_histograms, obs_values
+            )
             idx_ap_start = 0
             idx_row = self.n_mass_constraints
             for kins, orb_veldist, tmp in kins_and_orb_veldist:
                 n_ap = kins.n_spatial_bins
                 prj_mass_i = self.projected_masses[idx_ap_start : idx_ap_start + n_ap]
                 idx_ap_start += n_ap
-                obs_kins, obs_kins_err, orb_kins = self._prepare_kinematic_block(kins, orb_veldist, tmp, prj_mass_i)
+                obs_kins, obs_kins_err, orb_kins = self._prepare_kinematic_block(
+                    kins, orb_veldist, tmp, prj_mass_i
+                )
                 n_orb_constraints = orb_kins.size // n_orbs
                 idx_row_end = idx_row + obs_kins.size
                 assert n_orb_constraints == obs_kins.size, (
@@ -1100,7 +1142,9 @@ class NNLS(WeightSolver):
         X /= col_norm
         y = np.concatenate([[0.0], rhs[1:]]).astype(dtype)
         row0_vec = np.full(n_orbs, 1.0, dtype=dtype) / econ[0]
-        return AdelieProblem(X=X, col_norm=col_norm, y=y, row0_vec=row0_vec, b0=float(rhs[0]))
+        return AdelieProblem(
+            X=X, col_norm=col_norm, y=y, row0_vec=row0_vec, b0=float(rhs[0])
+        )
 
     def _prepare_kinematic_block(self, kins, orb_veldist, tmp, prj_mass_i):
         """Shared by all NNLS constructors.
@@ -1124,7 +1168,13 @@ class NNLS(WeightSolver):
         obs_kins_err = (obs_kins_err.T * prj_mass_i).T
         edges_restore = []
         if hist_dim == 1:  # Do we need this for proper motions (2d hists)?
-            edges_restore.append((orb_veldist.y, orb_veldist.y[:, 0, :].copy(), orb_veldist.y[:, -1, :].copy()))
+            edges_restore.append(
+                (
+                    orb_veldist.y,
+                    orb_veldist.y[:, 0, :].copy(),
+                    orb_veldist.y[:, -1, :].copy(),
+                )
+            )
             orb_veldist.y[:, 0, :] = 0.0
             orb_veldist.y[:, -1, :] = 0.0
         # transform orblib to same parameterisation as observed kinematics
@@ -1291,7 +1341,9 @@ class NNLS(WeightSolver):
         return X, col_norm, y
 
     @staticmethod
-    def kkt_violation_augmented(row0_vec, b0, X_scaled, col_norm, resid_full, weights, mu):
+    def kkt_violation_augmented(
+        row0_vec, b0, X_scaled, col_norm, resid_full, weights, mu
+    ):
         r"""Optimality certificate computed from the augmented matrix alone.
 
         Same semantics as :meth:`kkt_violation` — returns ``(scaled, raw)``
@@ -1313,7 +1365,9 @@ class NNLS(WeightSolver):
         r0 = float(row0_vec @ weights) - float(b0)
         r_rest = np.asarray(resid_full, dtype=np.float64).ravel()[1:]
         resid = np.concatenate(([r0], r_rest))
-        grad = row0_vec.astype(np.float64) * r0 + col_norm.astype(np.float64) * (X_scaled[1:, :].T @ r_rest)
+        grad = row0_vec.astype(np.float64) * r0 + col_norm.astype(np.float64) * (
+            X_scaled[1:, :].T @ r_rest
+        )
         viol = np.where(weights > 0, np.abs(grad), np.maximum(-grad, 0.0))
         raw = float(np.max(viol))
         # Cauchy-Schwarz denominator as in kkt_violation, rebuilt through the
@@ -1488,10 +1542,16 @@ class NNLS(WeightSolver):
         # difference vs a gemv over A), row 0 via row0_vec. Serves both the
         # surrogate KKT below and solve()'s final chi2_vector.
         r0 = float(problem.row0_vec @ best_w) - problem.b0
-        r_rest = y[1:].astype(np.float64) - X[1:, :] @ (col_norm.astype(np.float64) * best_w)
+        r_rest = y[1:].astype(np.float64) - X[1:, :] @ (
+            col_norm.astype(np.float64) * best_w
+        )
         resid_full = np.concatenate(([r0], r_rest))
-        kkt, kkt_raw = self.kkt_violation_augmented(problem.row0_vec, problem.b0, X, col_norm, resid_full, best_w, mu)
-        self.logger.info(f"adelie ALM: KKT violation scaled={kkt:.3e} (in [0,1]), raw={kkt_raw:.3e}")
+        kkt, kkt_raw = self.kkt_violation_augmented(
+            problem.row0_vec, problem.b0, X, col_norm, resid_full, best_w, mu
+        )
+        self.logger.info(
+            f"adelie ALM: KKT violation scaled={kkt:.3e} (in [0,1]), raw={kkt_raw:.3e}"
+        )
         # A fixed threshold cannot separate converged from unconverged across
         # datasets: omega Cen's good solution scores 5.7e-03 while a known
         # UNCONVERGED synthetic one scores 1.4e-05. What counts as small is
@@ -1559,13 +1619,17 @@ class NNLS(WeightSolver):
                     for hist in orblib.vel_histograms:
                         hist.y = hist.y.astype(np.float32)
                     orblib.intrinsic_masses = orblib.intrinsic_masses.astype(np.float32)
-                    orblib.projected_masses = [p.astype(np.float32) for p in orblib.projected_masses]
+                    orblib.projected_masses = [
+                        p.astype(np.float32) for p in orblib.projected_masses
+                    ]
             if self.nnls_solver == "adelie":
                 # The fused constructor assembles adelie's augmented matrix X
                 # directly from the orbit library - A is never built on this
                 # path, which halves the resident set during the solve.
                 if not _ADELIE_AVAILABLE:
-                    text = "nnls_solver 'adelie' is not installed. Run: pip install adelie"
+                    text = (
+                        "nnls_solver 'adelie' is not installed. Run: pip install adelie"
+                    )
                     self.logger.error(text)
                     raise ImportError(text)
                 try:
@@ -1636,12 +1700,26 @@ class NNLS(WeightSolver):
                     # term. Algebraically identical to (A@w - b)**2; differs
                     # only in gemv rounding (quantified in the perf notes).
                     row0_resid = float(problem.row0_vec @ weights) - problem.b0
-                    chi2_vector = chi2_vector_from_residuals(resid_full, row0_resid * row0_resid)
+                    chi2_vector = chi2_vector_from_residuals(
+                        resid_full, row0_resid * row0_resid
+                    )
                 else:
                     chi2_vector = (np.dot(A, weights) - b) ** 2.0
                 chi2_tot = np.sum(chi2_vector)
                 chi2_kin = np.sum(chi2_vector[self.n_mass_constraints :])
-                chi2_kinmap = self.chi2_kinmap(weights, orblib=orblib)
+                # chi2_kinmap needs in-memory histograms, but the streaming
+                # fused constructor frees each per-set read after use - so
+                # the caller's orblib may hold None entries here. Hand over
+                # the library only if every set survived; otherwise let
+                # chi2_kinmap build and read a fresh one (the upstream
+                # behaviour, worth ~one extra full read per model).
+                hists = getattr(orblib, "vel_histograms", None)
+                kinmap_orblib = (
+                    orblib
+                    if hists is not None and all(h is not None for h in hists)
+                    else None
+                )
+                chi2_kinmap = self.chi2_kinmap(weights, orblib=kinmap_orblib)
                 # save the output
                 results = table.Table()
                 results["weights"] = weights
