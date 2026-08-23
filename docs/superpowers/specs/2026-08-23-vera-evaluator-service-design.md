@@ -123,10 +123,39 @@ Three implementations planned:
 |---|---|---|
 | 1 | `GridWalkClassic` — port of current generator, byte-compatible proposals | whole current walk-step solved |
 | 2 | `MicroBatchWalk` — re-center when ≥X% of step solved (X default 80%) | fraction |
-| 3 | GP-BO adapter to the external `bayesopt` agent | 0 (continuous) |
+| 3 | GP-BO: `BayesOptGenerator` (`fork/bayesopt`) behind a thin adapter | 0 (continuous) |
 
 Phase 3 note for the BO team: `observe()` fires per completed model, not in
 batches — the GP updates immediately; staleness is structurally zero.
+
+### 4.1 TableDriven adapter pattern (BayesOptGenerator integration)
+
+The bayesopt modernization design
+(`docs/superpowers/specs/2026-08-22-bayesopt-modernization-design.md`)
+implements BO *inside* DYNAMITE: `BayesOptGenerator.generate(current_models)`
+trains its GP from the shared `all_models.ecsv` rows
+(`extract_gp_training_data`, `all_done` mask) and appends proposals as new
+rows. Observation flows through the table, not callbacks.
+
+Consequence for schema v1: a strategist may satisfy `observe()` by reading
+table rows; streaming callbacks are an optimization, not a requirement. The
+Phase-3 adapter is therefore thin:
+
+| Strategist v1 | BayesOptGenerator |
+|---|---|
+| `propose(n)` | instantiate generator against driver's live AllModels; call `generate()`; map appended rows → Proposals by proposal hash |
+| `observe(results)` | no-op (generator re-reads table at next generate) |
+| `quorum_pending()` | 0 — R3 CorrectCounter and stopping flags are evaluated per completed model |
+| `exhausted()` | OR of generator status flags incl. `gp_predictions_accurate` |
+
+Two design gifts arrive with it: **H2 warm-start** means the VERA campaign can
+begin as a continuation of the local GridWalk run's table — every historical
+row becomes GP training data for free; and their explicitly **deferred**
+"asynchronous batch BO across the model pool" is precisely what this service
+provides — the deferral was an artifact of single-node phased execution, which
+VERA dissolves. Their tuning study's `batch_size=4` winner matches GPry's
+min(dims, workers) guideline at d=4 free parameters, and sizes the solve-array
+width nicely (K ≥ 4 keeps GP cadence tight).
 
 ## 5. Executor components
 
@@ -230,6 +259,9 @@ recorded here afterward:
    Alternative if MPCDF's curated stack suffices: compiler module + venv on
    ptmp. Decision rule: prefer wheels-over-modules; pin numpy first, then
    install `adelie` wheel compatible with it, then scipy/astropy/pathos/etc.
+   Phase 3 adds the BO stack per the bayesopt H4 pins: torch (CPU build),
+   botorch ≥ 0.18.1, gpytorch — large wheels, one more reason the env lives
+   on scratch.
 3. `pip install --no-deps ./dynamite` (repo checkout lives on scratch too).
 4. `make -C legacy_fortran all` with loaded gcc; verify `orbitstart` runs a
    1-orbit smoke case.
@@ -272,7 +304,7 @@ compute, not science.
 | 0 | local recovery wave finishes; clean per-solve wall times recorded | ≥5 solves completing without dmesg kills; numbers into §7 freeze file |
 | 1 | VERA env build + smoke campaign: `GridWalkClassic`, `n_max_mods ≈ 20`, ≤ 8 nodes | end-to-end in ≤ 1 day: 20 models integrated + solved; table complete; one solve's χ² within 1e-6 rel. of local same-parset reference (tolerance sized for cross-BLAS-kernel drift; local runs measured up to 9e-7 across code-path variants); driver kill/restart resumes with zero duplicates |
 | 2 | production campaign on `GridWalkClassic`; then swap in `MicroBatchWalk` | iteration wall-time ≤ 36 h sustained over 3 iterations; quota/tar guards verified in dry-run |
-| 3 | GP-BO adapter live; A/B vs GridWalk at equal model budget | BO matches or beats GridWalk best-χ² trajectory per model count |
+| 3 | GP-BO live: merge or vendor `fork/bayesopt`, run `BayesOptGenerator` behind the §4.1 adapter (`batch_size=4` per their T1/T3 tuning); warm-start from the Phase-2 table via their H2 mechanism; A/B vs GridWalk at equal model budget | BO matches or beats GridWalk best-χ² trajectory per model count; R3 stopping flag observed firing naturally |
 
 Local fat box remains the dev/debug rig and overflow capacity throughout; the
 shared artifact format lets a campaign straddle both.
@@ -284,7 +316,7 @@ shared artifact format lets a campaign straddle both.
 | fairshare decay slows queues mid-campaign | adaptive K; correctness independent of width; local overflow box |
 | MPCDF policy/QoS shifts | every limit is a config knob; nothing hard-coded |
 | NFS metadata load from large arrays | tasks touch artifacts once; driver polls its own submission ledger + sacct, not recursive finds |
-| `bayesopt` branch schema drift | Proposal/Result JSON schema frozen here at v1; adapters isolate changes |
+| `bayesopt` branch schema drift | Proposal/Result JSON schema frozen here at v1; adapters isolate changes. The generator is table-coupled (§4.1), so upstream drift surfaces as adapter errors, not silent science corruption |
 | scratch loss (no backups) | libraries recomputable; tables mirrored to `/u` continuously |
 
 ## 12. Open items (execution-time)
