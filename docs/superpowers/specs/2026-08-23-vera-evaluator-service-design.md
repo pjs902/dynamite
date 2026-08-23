@@ -11,7 +11,7 @@
 
 Run the ω Cen Schwarzschild grid campaign on MPCDF's VERA cluster using a
 Slurm-native evaluator service, replacing phased in-node iteration with a
-strategist/executor split that supports classic GridWalk today and GP-driven
+proposer/executor split that supports classic GridWalk today and GP-driven
 Bayesian optimization (`bayesopt` branch) tomorrow.
 
 ### Non-goals
@@ -81,13 +81,13 @@ Principles:
    write their own private outputs (orbit libraries, weight files); the driver
    notices completion and records χ². Table writes are atomic
    (temp-file + `os.replace`).
-3. **Strategist decides *what*, executor decides *where/how*.** The two talk
+3. **Proposer decides *what*, executor decides *where/how*.** The two talk
    only through the interface in §4.
 
-## 4. Strategist interface contract (schema v1 — freeze on merge)
+## 4. Proposer interface contract (schema v1 — freeze on merge)
 
 ```python
-class Strategist(Protocol):
+class Proposer(Protocol):
     def start(self, ctx: SystemContext) -> None
     def propose(self, max_batch: int) -> list[Proposal]
     def observe(self, results: Iterable[Result]) -> None      # streaming
@@ -109,7 +109,7 @@ Rules:
 - Proposals are **validated at intake** by the executor before any resource is
   spent: parameter bounds clip, then triaxial deprojection feasibility
   (`triax_pqu2tpp` pass). Invalid proposals return as failed Results without
-  entering the queue. BO strategists will propose geometrically impossible
+  entering the queue. BO proposers will propose geometrically impossible
   (q,p,u) that GridWalk's clipping never produces; this gate is mandatory.
 - `parset` contains only free-parameter values; fixed params are implied by
   config. Canonical-JSON hashing makes proposal identity environment-neutral,
@@ -119,7 +119,7 @@ Rules:
 
 Three implementations planned:
 
-| phase | strategist | quorum semantics |
+| phase | proposer | quorum semantics |
 |---|---|---|
 | 1 | `GridWalkClassic` — port of current generator, byte-compatible proposals | whole current walk-step solved |
 | 2 | `MicroBatchWalk` — re-center when ≥X% of step solved (X default 80%) | fraction |
@@ -137,11 +137,11 @@ trains its GP from the shared `all_models.ecsv` rows
 (`extract_gp_training_data`, `all_done` mask) and appends proposals as new
 rows. Observation flows through the table, not callbacks.
 
-Consequence for schema v1: a strategist may satisfy `observe()` by reading
+Consequence for schema v1: a proposer may satisfy `observe()` by reading
 table rows; streaming callbacks are an optimization, not a requirement. The
 Phase-3 adapter is therefore thin:
 
-| Strategist v1 | BayesOptGenerator |
+| Proposer v1 | BayesOptGenerator |
 |---|---|
 | `propose(n)` | instantiate generator against driver's live AllModels; call `generate()`; map appended rows → Proposals by proposal hash |
 | `observe(results)` | no-op (generator re-reads table at next generate) |
@@ -197,17 +197,17 @@ resubmits.)
 ### 5.4 Driver daemon
 
 Login-node Python process (~200–300 lines around `squeue`/`sbatch`/`sshare`
-subprocess calls + §5.1 classifier + strategist object). Loop:
+subprocess calls + §5.1 classifier + proposer object). Loop:
 
 ```
 SCAN      classify all rows; read in-flight set (own accounting, cross-checked
           against squeue every cycle)
-OBSERVE   for each newly-done model: append Result → strategist.observe();
+OBSERVE   for each newly-done model: append Result → proposer.observe();
           atomically update table row
 RECONCILE resubmit work whose Slurm job vanished without producing its
           artifact (attempt counter per model; >3 attempts → park row,
           alert, continue)
-SUBMIT    if strategist.quorum_pending() > 0 and idle capacity: submit arrays
+SUBMIT    if proposer.quorum_pending() > 0 and idle capacity: submit arrays
           for to_integrate/to_solve (array width %K adaptive, §7)
 PROPOSE   if quorum_pending() == 0 and not exhausted():
           propose() → validate intake → create rows+dirs → loop
@@ -297,14 +297,32 @@ compute, not science.
 | NFS visibility lag on sentinels | driver requires artifact mtime age > 60 s before acting on presence; absence always re-checked next cycle |
 | adelie threaded nondeterminism | acceptance gate is scientific equivalence (χ² rel. diff < 1e-9 vs reference), never bitwise — per local gate revision |
 
-## 10. Rollout phases & acceptance gates
+## 10. Rollout: capability track (local) ⊥ deployment track (VERA)
 
-| phase | content | gate to pass |
+Governing principle: **strategist capabilities are proven locally; clusters
+are backends, not milestones.** No capability phase waits on cluster access,
+and deployment may adopt whichever proposer is furthest along at launch time
+(H2 warm-start makes mid-campaign proposer swaps cheap).
+
+### Capability track (developed and gated on the local box)
+
+| phase | content | gate |
 |---|---|---|
-| 0 | local recovery wave finishes; clean per-solve wall times recorded | ≥5 solves completing without dmesg kills; numbers into §7 freeze file |
-| 1 | VERA env build + smoke campaign: `GridWalkClassic`, `n_max_mods ≈ 20`, ≤ 8 nodes | end-to-end in ≤ 1 day: 20 models integrated + solved; table complete; one solve's χ² within 1e-6 rel. of local same-parset reference (tolerance sized for cross-BLAS-kernel drift; local runs measured up to 9e-7 across code-path variants); driver kill/restart resumes with zero duplicates |
-| 2 | production campaign on `GridWalkClassic`; then swap in `MicroBatchWalk` | iteration wall-time ≤ 36 h sustained over 3 iterations; quota/tar guards verified in dry-run |
-| 3 | GP-BO live: merge or vendor `fork/bayesopt`, run `BayesOptGenerator` behind the §4.1 adapter (`batch_size=4` per their T1/T3 tuning); warm-start from the Phase-2 table via their H2 mechanism; A/B vs GridWalk at equal model budget | BO matches or beats GridWalk best-χ² trajectory per model count; R3 stopping flag observed firing naturally |
+| C0 | local recovery wave finishes; clean per-solve wall times recorded | ≥5 solves completing without dmesg kills; numbers into ENV freeze notes |
+| C1 | executor core + `GridWalkProposer` | full vera test suite green; dry-run submission plan correct on a synthetic artifact tree; driver kill/restart resumes with zero duplicates (ledger proof) |
+| C2 | `MicroBatchWalk` proposer | unit tests on quorum-fraction semantics; synthetic-landscape ablation vs `GridWalkProposer` at equal model budget (harness pattern: bayesopt V2 matrix) shows equal-or-better models-to-best-χ² |
+| C3 | `BayesOptGenerator` adapter (§4.1) | adapter round-trip tests on mock tables; one local real-orblib minirun (pattern: bayesopt `test_real_minirun`) completes with R3 counter advancing; GP warm-starts from the local campaign table |
+
+### Deployment track (VERA; starts whenever capacity allows, independently)
+
+| phase | content | gate |
+|---|---|---|
+| D1 | env build + smoke campaign (`n_max_mods ≈ 20`, ≤ 8 nodes, proposer = furthest-along available) | end-to-end in ≤ 1 day: all rows `all_done`; one solve's χ² within 1e-6 rel. of local same-parset reference (cross-BLAS tolerance; local runs measured up to 9e-7); kill/restart drill with zero duplicate submissions |
+| D2 | production campaign | iteration wall-time ≤ 36 h sustained over 3 iterations; quota/tar guards verified in dry-run |
+| D3 | BO A/B vs GridWalk at equal model budget | BO matches or beats GridWalk best-χ² trajectory per model count |
+
+Local fat box remains the dev rig and overflow capacity throughout; the shared
+artifact format lets a campaign straddle both backends.
 
 Local fat box remains the dev/debug rig and overflow capacity throughout; the
 shared artifact format lets a campaign straddle both.
