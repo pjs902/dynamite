@@ -8,6 +8,7 @@ safe alongside production. Nothing touches PM_grid or any live tree.
 
 import os
 import shutil
+import time
 import sys
 
 import pytest
@@ -46,7 +47,12 @@ def sandbox(tmp_path):
     ps = cfgd["parameter_space_settings"]
     ps["generator_type"] = "GridWalk"
     sc = ps["stopping_criteria"]
-    sc["n_max_mods"] = 2
+    sc["n_max_mods"] = 3
+    # production shape: halo fixed -> only ml walks, so the first walk batch
+    # is ~2 models and the whole loop stays minutes-scale
+    dh = cfgd["system_components"]["dh"]["parameters"]
+    for k in ("c", "f"):
+        dh[k]["fixed"] = True
     cfgd["io_settings"]["input_directory"] = str(inp)
     cfgd["io_settings"]["output_directory"] = str(out)
 
@@ -87,19 +93,28 @@ def _make_driver(sandbox):
         }
     )
     return VeraDriver(
-        c, GridWalkProposer(c), runner=runner, run_dir=sandbox["run_dir"]
+        c,
+        GridWalkProposer(c),
+        runner=runner,
+        run_dir=sandbox["run_dir"],
+        # synthetic clock ages artifacts past the 60 s freshness guard so
+        # the fast sequential loop sees completed work immediately
+        clock=lambda: time.time() + 3600,
     ), runner
 
 
 def test_closed_loop_real_machinery(sandbox):
     drv, runner = _make_driver(sandbox)
 
-    for i in range(8):  # bounded; exhausts well before
+    for i in range(12):  # bounded; exhausts well before
         alive = drv.step(dry_run=False)
         t = drv.config.all_models.table
         done = int(sum(1 for r in t if bool(r["all_done"])))
         if not alive or done >= 2:
             break
+    # solves finishing inside the final reconcile are recorded only on the
+    # next observation pass - drain once before judging
+    drv.observe_completions()
 
     t = drv.config.all_models.table
     done_rows = [r for r in t if bool(r["all_done"])]
@@ -107,7 +122,9 @@ def test_closed_loop_real_machinery(sandbox):
     for r in done_rows:
         assert r["chi2"] == r["chi2"] and r["chi2"] > 0  # finite positive
         mdir = os.path.join(sandbox["outroot"], "models", r["directory"])
-        assert os.path.isfile(os.path.join(mdir, "datfil", "tube_box_done"))
+        # orbit library lives at the noml level (shared across ml variants)
+        noml = os.path.abspath(os.path.join(mdir, ".."))
+        assert os.path.isfile(os.path.join(noml, "datfil", "tube_box_done"))
         wfile = os.path.join(mdir, "orbit_weights.ecsv")
         assert os.path.isfile(wfile)
 

@@ -24,13 +24,15 @@ legacy_fortran = [
     "../legacy_fortran/triaxmass",
     "../legacy_fortran/triaxmass_bar",
     "../legacy_fortran/triaxmassbin",
-    "../legacy_fortran/triaxmassbin_bar"
+    "../legacy_fortran/triaxmassbin_bar",
 ]
-additional_ex = ["legacy_fortran/modelgen",
-                 "legacy_fortran/triaxnnls_CRcut",
-                 "legacy_fortran/triaxnnls_noCRcut",
-                 "legacy_fortran/triaxnnls_bar"]
-legacy_fortran.extend([f'../{e}' for e in additional_ex if os.path.isfile(e)])
+additional_ex = [
+    "legacy_fortran/modelgen",
+    "legacy_fortran/triaxnnls_CRcut",
+    "legacy_fortran/triaxnnls_noCRcut",
+    "legacy_fortran/triaxnnls_bar",
+]
+legacy_fortran.extend([f"../{e}" for e in additional_ex if os.path.isfile(e)])
 
 setuptools.setup(
     name="dynamite",
@@ -54,15 +56,14 @@ setuptools.setup(
     # use the already parsed requirements from requirements.txt
     install_requires=required,
     package_data={
-        "dynamite": legacy_fortran
+        "dynamite": legacy_fortran + ["vera/scripts/*.sh"],
     },
     # extra requirements for testing
     extras_require={
-        "cvxopt":
-            "cvxopt>=1.2.6",
+        "cvxopt": "cvxopt>=1.2.6",
         "testing": [
             "pytest",
             "coverage",
-        ]
-    }
+        ],
+    },
 )

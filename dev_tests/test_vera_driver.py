@@ -65,16 +65,21 @@ def world(tmp_path):
     outroot = tmp_path / "NGC5139_production_output"
     models = outroot / "models"
 
+    # distinct orblib parents: in reality each library owns its noml dir;
+    # sharing one would leak sentinels between models
     specs = {"pending": ("orblib_001_000/ml02.pe", []),
-             "built": ("orblib_001_000/ml02.bu", ["tube_box_done"]),
-             "solved": ("orblib_001_000/ml02.so",
+             "built": ("orblib_001_001/ml02.bu", ["tube_box_done"]),
+             "solved": ("orblib_001_002/ml02.so",
                         ["tube_box_done", "orbit_weights.ecsv"])}
     dirs = {}
     for kind, (rel, artifacts) in specs.items():
         d = models / rel
         (d / "datfil").mkdir(parents=True)
+        noml_datfil = models / rel.split("/")[0] / "datfil"
+        noml_datfil.mkdir(parents=True, exist_ok=True)
         for art in artifacts:
-            f = d / "datfil" / art if art.endswith("_done") else d / art
+            # sentinels live at the noml level (shared library); weights at ml
+            f = noml_datfil / art if art.endswith("_done") else d / art
             if not f.exists():
                 f.write_text("# fixture\n")
             _aged(f)
@@ -115,7 +120,7 @@ def test_alive_jobs_not_resubmitted(world):
     VeraDriver(
         cfg, StubProposer(), runner=rr1, run_dir=str(run_dir)
     ).reconcile_and_submit()
-    jids = tuple(7000 + i for i in range(1, len(rr1.sbatch_calls) + 1))
+    jids = tuple(7001 + i for i in range(3))  # array ids + per-task offsets
     rr2 = RecordingRunner(live_jids=jids)  # slurm says all alive
     n2 = VeraDriver(
         cfg, StubProposer(), runner=rr2, run_dir=str(run_dir)

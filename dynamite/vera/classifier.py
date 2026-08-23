@@ -39,23 +39,32 @@ def _age(path, now_ts):
 
 
 def classify(model_dir, attempts, now_ts, min_age_s=MIN_AGE_S_DEFAULT):
+    """A file counts as *fresh* only when its age lies in [0, min_age_s].
+
+    Negative ages (mtime ahead of now_ts - a test clock, or NFS skew)
+    carry no freshness information and are ignored.
+    """
     sent = os.path.join(_noml(model_dir), SENTINEL)
     wght = os.path.join(model_dir, WEIGHTS)
 
-    solved_age = _age(wght, now_ts)
-    if solved_age is not None and solved_age > min_age_s:
+    # weights presence alone means solved: the file is never transient
+    if os.path.isfile(wght):
         return ModelState.SOLVED
 
     if attempts >= ATTEMPT_LIMIT:
         return ModelState.PARKED
 
-    sent_age = _age(sent, now_ts)
+    def _settled(path):
+        age = _age(path, now_ts)
+        return age if age is not None and age >= 0 else None
+
+    sent_age = _settled(sent)
     if sent_age is not None:
         return ModelState.TO_SOLVE if sent_age > min_age_s else ModelState.INTEGRATING
 
     for root, _dirs, files in os.walk(model_dir):
         for f in files:
             age = _age(os.path.join(root, f), now_ts)
-            if age is not None and age <= min_age_s:
+            if age is not None and 0 <= age <= min_age_s:
                 return ModelState.INTEGRATING
     return ModelState.PENDING_INTEGRATION

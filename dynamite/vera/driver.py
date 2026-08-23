@@ -37,6 +37,8 @@ K_START = 16
 USER = "pesmith"
 ATTEMPTS_FILE = "vera_attempts.json"
 LEDGER_FILE = "vera_inflight.json"
+DIRS_FILE = "vera_dirs.json"
+
 
 
 class VeraDriver:
@@ -48,7 +50,9 @@ class VeraDriver:
         run_dir=".",
         poll_interval=POLL_INTERVAL_S,
         k_start=K_START,
+        clock=time.time,
     ):
+        self.clock = clock
         self.config = config
         self.proposer = proposer
         self.runner = runner or RealRunner()
@@ -59,7 +63,8 @@ class VeraDriver:
         self.inflight = self._load_json(LEDGER_FILE, {"int": [], "solve": []})
         self.output_root = config.settings.io_settings["output_directory"]
         # proposal attribution, owned by the driver (not the proposer):
-        self.dir_to_pid = {}
+        dirs_map = self._load_json(DIRS_FILE, {})
+        self.dir_to_pid = dirs_map.get("dir_to_pid", {})
         self.dir_to_row = {}
         self.rejected = {}
         self.log = logging.getLogger(f"{__name__}.VeraDriver")
@@ -97,7 +102,7 @@ class VeraDriver:
     def scan(self):
         """{model_dir: ModelState} for every row in the table."""
         states = {}
-        now = time.time()
+        now = self.clock()
         for row in self.config.all_models.table:
             d = row["directory"]
             if not d or str(d).startswith("rejected"):
@@ -124,6 +129,10 @@ class VeraDriver:
 
         for d in list(to_int) + list(to_sol):
             self._write_parset_file(d)
+        if os.environ.get("VERA_DEBUG"):
+            print(f"[dbg] states={ {k: v.value for k, v in states.items()} } "
+                  f"to_int={to_int} to_sol={to_sol} "
+                  f"inflight={self.inflight}", flush=True)
         submitted = 0
         if to_int:
             submitted += self._submit_wave("int", pack_libraries(to_int), dry_run)
@@ -237,6 +246,10 @@ class VeraDriver:
             self._save_table_atomically()
         return len(results)
 
+    def exhausted(self):
+        """Campaign finished according to the proposer's stopping rules."""
+        return self.proposer.exhausted()
+
     def step(self, dry_run=False):
         self.observe_completions()
         self.reconcile_and_submit(dry_run=dry_run)
@@ -299,6 +312,7 @@ class VeraDriver:
             self.dir_to_pid[directory] = pid
             self.dir_to_row[directory] = idx
         self._save_table_atomically()
+        self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid})
 
     def run_forever(self, dry_run=False, once=False):
         while True:
