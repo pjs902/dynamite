@@ -58,8 +58,7 @@ def _mk_param(name, lo, hi, value, step=0.1, fixed=False):
     )
 
 
-@pytest.fixture()
-def minimal_config():
+def build_minimal_config():
     ml = _mk_param("ml", 1.0, 6.0, 2.6, step=0.2)
     q = _mk_param("q", 0.30, 0.72, 0.46, step=0.04)
     p = _mk_param("p", 0.50, 0.99, 0.90, step=0.03)
@@ -117,6 +116,11 @@ def minimal_config():
         parspace = pspace
 
     return FakeConfig()
+
+
+@pytest.fixture()
+def minimal_config():
+    return build_minimal_config()
 
 
 def _solve_all(strat):
