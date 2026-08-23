@@ -1,132 +1,258 @@
 % appendix_bayesopt.tex — methodology appendix for the upcoming paper.
 % Standalone \section; drop into the main .tex or \input{} it.
+% Requires: amsmath, amssymb, algorithm, algpseudocode, booktabs.
 % Citations use authoryear keys; add these to the .bib if absent:
 %   vdbosch2019dynamite (DYNAMITE method paper), zhu2018crcut,
 %   eriksson2019turbo, elgammal2023gpry, li2026sale, leclercq2018bolfi.
 %
 % Numbers below come from the runs documented in
 % dev_notes/bayesopt_generator.md (June 2026 NGC6278 comparison; August
-% 2026 surface benchmarks and tuning study). Update them if the final
-% production numbers change.
+% 2026 surface benchmarks, tuning study, and seed sweep). Update them if
+% the final production numbers change.
 
 \section{Bayesian-optimization parameter search}
 \label{app:bayesopt}
 
-\subsection{Problem structure}
+\subsection{Problem structure and notation}
+\label{app:bayesopt:structure}
 Triaxial Schwarzschild models separate into a cheap inner problem and an
-expensive outer one \citep{vdbosch2019dynamite}. Given a trial potential,
-the orbit-library weights that best reproduce the observed kinematics
-follow from a bounded non-negative least-squares solve, which takes
-seconds. The outer problem, finding the potential parameters that
-minimize the kinematic $\chi^2$, requires one orbit-library integration
-per trial potential and takes hours on a multicore node. Classical
-implementations search the outer parameters with a grid walk
-\citep{zhu2018crcut}: each step proposes axis-aligned neighbours of the
-current best point, so the search cost grows with the number of free
-parameters and the walk can stall when all neighbours are already
-evaluated.
+expensive outer one \citep{vdbosch2019dynamite}. Given a trial potential
+$\theta$, the orbit-library weights $w \ge 0$ that best reproduce the
+observed kinematics follow from a bounded non-negative least-squares
+solve,
+\begin{equation}
+  \chi^2(\theta) = \min_{w \ge 0} \|\A(\theta)\, w - b\|^2 ,
+\end{equation}
+which takes seconds; $\A(\theta)$ is the design matrix mapping orbit
+histograms to observables and $b$ collects the data. The outer problem,
+$\min_\theta \chi^2(\theta)$, requires one orbit-library integration per
+trial potential, taking hours on a multicore node. Classical
+implementations search $\theta$ with a grid walk \citep{zhu2018crcut}:
+axis-aligned steps around the current best point, which costs
+$O(2d)$ evaluations per accepted move in $d$ free parameters and can
+stall when every neighbour is already evaluated.
 
-The generator described here, \texttt{BayesOptGenerator}, replaces the
-walk with a Gaussian-process surrogate of $\chi^2$ over the normalized
-parameter cube. The surrogate is refit after every batch of models, and
-the next batch is chosen where the surrogate predicts improvement. The
-approach follows established surrogate-based inference practice
-\citep{leclercq2018bolfi,elgammal2023gpry,li2026sale}; the published
-Schwarzschild-modelling literature searches the outer parameters with
-grids or walks.
+Let the free parameters be $\theta \in \prod_j [\ell_j, h_j]$, with
+logarithmic parameters (e.g.\ $M_\mathrm{BH}$, halo mass) entering
+through their base-10 logarithms so that the search is always performed
+on the raw value. We work with the normalized vector
+\begin{equation}
+  x_j = \frac{\theta_j - \ell_j}{h_j - \ell_j} \in [0,1]^d .
+  \label{eq:norm}
+\end{equation}
 
-\subsection{Algorithm}
-\label{app:bayesopt:algo}
-Each iteration proceeds in four steps.
+\subsection{Gaussian-process surrogate}
+\label{app:bayesopt:gp}
+After every evaluated batch, the surrogate is refit on all historical
+rows $(x_i, y_i)$ with $y_i = -\chi^2_i$ (finite $\chi^2$ only). We use
+a Gaussian process with a Mat\'ern~5/2 kernel with automatic relevance
+determination,
+\begin{equation}
+  k(x, x') = \sigma^2 \prod_{j=1}^{d} \bigl(1 + \sqrt{5}\, r_j +
+  \tfrac{5}{3} r_j^2\bigr) \exp\bigl(-\sqrt{5}\, r_j\bigr),
+  \qquad r_j = \frac{|x_j - x'_j|}{\lambda_j},
+\end{equation}
+a separate length scale $\lambda_j$ per parameter, and outcome
+standardization $(y_i - \bar y)/s_y$. The model is fit by empirical
+Bayes (marginal-likelihood optimization, L-BFGS-B) in double precision.
+Above 300 training rows the exact model is replaced by a variational GP
+with a fixed inducing grid, since exact fitting scales as $O(n^3)$. The
+surrogate is cheap relative to one model: on the benchmark suite the
+full generate step (fit plus acquisition optimization) averages
+$0.15\,$s per proposed model, against hours per integrated model in
+production.
 
-\paragraph{(i) Training data.} All evaluated models with finite
-$\chi^2$ are collected from the run table. Parameters are normalized to
-the unit cube using their prior bounds; logarithmic parameters
-($M_\mathrm{BH}$, halo mass) enter in log space. Rows outside the
-current bounds, which occur when bounds are tightened between runs, are
-clipped and counted in a warning.
+\subsection{Acquisition and batch selection}
+\label{app:bayesopt:acq}
+The next batch $X_{1:q} = \{x_1, \dots, x_q\}$ is chosen to jointly
+maximize the logarithm of the $q$-point Expected Improvement
+\citep[qLogEI;][]{eriksson2019turbo},
+\begin{equation}
+  \mathrm{qLogEI}(X_{1:q}) =
+  \log \mathbb{E}\!\left[\max\bigl(0,\; y^\star -
+  \max(X_{1:q})\bigr)\right],
+\end{equation}
+where the expectation is over the GP posterior and $y^\star$ is the best
+observed value. The inner expectation is taken in the log space for
+numerical stability at large $\chi^2$ scales. The joint problem is
+optimized with multi-restart L-BFGS-B (10 restarts, 128 raw starting
+points); with active constraints, starting points are drawn from the
+feasible set and the batch is optimized one element at a time
+(\texttt{batch\_limit}=1).
 
-\paragraph{(ii) Surrogate.} A BoTorch \texttt{SingleTaskGP} with
-outcome standardization and an anisotropic Mat\'ern~5/2 kernel is fit by
-empirical Bayes; above 300 training rows the code switches to a
-variational GP for scaling. The GP models $-\chi^2$.
+Three modifications to plain qLogEI matter in practice.
 
-\paragraph{(iii) Batch selection.} The next $q$ candidates maximize
-$\log q$-Expected Improvement \citep[qLogEI;][]{eriksson2019turbo}
-jointly over the cube. Three modifications matter in practice.
-First, exploration is annealed: the indicator temperature $\eta$ of
-qLogEI decays linearly from $0.1$ to $10^{-3}$ over the first ten
-batches, so early batches favour uncertain regions and later batches
-exploit. Second, a fraction $\lceil q/4\rceil$ of each batch is drawn
-not from the acquisition optimizer but by rejection sampling from
-$\exp(\mu_\mathrm{GP}/\tau)$ over the feasible set, with temperature
-$\tau$ annealed from $1.0$ by a factor $0.7$ per batch
-\citep[the annealed objective of][]{li2026sale}. These members keep the
-batch diverse where joint optimization would homogenize it. Third,
-after selection, candidates are deduplicated on the grid cells of the
-non-mass parameters: two candidates in the same cell would integrate
-the same orbit library, and the freed slots are refilled with
-quasi-random draws. Pairs of candidates that share a cell but differ in
-$M_\mathrm{L}$ are kept, since the orbit library is then reused at no
-integration cost.
+\paragraph{(a) Annealed exploration.} The indicator temperature $\eta$
+in qLogEI's smooth improvement heuristic decays linearly over the first
+$N_\mathrm{ann}=10$ batches,
+\begin{equation}
+  \eta(t) = \eta_0 + \tfrac{t}{N_\mathrm{ann}}\,(\eta_\infty - \eta_0),
+  \qquad \eta_0 = 0.1,\; \eta_\infty = 10^{-3},
+\end{equation}
+so early batches soften the improvement indicator (exploration) and
+later batches sharpen it (exploitation). This is the dimension-scaled
+exploration schedule of \citet{elgammal2023gpry}, adapted from their
+$\zeta = d^{-0.85}$ relaxation.
 
-\paragraph{(iv) Feasibility.} Triaxiality requires $p\ge q$,
-$u \ge \max(q/q_\mathrm{obs}, p)$ and $u \le \min(p/q_\mathrm{obs},1)$
-for the intrinsic flattenings. When all three are free, these enter the
-acquisition optimization as differentiable inequality constraints.
-When only a subset is free, which is the common case (the NGC~5139 run
-of Section~\ref{sec:production} fixes $u$), the fixed values are
-substituted into the constraints and the free axes are projected onto
-the feasible set before any evaluation is proposed.
+\paragraph{(b) Tempered-posterior batch members.} A fraction
+$n_\mathrm{R2} = \lceil q/4 \rceil$ of each batch is drawn not from the
+acquisition optimizer but by rejection sampling from the annealed
+surrogate posterior,
+\begin{equation}
+  p_t(x) \propto \exp\!\left(\frac{\mu_t(x) - \max_x \mu_t}{\tau_t}\right)
+  \quad \text{on the feasible set},
+  \qquad \tau_t = \max(\tau_\mathrm{min},\, \tau_0\,\gamma^{\,t}),
+\end{equation}
+with $\mu_t$ the posterior mean, $\tau_0 = 1$, $\gamma = 0.7$,
+$\tau_\mathrm{min} = 0.05$. Candidates are drawn in Sobol chunks of
+$\max(256, 16\,n_\mathrm{R2})$ and accepted with probability
+$\exp((\mu - \mu_\mathrm{max})/\tau)$; if fewer than $n_\mathrm{R2}$
+accept within $2\times10^5$ draws, the remainder falls back to feasible
+quasi-random points. This is the annealed-objective mechanism of
+\citet{li2026sale}, simplified to the posterior mean, and it keeps
+batches diverse where joint acquisition optimization homogenizes them.
 
-\paragraph{Warm-up and warm start.} The first $n_\mathrm{init}$
-candidates come from a scrambled Sobol sequence, or, optionally, from an
-axial design around a user-supplied point. When the generator is
-started in an output directory that already contains evaluated models,
-for example after a grid-walk search, the Sobol phase is skipped and
-the GP trains on the full history. The axial design then centres on the
-best historical model. This makes switching from a grid walk to
-Bayesian optimization mid-project free of redundant evaluations.
+\paragraph{(c) Grid-cell deduplication for orbit-library reuse.}
+Orbit integration depends on all parameters except $M_\mathrm{L}$, which
+enters only through the scaling of the weight solve. When the
+non-$M_\mathrm{L}$ parameters are discretized on their generator grids
+(steps $s_j$), candidates are snapped, $x_j \mapsto s_j
+\lfloor x_j / s_j \rceil$, and keyed by the tuple
+$\kappa(x) = (\lfloor x_j / s_j \rceil)_{j \in \text{non-}M_\mathrm{L}}$.
+Duplicates within a batch (same key) are dropped, first-proposed kept,
+and freed slots refilled with feasible Sobol draws. Candidates sharing a
+key but differing in $M_\mathrm{L}$ are retained: they reuse one orbit
+library across several weight solves at no integration cost, which the
+batch layout ($n_\mathrm{orb}$ potential configurations $\times$
+$n_\mathrm{ml}$ mass values each) exploits deliberately.
 
-\paragraph{Convergence diagnostics.} Alongside the standard
-plateau criteria, the generator tracks how often the GP predicts a new
-model's $\chi^2$ within a relative tolerance of the realized value
-\citep[the CorrectCounter of][]{elgammal2023gpry}. A run of
-$\max(4,\lceil d/2\rceil)$ accurate predictions indicates that the
-surrogate has resolved the landscape; we use this as a diagnostic and
-not as a stopping rule. A single trust region
-\citep[TuRBO-style;][]{eriksson2019turbo} can additionally be enabled,
-restricting acquisition to a shrinking box around the incumbent once
-the mean distance to the $k$ nearest evaluated points falls below a
-threshold fraction of the box diagonal.
+\subsection{Triaxial feasibility}
+\label{app:bayesopt:feas}
+With intrinsic flattenings $q \le p \le u$ (where $u =
+\sigma_\mathrm{obs}/\sigma_\mathrm{int}$) and observed flattening
+$q_\mathrm{obs}$, a parameter set is dynamically consistent iff
+\begin{equation}
+  p \ge q, \qquad
+  u \ge \max\!\left(\frac{q}{q_\mathrm{obs}},\, p\right), \qquad
+  u \le \min\!\left(\frac{p}{q_\mathrm{obs}},\, 1\right).
+  \label{eq:feas}
+\end{equation}
+When all three axes are free, Eq.~\eqref{eq:feas} is imposed on the
+acquisition optimizer as differentiable inequality constraints
+($p - q \ge 0$; $u - \max(q/q_\mathrm{obs}, p) \ge 0$;
+$\min(p/q_\mathrm{obs}, 1) - u \ge 0$), evaluated on the un-normalized
+coordinates inside the constraint callables. When a subset is free, the
+fixed axes enter Eq.~\eqref{eq:feas} as constants. For the common
+production case $(q, p)$ free with $u = u_f$ fixed, the window
+constraints collapse to bounds,
+\begin{equation}
+  q \le u_f\, q_\mathrm{obs}, \qquad
+  u_f\, q_\mathrm{obs} \le p \le u_f, \qquad p \ge q ,
+  \label{eq:uproj}
+\end{equation}
+and Sobol warm-up draws are projected onto
+Eq.~\eqref{eq:uproj} with a relative safety margin of $10^{-6}$
+($q \le u_f q_\mathrm{obs} (1 - 10^{-6})$, etc.). The same inequalities
+guard GP-phase proposals: any candidate violating them after
+optimization is replaced by the nearest feasible point of the same
+batch. A fuzz suite asserts these invariants over randomized free
+subsets, including logarithmic axes, with zero violations in 455 active
+trials.
 
-\subsection{Validation protocol}
+\subsection{Warm-up, warm start, and stopping}
+\label{app:bayesopt:warm}
+The first $n_\mathrm{init}$ candidates come from a scrambled Sobol
+sequence (projected feasible). Optionally an axial design is used
+instead: the center point $x^{(c)}$ plus $2d$ axis steps of size
+$\delta = 0.1$, i.e.\ $2d + 1$ points. When the generator is started in
+an output directory with existing evaluations, for example after a grid
+walk, the Sobol phase is skipped entirely ($n_\mathrm{valid} \ge
+n_\mathrm{init}$) and the GP trains on the full history; rows outside
+the current bounds are clipped to them and counted per axis in a
+warning. With the axial design and no explicit center, the center
+defaults to the best historical row.
+
+Alongside the inherited $\chi^2$-plateau criterion, two diagnostics are
+computed. The prediction-accuracy counter \citep[CorrectCounter;
+][]{elgammal2023gpry} scores each finished model by
+\begin{equation}
+  |\mu(x_i) - y_i| \;\le\; \epsilon_\mathrm{abs} +
+  \epsilon_\mathrm{rel}\,\bigl|y^\star - \mu(x_i)\bigr|,
+  \qquad \epsilon_\mathrm{rel} = 0.01,
+\end{equation}
+where $\mu(x_i)$ was recorded at proposal time; a streak of
+$m = \max(4, \lceil d/2 \rceil)$ accurate predictions raises the
+\texttt{gp\_predictions\_accurate} flag. This is reported but never
+stops the search on its own; at $\epsilon_\mathrm{rel}=0.01$ the flag
+did not fire in 50 benchmark runs, indicating the tolerance is
+conservative for these landscapes. Optionally, a single trust region
+\citep[TuRBO-style;][]{eriksson2019turbo} restricts acquisition to the
+box $x^\star \pm s/2$ around the incumbent once the mean distance from
+the incumbent to its five nearest evaluated neighbours falls below
+$0.1/\sqrt{d}$; the side $s$ starts at $0.3$, multiplies by $1.3$ on any
+batch that improves the incumbent, and by $0.7$ after two consecutive
+unimproving batches, clipped to $[0.05, 0.6]$.
+
+\subsection{Validation and tuning}
 \label{app:bayesopt:valid}
-We validate on three levels. (a) Unit tests cover the feasibility
-projection for all free/non-free subsets of $(q,p,u)$, warm-start
-behaviour, batch deduplication, and each acquisition option; a fuzz
-suite asserts the feasibility invariants over randomized parameter
-spaces. (b) Synthetic $\chi^2$ surfaces calibrated to the ranges of our
-galaxy sample encode the structures that make these searches hard: a
-mass--flattening valley, a black-hole bowl over a correlated shape
-band, and a curved constant-mass degeneracy valley with a secondary
-basin. On the coupled four-parameter surface, Bayesian optimization
-reaches the convergence threshold in a median of 42 fresh models
-against 116 for the grid walk over six seeds, with a better final
-$\chi^2$ (6013 versus 6070); on single-valley surfaces the grid walk
-remains competitive, which bounds the recommendation. A hard acceptance
-test requires the generator to reach the threshold in fewer models than
-the grid walk and keeps surrogate overhead below ten seconds per model.
-(c) On NGC~6278 with three free parameters and equal model budgets, the
-generator reaches $\chi^2=5814$ where the grid walk reaches 6352, and
-finds its optimum between grid points.
+We validate on three levels. (a) Unit and property tests cover the
+feasibility projection for all free/non-free subsets of $(q,p,u)$, the
+warm-start contract against a real run table, batch deduplication, and a
+fuzz suite over randomized parameter spaces. (b) Synthetic $\chi^2$
+surfaces, calibrated to the parameter ranges of our galaxies, encode the
+structures that make these searches hard: a mass--flattening valley, a
+black-hole bowl over a correlated shape band, and a curved
+constant-mass degeneracy valley with a secondary basin. On the coupled
+four-parameter surface, Bayesian optimization reaches the convergence
+threshold in a median of 42 fresh models against 116 for the grid walk
+over six seeds, with a better final $\chi^2$ ($6013$ versus $6070$); on
+single-valley surfaces the grid walk remains competitive, which bounds
+the recommendation. A hard acceptance test requires the generator to
+reach the threshold in fewer models than the grid walk and keeps
+surrogate overhead below ten seconds per model. (c) On NGC~6278 with
+three free parameters and equal model budgets, the generator reaches
+$\chi^2 = 5814$ where the grid walk reaches $6352$, and finds its
+optimum between grid points.
+
+A hyperparameter study on the coupled surface (five seeds per
+configuration) found the batch size the dominant setting: $q = 4$
+reaches the threshold in a median of 26 fresh models against 41 for
+$q = 8$ and 56 for $q = 16$, consistent with the guideline of
+\citet{elgammal2023gpry} that the batch should be of order
+$\min(d, n_\mathrm{workers})$. Warm-up size, the $\eta$ schedule, and
+the tempered-posterior dose were neutral at $d = 4$; removing trust
+regions cost 46 versus 41. Seeding the GP from sparse uniformly
+distributed history at $d = 4$ degrades the search relative to a cold
+start, because uniform draws under-resolve the black-hole bowl;
+warm-starting from a clustered, near-optimal history (the situation a
+finished grid walk leaves) is the supported production path.
 
 \subsection{Recommended settings}
-For the production runs we use batch size $q=4$, which the tuning study
-identifies as the setting with the largest effect at $d=4$ (median
-models-to-threshold 26 versus 41 for $q=8$), consistent with the
-batch-size guideline of \citet{elgammal2023gpry}; $n_\mathrm{init}=8$
-Sobol points; the annealed $\eta$ schedule; $q/4$ tempered-posterior
-members; and trust regions enabled. We advise running a grid walk first
-and switching generators in the same output directory, so that the GP
-starts from the walk's full evaluation history.
+\label{app:bayesopt:settings}
+Table~\ref{tab:bosettings} lists the production settings. We advise
+running a grid walk first and switching generators in the same output
+directory, so the GP starts from the walk's full evaluation history.
+
+\begin{table}[h]
+\centering
+\caption{Bayesian-optimization generator settings used in this work.}
+\label{tab:bosettings}
+\begin{tabular}{llll}
+\hline
+Setting & Symbol & Value & Notes \\
+\hline
+batch size & $q$ & 4 & largest effect at $d=4$ \\
+initial Sobol points & $n_\mathrm{init}$ & 8 & skipped on warm start \\
+acquisition & --- & qLogEI & joint over the batch \\
+$\eta$ schedule & $\eta_0 \to \eta_\infty$ & $0.1 \to 10^{-3}$ &
+  linear, 10 batches \\
+tempered members & $n_\mathrm{R2}$ & $\lceil q/4 \rceil$ &
+  $\tau_0 = 1$, $\gamma = 0.7$ \\
+trust region & $s$ & $0.3\,[0.05, 0.6]$ & $\times1.3$ / $\times0.7$
+  updates \\
+prediction tolerance & $\epsilon_\mathrm{rel}$ & $0.01$ &
+  diagnostic only \\
+streak for flag & $m$ & $\max(4, \lceil d/2 \rceil)$ & --- \\
+\hline
+\end{tabular}
+\end{table}
