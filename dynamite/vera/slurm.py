@@ -5,6 +5,8 @@ tests inject canned responses and the driver never shells out unmocked.
 Job specifications are pinned to the values in the spec's Global Constraints.
 """
 
+import getpass
+import os
 import subprocess
 
 ACCOUNT = "mia"
@@ -15,6 +17,10 @@ MAX_ARRAY_SIZE = 1001
 
 class SlurmError(RuntimeError):
     pass
+
+
+def _current_user():
+    return os.environ.get("VERA_USER") or getpass.getuser()
 
 
 class RealRunner:
@@ -45,11 +51,21 @@ def _base_flags(spec):
     return flags
 
 
+def _array_flag(n_items, throttle):
+    """`--array=0-N%k`, with N bounded by the scheduler's MaxArraySize.
+
+    The throttle is a concurrency limit and cannot overflow; n_items is the
+    one Slurm rejects the submission over.
+    """
+    n = max(0, min(int(n_items), MAX_ARRAY_SIZE) - 1)
+    k = max(1, min(int(throttle), MAX_ARRAY_SIZE))
+    return f"--array=0-{n}%{k}"
+
+
 def build_solve_job_spec(k, n_items):
-    k = max(1, min(int(k), MAX_ARRAY_SIZE))
     return {
         **SOLVE_SPEC,
-        "extra": [f"--array=0-{max(0, n_items - 1)}%{k}", "--job-name=ocen-solve"],
+        "extra": [_array_flag(n_items, k), "--job-name=ocen-solve"],
     }
 
 
@@ -58,7 +74,7 @@ def build_integration_job_spec(n_items):
         **INT_SPEC,
         "extra": [
             "--exclusive",
-            f"--array=0-{max(0, n_items - 1)}%8",
+            _array_flag(n_items, 8),
             "--job-name=ocen-int",
         ],
     }
@@ -80,7 +96,9 @@ def submit_array(runner, job_spec, script_path, items):
 
 
 def running_job_ids(runner):
-    out = runner(["squeue", "-u", "$USER", "-h", "-o", "%i"])
+    # NOT "$USER": there is no shell here to expand it, and squeue would
+    # either error or match nothing -- making every live job look dead.
+    out = runner(["squeue", "-u", _current_user(), "-h", "-o", "%i"])
     ids = set()
     for line in out.splitlines():
         tok = line.strip().split("_")[0]

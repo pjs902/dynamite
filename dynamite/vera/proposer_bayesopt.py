@@ -36,6 +36,7 @@ class BayesOptProposer:
         self.generator = ps.BayesOptGenerator(config.parspace, parspace_settings=pss)
         self.par_names = [p.name for p in config.parspace]
         self.pid_to_row = {}
+        self.failed_pids = set()  # intake rejections + parked models
 
     def _row_to_parset(self, row_idx):
         t = self.config.all_models.table
@@ -59,7 +60,12 @@ class BayesOptProposer:
         return props
 
     def observe(self, results):
-        """No-op: generator re-reads the table at next generate()."""
+        """Chi2 flows through the table at the next generate(); failures do
+        not appear there at all, so they are recorded here.
+        """
+        for r in results:
+            if getattr(r, "status", None) == "failed":
+                self.failed_pids.add(r.proposal_id)
         return None
 
     def tracked_results(self):

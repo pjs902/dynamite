@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from .classifier import ModelState, classify
+from .classifier import ATTEMPT_LIMIT, ModelState, classify
 from .pack_integration import pack_libraries
 from .proposal import Result, validate_parset, SCHEMA_VERSION
 from .slurm import (
@@ -34,7 +34,6 @@ from .slurm import (
 
 POLL_INTERVAL_S = 300
 K_START = 16
-USER = "pesmith"
 ATTEMPTS_FILE = "vera_attempts.json"
 LEDGER_FILE = "vera_inflight.json"
 DIRS_FILE = "vera_dirs.json"
@@ -65,7 +64,6 @@ class VeraDriver:
         # proposal attribution, owned by the driver (not the proposer):
         dirs_map = self._load_json(DIRS_FILE, {})
         self.dir_to_pid = dirs_map.get("dir_to_pid", {})
-        self.dir_to_row = {}
         self.rejected = {}
         self.log = logging.getLogger(f"{__name__}.VeraDriver")
 
@@ -99,6 +97,16 @@ class VeraDriver:
                 os.remove(tmp)
 
     # ------------------------------------------------------------ phases
+    def _dir_to_row(self):
+        """directory -> table row index, derived fresh from the table.
+
+        Never cached across restarts: the table is the source of truth, and a
+        stale copy is how the observer used to KeyError on the first cycle
+        after the driver came back up.
+        """
+        t = self.config.all_models.table
+        return {str(r["directory"]): i for i, r in enumerate(t) if r["directory"]}
+
     def scan(self):
         """{model_dir: ModelState} for every row in the table."""
         states = {}
@@ -120,7 +128,19 @@ class VeraDriver:
                 jid = _ledger_jid(self.run_dir, kind, item)
                 if jid is None or jid in live:
                     live_items.append(item)
+                    continue
+                # the job is gone. If the artifacts are not there either, the
+                # attempt failed: charge it so ATTEMPT_LIMIT can eventually
+                # park the model instead of retrying it forever.
+                for d in item.split(";"):
+                    if states.get(d) in (
+                        ModelState.PENDING_INTEGRATION,
+                        ModelState.TO_SOLVE,
+                    ):
+                        self._charge_attempt(d)
             self.inflight[kind] = live_items
+        self._dump_json(LEDGER_FILE, self.inflight)
+        states = self.scan()  # attempts changed: PARKED models must drop out
 
         to_int = sorted(
             d for d, s in states.items() if s is ModelState.PENDING_INTEGRATION
@@ -169,18 +189,30 @@ class VeraDriver:
             script = os.path.join(os.path.dirname(__file__), "scripts", "solve_task.sh")
         if hasattr(self.runner, "submit_array"):
             # local backend: execute synchronously, skip slurm argv plumbing
-            jid = self.runner.submit_array(script, items)
+            jid = self.runner.submit_array(script, new)
         else:
-            jid = submit_array(self.runner, spec, script, items)
-        for i, item in enumerate(items):
-            _remember_ledger_jid(self.run_dir, kind, item, jid + i)
+            jid = submit_array(self.runner, spec, script, new)
+        # every task of an array job reports to squeue as <jid>_<n>, and
+        # running_job_ids truncates at the underscore -- so the whole array
+        # shares ONE id. Recording jid+i invented ids that never appear live,
+        # and the work was resubmitted underneath itself.
+        for item in new:
+            _remember_ledger_jid(self.run_dir, kind, item, jid)
         self.inflight.setdefault(kind, []).extend(new)
         self._dump_json(LEDGER_FILE, self.inflight)
         print(f"submitted {kind} array job {jid} with {len(new)} task(s)")
         return 1
 
+    def _charge_attempt(self, model_dir):
+        n = int(self.attempts.get(model_dir, 0)) + 1
+        self.attempts[model_dir] = n
+        self._dump_json(ATTEMPTS_FILE, self.attempts)
+        if n >= ATTEMPT_LIMIT:
+            self.log.warning("%s parked after %d failed attempt(s)", model_dir, n)
+        return n
+
     def _adaptive_k(self):
-        lf = levelfs(self.runner, USER)
+        lf = levelfs(self.runner, _slurm_user())
         if lf is None:
             return self.k_start
         if lf > 10.0:
@@ -220,11 +252,12 @@ class VeraDriver:
         states = self.scan()
         results = []
         t = self.config.all_models.table
+        rows = self._dir_to_row()
         for d, state in states.items():
             pid = self.dir_to_pid.get(d)
-            if pid is None:
+            row = rows.get(d)
+            if pid is None or row is None:
                 continue
-            row = self.dir_to_row[d]
             if state is ModelState.SOLVED and not bool(t["all_done"][row]):
                 meta = _read_weights_meta(os.path.join(self.output_root, "models", d))
                 results.append(
@@ -238,7 +271,7 @@ class VeraDriver:
                 t["time_modified"][row] = str(_now64())
         failed = [d for d, s in states.items() if s is ModelState.PARKED]
         for d in failed:
-            pid = self.proposer.dir_to_pid.get(d)
+            pid = self.dir_to_pid.get(d)
             if pid is not None:
                 results.append(Result(proposal_id=pid, model_dir=d, status="failed"))
         if results:
@@ -310,7 +343,6 @@ class VeraDriver:
                          f"/ml{ml_val:{sformat}}/")
             t["directory"][idx] = directory
             self.dir_to_pid[directory] = pid
-            self.dir_to_row[directory] = idx
         self._save_table_atomically()
         self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid})
 
@@ -337,21 +369,6 @@ class VeraDriver:
         except (AttributeError, IndexError, TypeError):
             return None
 
-    def _intake_bounds(self):
-        bounds = {}
-        for p in self.config.parspace:
-            st = getattr(p, "par_generator_settings", None) or {}
-            bounds[p.name] = {"lo": st.get("lo"), "hi": st.get("hi")}
-        return bounds
-
-    def _qobs(self):
-        try:
-            stars = [c for c in self.config.system.cmp_list
-                     if type(c).__name__ == "TriaxialVisibleComponent"]
-            return float(stars[0].qobs) if stars else None
-        except (AttributeError, IndexError, TypeError):
-            return None
-
     def proposer_u_fixed(self):
         for p in self.config.parspace:
             if p.name == "u" and getattr(p, "fixed", True):
@@ -359,6 +376,13 @@ class VeraDriver:
         return None
 
 # ------------------------------------------------------------------ helpers
+def _slurm_user():
+    """The account whose fairshare governs our queue depth."""
+    import getpass
+
+    return os.environ.get("VERA_USER") or getpass.getuser()
+
+
 def _now64():
     import numpy as np
 

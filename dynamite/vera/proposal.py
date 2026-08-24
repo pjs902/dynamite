@@ -10,6 +10,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import typing
 
 from . import SCHEMA_VERSION
 
@@ -43,17 +44,23 @@ class Result:
     proposal_id: str
     model_dir: str
     status: str
-    chi2: float = None
-    kinchi2: float = None
-    kinmapchi2: float = None
+    chi2: typing.Optional[float] = None
+    kinchi2: typing.Optional[float] = None
+    kinmapchi2: typing.Optional[float] = None
 
     def to_dict(self):
         return {"schema_version": SCHEMA_VERSION, **dataclasses.asdict(self)}
 
     @staticmethod
     def from_dict(d):
-        d = {k: v for k, v in d.items() if k != "schema_version"}
-        return Result(**d)
+        version = d.get("schema_version")
+        if version != SCHEMA_VERSION:
+            raise ValueError(f"Result schema_version {version!r} != {SCHEMA_VERSION}")
+        known = {f.name for f in dataclasses.fields(Result)}
+        unknown = set(d) - known - {"schema_version"}
+        if unknown:
+            raise ValueError(f"unknown Result field(s): {sorted(unknown)}")
+        return Result(**{k: v for k, v in d.items() if k in known})
 
 
 def validate_parset(parset, bounds, qobs, u_fixed=None):

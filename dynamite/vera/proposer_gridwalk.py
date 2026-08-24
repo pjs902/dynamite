@@ -26,6 +26,7 @@ class GridWalkProposer:
         self.generator = ps.GridWalk(config.parspace, parspace_settings=pss)
         self.par_names = [p.name for p in config.parspace]
         self.pid_to_row = {}  # proposal_id -> table row index
+        self.failed_pids = set()  # intake rejections + parked models
 
     # ------------------------------------------------------------------
     def _row_to_parset(self, row_idx):
@@ -47,7 +48,13 @@ class GridWalkProposer:
         return props
 
     def observe(self, results):
-        """No-op: the table is the observation channel (spec section 4.1)."""
+        """The table carries the chi2 values, but failures never reach it:
+        a rejected or parked proposal has no row worth reading, so record
+        it here rather than dropping it on the floor.
+        """
+        for r in results:
+            if getattr(r, "status", None) == "failed":
+                self.failed_pids.add(r.proposal_id)
         return None
 
     def tracked_results(self):
