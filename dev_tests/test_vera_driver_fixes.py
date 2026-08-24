@@ -244,6 +244,51 @@ def test_missing_ledger_entry_does_not_stall(world):
     assert attempts.get(dirs[0], 0) >= 1
 
 
+def test_successful_integration_is_not_billed_a_failure(world):
+    """A finished integration leaves its model in TO_SOLVE -- that is success
+    for an int job, and must not count against ATTEMPT_LIMIT."""
+    cfg, dirs, run_dir = world([[]])  # nothing built yet -> PENDING_INTEGRATION
+    runner = ArrayRunner()
+    _drv(cfg, run_dir, runner).reconcile_and_submit()  # int wave goes out
+    # the integration succeeds: the sentinel appears, so the model is TO_SOLVE
+    sentinel = os.path.join(
+        cfg.settings.io_settings["output_directory"], "models",
+        dirs[0].split("/")[0], "datfil", "tube_box_done",
+    )
+    open(sentinel, "w").write("done\n")
+    _aged(sentinel)
+    runner.live = set()  # the int job has finished and left the queue
+    drv = _drv(cfg, run_dir, runner)
+    assert drv.scan()[dirs[0]] is ModelState.TO_SOLVE
+    drv.reconcile_and_submit()
+    attempts_path = os.path.join(run_dir, "vera_attempts.json")
+    attempts = json.load(open(attempts_path)) if os.path.isfile(attempts_path) else {}
+    assert attempts.get(dirs[0], 0) == 0, "successful integration was billed a failure"
+
+
+def test_finished_work_is_pruned_from_the_ledger(world):
+    """Entries are removed once their job is gone, so the ledger does not
+    accumulate one dead key per model for the life of the campaign."""
+    cfg, dirs, run_dir = world([["tube_box_done"]])
+    runner = ArrayRunner()
+    _drv(cfg, run_dir, runner).reconcile_and_submit()
+    ledger = os.path.join(run_dir, "vera_ledger_jids.json")
+    assert len(json.load(open(ledger))) == 1
+
+    # the solve finishes: weights land, so there is nothing left to resubmit
+    weights = os.path.join(
+        cfg.settings.io_settings["output_directory"], "models", dirs[0],
+        "orbit_weights.ecsv",
+    )
+    open(weights, "w").write(WEIGHTS_ECSV)
+    _aged(weights)
+    runner.live = set()  # and the job has left the queue
+    drv = _drv(cfg, run_dir, runner)
+    assert drv.scan()[dirs[0]] is ModelState.SOLVED
+    drv.reconcile_and_submit()
+    assert json.load(open(ledger)) == {}, "dead entry was never pruned"
+
+
 def test_transient_squeue_failure_does_not_resubmit_everything(world):
     """A flaky squeue must not read as 'every job died'."""
     from dynamite.vera.slurm import SlurmError

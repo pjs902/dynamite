@@ -147,15 +147,18 @@ class VeraDriver:
                 elif jid in live:
                     live_items.append(item)
                     continue
-                # the job is gone. If the artifacts are not there either, the
-                # attempt failed: charge it so ATTEMPT_LIMIT can eventually
-                # park the model instead of retrying it forever.
+                # the job is gone. Charge an attempt only if THIS kind of work
+                # left no artifact: a finished integration lands its models in
+                # TO_SOLVE, which is success for an "int" job and failure only
+                # for a "solve" one. Billing both states for both kinds parked
+                # models that had never failed.
+                unfinished = (
+                    ModelState.PENDING_INTEGRATION if kind == "int" else ModelState.TO_SOLVE
+                )
                 for d in item.split(";"):
-                    if states.get(d) in (
-                        ModelState.PENDING_INTEGRATION,
-                        ModelState.TO_SOLVE,
-                    ):
+                    if states.get(d) is unfinished:
                         self._charge_attempt(d)
+                _forget_ledger_jid(self.run_dir, kind, item)
             self.inflight[kind] = live_items
         self._dump_json(LEDGER_FILE, self.inflight)
         states = self.scan()  # attempts changed: PARKED models must drop out
@@ -449,6 +452,22 @@ def _remember_ledger_jid(run_dir, kind, item, jid):
         with open(p) as f:
             data = json.load(f)
     data[f"{kind}:{item}"] = jid
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, p)
+
+
+def _forget_ledger_jid(run_dir, kind, item):
+    """Drop a finished/dead item's jid so the ledger cannot grow without
+    bound, and a stale id can never be read back for a resubmitted item."""
+    p = _ledger_path(run_dir)
+    if not os.path.isfile(p):
+        return
+    with open(p) as f:
+        data = json.load(f)
+    if data.pop(f"{kind}:{item}", None) is None:
+        return
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f)
