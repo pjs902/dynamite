@@ -221,11 +221,17 @@ $q = 8$ and 56 for $q = 16$, consistent with the guideline of
 \citet{elgammal2023gpry} that the batch should be of order
 $\min(d, n_\mathrm{workers})$. Warm-up size, the $\eta$ schedule, and
 the tempered-posterior dose were neutral at $d = 4$; removing trust
-regions cost 46 versus 41. Seeding the GP from sparse uniformly
-distributed history at $d = 4$ degrades the search relative to a cold
-start, because uniform draws under-resolve the black-hole bowl;
-warm-starting from a clustered, near-optimal history (the situation a
-finished grid walk leaves) is the supported production path.
+regions cost 46 versus 41. Warm-starting the GP from an
+existing evaluation history helps at every dose we tested, and the
+benefit grows with the size of that history. Against a cold-start median
+of 41 fresh models, seeding with 10, 30 and 60 uniformly drawn prior
+evaluations reaches the threshold in a median of 21, 16 and 7. History
+clustered around the optimum, which is what a completed grid walk leaves
+behind, does better still at equal size: 15, 4 and 3 for the same three
+doses. All five seeds converge in every configuration. The clustered case
+is therefore the supported production path. These are five seeds on one
+synthetic surface drawing from a single history pool, so the doses are not
+independent samples.
 
 \subsection{Recommended settings}
 \label{app:bayesopt:settings}

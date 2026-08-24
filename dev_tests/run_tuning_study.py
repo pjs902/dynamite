@@ -103,8 +103,14 @@ def drive(land, gs_over, seeds=SEEDS, noise=0.0, seed_hist=None, budget=BUDGET, 
         kin = np.asarray(am.table["kinchi2"], dtype=float)
         ok = np.isfinite(kin)
         hit = ok & (kin <= land.threshold)
-        cnt = int(np.argmax(hit) + 1) if np.any(hit) else None
-        n_fresh = len(am.table) - (len(seed_hist) if seed_hist is not None else 0)
+        n_seed = len(seed_hist) if seed_hist is not None else 0
+        # Count FRESH models only. Seeded warm-start rows sit at the front of
+        # the table already carrying their kinchi2, so an absolute argmax
+        # charged every warm-start arm the full +k of its own seed history
+        # before it could reach a model the run actually evaluated.
+        fresh_hit = hit[n_seed:]
+        cnt = int(np.argmax(fresh_hit) + 1) if np.any(fresh_hit) else None
+        n_fresh = len(am.table) - n_seed
         out.append({"n_fresh": n_fresh, "to_thr": cnt, "best": float(np.min(kin[ok])), "r3_events": r3_events})
     return out
 
@@ -176,7 +182,11 @@ def t2():
         q = rng.uniform(0.3, 0.89)
         p = rng.uniform(0.90, 0.999)
         c = land([[mbh, ml, q, p]])[0]
-        history_pool.append([mbh, ml, q, p, c, c, float("nan"), "", True, True, True, 0, "d"])
+        # all_models columns hold PHYSICAL values while the landscape axis and
+        # par_generator bounds are raw log10 -- seed the table with 10**mbh or
+        # every warm-start row lands outside [3.9, 4.78] and is clipped to the
+        # bound, destroying the history this study exists to measure.
+        history_pool.append([10**mbh, ml, q, p, c, c, float("nan"), "", True, True, True, 0, "d"])
     gs = {
         "batch_size": 8,
         "n_initial_random": 0,
@@ -201,7 +211,7 @@ def t2():
             q = float(np.clip(rng.normal(0.52, 0.06), 0.3, 0.89))
             p = float(np.clip(rng.normal(0.965, 0.008), 0.90, 0.999))
             c = land([[mbh, ml, q, p]])[0]
-            hist.append([mbh, ml, q, p, c, c, float("nan"), "", True, True, True, 0, "d"])
+            hist.append([10**mbh, ml, q, p, c, c, float("nan"), "", True, True, True, 0, "d"])
         gs["n_initial_random"] = 0
         res = summarize(f"history={k:>3} cluster", drive(land, gs, seed_hist=hist), SEEDS)
 

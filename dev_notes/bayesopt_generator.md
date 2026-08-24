@@ -353,13 +353,29 @@ parspace.get_raw_value_from_param_value before calling the landscape.
 
 ### T2/T4/T5 results (2026-08-23)
 
-T2 warm-start dose-response (production-4d, 5 seeds): warm-start value
-depends entirely on history GEOMETRY, not size. Uniform-random history at
-d=4 HURTS (k=10: 112 fresh models vs 72 cold; k=60: 1/5 runs converge —
-uniform draws under-resolve the BH bowl and the GP prior misleads EI).
-Clustered near-optimum history (what a finished grid walk leaves) wins
-big: k=30 -> 24 fresh models, k=60 -> 9 fresh models median, 5/5 hits.
-Production guidance: let GridWalk cluster near its optimum, then switch.
+T2 warm-start dose-response (production-4d, 5 seeds) — CORRECTED 2026-08-24,
+the original numbers were invalid; see below. Warm-start helps at every dose
+and the benefit grows with history size. Median fresh models to threshold:
+cold 41; uniform k=10/30/60 -> 21/16/7; clustered k=10/30/60 -> 15/4/3.
+5/5 hits everywhere. So history GEOMETRY matters (clustered beats uniform at
+equal size) but the earlier claim that uniform history HURTS relative to a
+cold start is false. Production guidance is unchanged: let GridWalk cluster
+near its optimum, then switch.
+
+Two harness bugs produced the original result, both in run_tuning_study.py:
+  1. `to_thr` used an ABSOLUTE table index. Seeded rows sit at the front
+     already carrying kinchi2, so argmax could land inside the seed prefix.
+     The old headline numbers were literally seed positions: k=30 "24" is the
+     first under-threshold seed at index 23, k=60 "9" is index 8.
+  2. Warm-start rows were seeded with RAW m-bh (4.33) where PHYSICAL
+     (10**4.33) belongs — the gotcha documented three lines above. All 241
+     history rows across every warm-start arm were clipped to a bound, so the
+     GP trained on collapsed garbage. This is what made uniform look harmful.
+Only T2 is affected: seed_hist is passed nowhere else, and bug 1 is a no-op
+when there is no seeded history. T1/T3/T4/T5 and the GridWalk comparisons
+stand. The generator itself was never wrong — extract_gp_training_data does
+the par_value -> raw conversion correctly and logged the clipping warning on
+every run.
 
 T4 noise robustness (extra multiplicative evaluation noise): BO median
 models-to-threshold 41 (sigma=0), 39 (0.3%), 36 (1%) — no degradation;
