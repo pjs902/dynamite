@@ -55,8 +55,12 @@ def classify(model_dir, attempts, now_ts, min_age_s=MIN_AGE_S_DEFAULT):
         return ModelState.PARKED
 
     def _settled(path):
+        # A negative age (NFS clock skew, or a synthetic test clock) means
+        # unknown freshness -- NOT absence. Returning None here made a model
+        # whose sentinel is physically present read as PENDING_INTEGRATION
+        # and get re-integrated. Clamp instead: defer one cycle.
         age = _age(path, now_ts)
-        return age if age is not None and age >= 0 else None
+        return max(0.0, age) if age is not None else None
 
     sent_age = _settled(sent)
     if sent_age is not None:

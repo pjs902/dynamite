@@ -29,9 +29,10 @@ class BayesOptProposer:
         self.config = config
         pss = config.settings.parameter_space_settings
         gen_type = pss["generator_type"]
-        if gen_type != "BayesOpt":
+        if gen_type != "BayesOptGenerator":
             raise ValueError(
-                f"BayesOptProposer needs generator_type BayesOpt, got {gen_type}"
+                "BayesOptProposer needs generator_type BayesOptGenerator, "
+                f"got {gen_type}"
             )
         self.generator = ps.BayesOptGenerator(config.parspace, parspace_settings=pss)
         self.par_names = [p.name for p in config.parspace]

@@ -351,6 +351,51 @@ def test_crash_mid_integration_still_charges_an_attempt(world):
     assert attempts.get(dirs[0], 0) >= 1, "a crashed integration was never charged"
 
 
+def test_orbit_library_is_reused_when_only_ml_differs(tmp_path):
+    """Rows sharing a potential must share one orblib_XXX_YYY prefix.
+
+    An orbit library is ml-independent, so minting a fresh prefix per row
+    costs a full ~18 h re-integration for every ml variant -- the reuse
+    ModelInnerIterator.assign_model_directories provides and that this
+    method's docstring claims to mirror.
+    """
+    cfg = build_minimal_config()
+    t = cfg.all_models.table
+    before = len(t)
+    # two ml values at ONE potential, then a second potential (both distinct
+    # from anything the fixture already put in the table)
+    for ml, q, p in ((2.6, 0.42, 0.87), (4.0, 0.42, 0.87), (2.6, 0.60, 0.93)):
+        t.add_row([ml, q, p, np.nan, np.nan, np.nan, "", False, False, False, 1, ""])
+    cfg.settings.io_settings = {
+        "output_directory": str(tmp_path), "all_models_file": "all_models.ecsv",
+    }
+
+    class _MlPar:
+        sformat = "05.2f"
+
+    class _System:
+        parameters = [_MlPar()]
+        cmp_list = []
+
+    cfg.system = _System()
+
+    class Prop(RealisticProposer):
+        par_names = ["ml", "q", "p"]
+
+    prop = Prop()
+    prop.pid_to_row = {f"pid{i}": i for i in range(before, len(t))}
+    drv = _drv(cfg, str(tmp_path), ArrayRunner(), prop)
+    drv._assign_directories(range(before, len(t)))
+
+    dirs = [str(t["directory"][i]) for i in range(before, len(t))]
+    prefix = [d.rstrip("/").rsplit("/", 1)[0] for d in dirs]
+    assert prefix[0] == prefix[1], (
+        f"ml variants of one potential split across libraries: {dirs}"
+    )
+    assert prefix[2] != prefix[0], f"different potentials shared a library: {dirs}"
+    assert dirs[0] != dirs[1], "the ml subdirectories must still differ"
+
+
 def test_transient_squeue_failure_does_not_resubmit_everything(world):
     """A flaky squeue must not read as 'every job died'."""
     from dynamite.vera.slurm import SlurmError

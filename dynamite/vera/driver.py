@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from .classifier import ATTEMPT_LIMIT, WEIGHTS, ModelState, classify
+from .classifier import ATTEMPT_LIMIT, WEIGHTS, ModelState, _noml, classify
 from .pack_integration import pack_libraries
 from .proposal import Result, validate_parset, SCHEMA_VERSION
 from .slurm import (
@@ -171,9 +171,19 @@ class VeraDriver:
         self._dump_json(LEDGER_FILE, self.inflight)
         states = self.scan()  # attempts changed: PARKED models must drop out
 
-        to_int = sorted(
+        # One integration per LIBRARY, not per model: ml variants share a
+        # library (and its noml directory), so submitting each of them would
+        # race several processes into the same datfil. The siblings pick up
+        # the sentinel and go straight to TO_SOLVE on a later cycle.
+        to_int, seen_libs = [], set()
+        for d in sorted(
             d for d, s in states.items() if s is ModelState.PENDING_INTEGRATION
-        )
+        ):
+            lib = _noml(os.path.join(self.output_root, "models", d))
+            if lib in seen_libs:
+                continue
+            seen_libs.add(lib)
+            to_int.append(d)
         to_sol = sorted(d for d, s in states.items() if s is ModelState.TO_SOLVE)
 
         for d in list(to_int) + list(to_sol):
@@ -361,6 +371,7 @@ class VeraDriver:
         qobs = self._qobs()
         u_fixed = self.proposer_u_fixed()
         sformat = self.config.system.parameters[0].sformat
+        orblib_pars = self._orblib_parameters()
 
         row_to_pid = {row: pid for pid, row in
                       self.proposer.pid_to_row.items()}
@@ -369,8 +380,17 @@ class VeraDriver:
             pid = row_to_pid.get(idx)
             if pid is None:
                 continue
-            parset = {name: float(t[name][idx])
-                      for name in self.proposer.par_names}
+            # par_generator_settings lo/hi are RAW (log10 for logarithmic
+            # params) while the table column holds par_value (physical), so
+            # comparing them directly made the bounds gate a no-op for every
+            # log parameter -- and would have destroyed them outright the
+            # moment `clipped` was written back. Validate in raw space.
+            pars = {p.name: p for p in self.config.parspace}
+            parset = {
+                name: float(pars[name].get_raw_value_from_par_value(float(t[name][idx])))
+                for name in self.proposer.par_names
+                if name in pars and name in t.colnames
+            }
             clipped, violations = validate_parset(
                 parset, bounds, qobs=qobs, u_fixed=u_fixed)
             if violations:
@@ -383,15 +403,30 @@ class VeraDriver:
                 self.proposer.observe([result])
                 del self.proposer.pid_to_row[pid]
                 continue
+            for name, raw in clipped.items():
+                repaired = float(pars[name].get_par_value_from_raw_value(raw))
+                if not np.isclose(repaired, float(t[name][idx])):
+                    self.log.warning(
+                        "intake clipped %s %s -> %g", pid, name, repaired
+                    )
+                    t[name][idx] = repaired
             iteration = int(t["which_iter"][idx])
             prior = t[:idx]
-            n = sum(1 for r in prior
-                    if int(r["which_iter"]) == iteration
-                    and r["directory"]
-                    and not str(r["directory"]).startswith("rejected"))
             ml_val = float(t["ml"][idx]) if "ml" in t.colnames else 0.0
-            directory = (f"orblib_{iteration:03d}_{n:03d}"
-                         f"/ml{ml_val:{sformat}}/")
+            # Reuse the library of any earlier row sharing this potential:
+            # only ml differs, and an orbit library is ml-independent. Minting
+            # a fresh prefix per row cost a full ~18 h re-integration for every
+            # ml variant -- exactly the reuse ModelInnerIterator provides.
+            reuse = self._existing_orblib_dir(idx, orblib_pars)
+            if reuse is not None:
+                directory = f"{reuse}/ml{ml_val:{sformat}}/"
+            else:
+                n = sum(1 for r in prior
+                        if int(r["which_iter"]) == iteration
+                        and r["directory"]
+                        and not str(r["directory"]).startswith("rejected"))
+                directory = (f"orblib_{iteration:03d}_{n:03d}"
+                             f"/ml{ml_val:{sformat}}/")
             t["directory"][idx] = directory
             self.dir_to_pid[directory] = pid
         self._save_table_atomically()
@@ -417,6 +452,27 @@ class VeraDriver:
             time.sleep(self.poll_interval)
 
     # ------------------------------------------------------------ model rows
+    def _orblib_parameters(self):
+        """Parameters that define the orbit library: everything but ml (an
+        orbit library is integrated in a potential and scaled by ml later)."""
+        return [n for n in self.config.parspace.par_names if n != "ml"]
+
+    def _existing_orblib_dir(self, idx, orblib_pars):
+        """The orblib_XXX_YYY prefix of an earlier row with the same potential,
+        or None. Mirrors ModelInnerIterator.is_new_orblib's np.allclose match."""
+        t = self.config.all_models.table
+        cols = [c for c in orblib_pars if c in t.colnames]
+        if not cols:
+            return None
+        row = tuple(float(t[c][idx]) for c in cols)
+        for j in range(idx):
+            d = str(t["directory"][j])
+            if not d or d.startswith("rejected") or d.startswith("pending"):
+                continue
+            if np.allclose(row, tuple(float(t[c][j]) for c in cols)):
+                return d.rstrip("/").rsplit("/", 1)[0] if "/" in d.rstrip("/") else d.rstrip("/")
+        return None
+
     def _intake_bounds(self):
         bounds = {}
         for p in self.config.parspace:
@@ -433,8 +489,9 @@ class VeraDriver:
             return None
 
     def proposer_u_fixed(self):
+        """u is named u-<component> in the parspace, never bare "u"."""
         for p in self.config.parspace:
-            if p.name == "u" and getattr(p, "fixed", True):
+            if p.name.split("-")[0] == "u" and getattr(p, "fixed", True):
                 return float(p.raw_value)
         return None
 

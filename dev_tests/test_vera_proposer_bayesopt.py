@@ -77,7 +77,7 @@ def bo_config():
     ]
     pspace = ParameterSpace(MockSystem(params))
     pss = {
-        "generator_type": "BayesOpt",
+        "generator_type": "BayesOptGenerator",
         "which_chi2": "kinchi2",
         "stopping_criteria": {
             "n_max_mods": 10,

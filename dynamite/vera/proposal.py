@@ -35,7 +35,9 @@ class Proposal:
 
     @staticmethod
     def from_dict(d):
-        assert d["schema_version"] == SCHEMA_VERSION
+        version = d.get("schema_version")
+        if version != SCHEMA_VERSION:
+            raise ValueError(f"Proposal schema_version {version!r} != {SCHEMA_VERSION}")
         return Proposal(proposal_id=d["proposal_id"], parset=dict(d["parset"]))
 
 
@@ -90,9 +92,18 @@ def validate_parset(parset, bounds, qobs, u_fixed=None):
             val = hi
         clipped[name] = float(val)
 
-    q = clipped.get("q")
-    p = clipped.get("p")
-    u = clipped.get("u", u_fixed)
+    # Parspace names are qualified with their component -- q-stars, p-stars,
+    # u-stars (config_reader builds them as f"{par}-{comp}"). Looking up bare
+    # "q"/"p"/"u" found nothing, so every guard below short-circuited on
+    # `is not None` and the whole triaxiality gate passed everything.
+    shape = {}
+    for name, val in clipped.items():
+        shape.setdefault(name.split("-")[0], val)
+    q = shape.get("q")
+    p = shape.get("p")
+    u = shape.get("u", u_fixed)
+    if u is None:
+        u = u_fixed
 
     if (
         q is not None
