@@ -33,12 +33,24 @@ class GridWalkProposer:
         t = self.config.all_models.table
         return {name: float(t[name][row_idx]) for name in self.par_names}
 
-    def propose(self, max_batch=1000):
+    def propose(self, max_batch=None):
+        """Every row the generator appended becomes a proposal.
+
+        max_batch is advisory only: a row left un-proposed here gets no
+        proposal_id and no directory, is skipped by the driver's scan, and
+        is never revisited -- the parameter set would simply vanish from
+        the campaign. Batch size belongs to the generator settings.
+        """
         t = self.config.all_models.table
         before = len(t)
         self.generator.generate(current_models=self.config.all_models)
+        if max_batch is not None and len(t) - before > max_batch:
+            self.log.warning(
+                "generator produced %d rows, above the advisory max_batch %d; "
+                "proposing all of them", len(t) - before, max_batch,
+            )
         props = []
-        for i in range(before, min(len(t), before + max_batch)):
+        for i in range(before, len(t)):
             parset = self._row_to_parset(i)
             pid = canonical_hash_stable(parset)
             self.pid_to_row[pid] = i

@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from .classifier import ATTEMPT_LIMIT, ModelState, classify
+from .classifier import ATTEMPT_LIMIT, WEIGHTS, ModelState, classify
 from .pack_integration import pack_libraries
 from .proposal import Result, validate_parset, SCHEMA_VERSION
 from .slurm import (
@@ -123,6 +123,8 @@ class VeraDriver:
         return states
 
     def reconcile_and_submit(self, dry_run=False):
+        """Returns the number of Slurm ARRAY JOBS submitted this cycle (not
+        the number of models: one array carries many)."""
         states = self.scan()
         if dry_run:
             live = set()
@@ -152,10 +154,17 @@ class VeraDriver:
                 # TO_SOLVE, which is success for an "int" job and failure only
                 # for a "solve" one. Billing both states for both kinds parked
                 # models that had never failed.
-                unfinished = (
-                    ModelState.PENDING_INTEGRATION if kind == "int" else ModelState.TO_SOLVE
+                # Charge unless the work COMPLETED. Testing for the
+                # not-started state instead let a library that crashed
+                # mid-integration escape: it leaves fresh files behind, so it
+                # classifies INTEGRATING at this moment, went uncharged, and
+                # was resubmitted next cycle with attempts still 0 -- forever.
+                succeeded = (
+                    (ModelState.TO_SOLVE, ModelState.SOLVED)
+                    if kind == "int"
+                    else (ModelState.SOLVED,)
                 )
-                if states.get(item) is unfinished:
+                if states.get(item) not in succeeded:
                     self._charge_attempt(item)
                 _forget_ledger_jid(self.run_dir, kind, item)
             self.inflight[kind] = live_items
@@ -213,6 +222,7 @@ class VeraDriver:
         # a wave larger than the scheduler's MaxArraySize goes out as several
         # arrays: truncating would leave the tail recorded as in-flight and
         # never scheduled, so those models would never run and never retry
+        n_arrays = 0
         for chunk in [fresh[i:i + MAX_ARRAY_SIZE] for i in range(0, len(fresh), MAX_ARRAY_SIZE)]:
             items = [";".join(pkg) for pkg in chunk]
             if kind == "int":
@@ -230,8 +240,9 @@ class VeraDriver:
                     _remember_ledger_jid(self.run_dir, kind, d, jid)
                     self.inflight.setdefault(kind, []).append(d)
             print(f"submitted {kind} array job {jid} with {len(chunk)} task(s)")
+            n_arrays += 1
         self._dump_json(LEDGER_FILE, self.inflight)
-        return 1
+        return n_arrays
 
     def _charge_attempt(self, model_dir):
         n = int(self.attempts.get(model_dir, 0)) + 1
@@ -444,7 +455,7 @@ def _now64():
 def _read_weights_meta(model_full_dir):
     from astropy.io import ascii
 
-    wfile = os.path.join(model_full_dir, "orbit_weights.ecsv")
+    wfile = os.path.join(model_full_dir, WEIGHTS)
     meta = ascii.read(wfile).meta
     return {
         "chi2": float(meta["chi2_tot"]),

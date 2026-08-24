@@ -329,6 +329,28 @@ def test_unreadable_weights_do_not_kill_the_daemon(world):
     assert not bool(cfg.all_models.table["all_done"][-1])
 
 
+def test_crash_mid_integration_still_charges_an_attempt(world):
+    """A library that dies mid-run leaves fresh files, so it classifies
+    INTEGRATING at reconcile time. Testing for the not-started state let it
+    resubmit forever with attempts stuck at 0."""
+    cfg, dirs, run_dir = world([[]])
+    runner = ArrayRunner()
+    _drv(cfg, run_dir, runner).reconcile_and_submit()  # int wave out
+    # the job crashed, but only after writing scratch files a moment ago
+    scratch = os.path.join(
+        cfg.settings.io_settings["output_directory"], "models", dirs[0],
+        "datfil", "partial.dat",
+    )
+    open(scratch, "w").write("half a library\n")
+    os.utime(scratch, (NOW - 1, NOW - 1))  # fresh -> INTEGRATING
+    runner.live = set()  # job is gone from the queue
+    drv = _drv(cfg, run_dir, runner)
+    assert drv.scan()[dirs[0]] is ModelState.INTEGRATING
+    drv.reconcile_and_submit()
+    attempts = json.load(open(os.path.join(run_dir, "vera_attempts.json")))
+    assert attempts.get(dirs[0], 0) >= 1, "a crashed integration was never charged"
+
+
 def test_transient_squeue_failure_does_not_resubmit_everything(world):
     """A flaky squeue must not read as 'every job died'."""
     from dynamite.vera.slurm import SlurmError

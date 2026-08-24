@@ -42,10 +42,21 @@ class BayesOptProposer:
         t = self.config.all_models.table
         return {name: float(t[name][row_idx]) for name in self.par_names}
 
-    def propose(self, max_batch=4):
+    def propose(self, max_batch=None):
+        """Every row the generator appended becomes a proposal.
+
+        Truncating here orphaned the remainder: no proposal_id, no
+        directory, skipped by scan(), and never revisited. batch_size in
+        generator_settings is what controls how many rows appear.
+        """
         t = self.config.all_models.table
         before = len(t)
         self.generator.generate(current_models=self.config.all_models)
+        if max_batch is not None and len(t) - before > max_batch:
+            self.log.warning(
+                "generator produced %d rows, above the advisory max_batch %d; "
+                "proposing all of them", len(t) - before, max_batch,
+            )
         props = []
         for i in range(before, len(t)):
             parset = self._row_to_parset(i)
@@ -54,8 +65,6 @@ class BayesOptProposer:
             pid = canonical_hash(parset)
             self.pid_to_row[pid] = i
             props.append(Proposal(proposal_id=pid, parset=parset))
-            if len(props) >= max_batch:
-                break
         self.log.info("propose(): %d new proposal(s)", len(props))
         return props
 
