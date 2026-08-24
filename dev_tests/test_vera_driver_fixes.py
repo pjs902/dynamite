@@ -145,8 +145,10 @@ def test_live_array_tasks_are_not_resubmitted(world):
     runner = ArrayRunner()
     _drv(cfg, run_dir, runner).reconcile_and_submit()
     assert len(runner.sbatch) == 1
-    led = json.load(open(os.path.join(run_dir, "vera_ledger_jids.json")))
-    assert set(led.values()) == {7001}, f"array tasks must share one jid: {led}"
+    led = json.load(open(os.path.join(run_dir, "vera_inflight.json")))
+    assert set(led["solve"].values()) == {7001}, (
+        f"array tasks must share one jid: {led}"
+    )
 
     runner.live = {7001}  # the array job is still running
     _drv(cfg, run_dir, runner).reconcile_and_submit()
@@ -240,12 +242,15 @@ def test_wave_larger_than_max_array_is_chunked_not_truncated(world):
 
 
 def test_missing_ledger_entry_does_not_stall(world):
-    """A lost jid must read as dead (resubmit), not live-forever (stall)."""
+    """An entry with no jid must read as dead (resubmit), not live (stall)."""
     cfg, dirs, run_dir = world([["tube_box_done"]])
     runner = ArrayRunner()
     _drv(cfg, run_dir, runner).reconcile_and_submit()
     assert len(runner.sbatch) == 1
-    os.remove(os.path.join(run_dir, "vera_ledger_jids.json"))  # ledger lost
+    # a truncated/garbled ledger leaves the item with no job id
+    ledger = os.path.join(run_dir, "vera_inflight.json")
+    with open(ledger, "w") as f:
+        json.dump({"int": {}, "solve": {dirs[0]: None}}, f)
     runner.live = {7001}  # slurm still says the job is alive
     _drv(cfg, run_dir, runner).reconcile_and_submit()
     assert len(runner.sbatch) == 2, "work stalled instead of being retried"
@@ -281,8 +286,8 @@ def test_finished_work_is_pruned_from_the_ledger(world):
     cfg, dirs, run_dir = world([["tube_box_done"]])
     runner = ArrayRunner()
     _drv(cfg, run_dir, runner).reconcile_and_submit()
-    ledger = os.path.join(run_dir, "vera_ledger_jids.json")
-    assert len(json.load(open(ledger))) == 1
+    ledger = os.path.join(run_dir, "vera_inflight.json")
+    assert len(json.load(open(ledger))["solve"]) == 1
 
     # the solve finishes: weights land, so there is nothing left to resubmit
     weights = os.path.join(
@@ -295,7 +300,7 @@ def test_finished_work_is_pruned_from_the_ledger(world):
     drv = _drv(cfg, run_dir, runner)
     assert drv.scan()[dirs[0]] is ModelState.SOLVED
     drv.reconcile_and_submit()
-    assert json.load(open(ledger)) == {}, "dead entry was never pruned"
+    assert json.load(open(ledger))["solve"] == {}, "dead entry was never pruned"
 
 
 def test_repacked_wave_does_not_resubmit_live_models(world):

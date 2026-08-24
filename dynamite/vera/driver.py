@@ -39,7 +39,6 @@ from .slurm import (
 POLL_INTERVAL_S = 300
 K_START = 16
 ATTEMPTS_FILE = "vera_attempts.json"
-JIDS_FILE = "vera_ledger_jids.json"
 LEDGER_FILE = "vera_inflight.json"
 DIRS_FILE = "vera_dirs.json"
 
@@ -64,8 +63,9 @@ class VeraDriver:
         self.poll_interval = poll_interval
         self.k_start = k_start
         self.attempts = self._load_json(ATTEMPTS_FILE, {})
-        self.jids = self._load_json(JIDS_FILE, {})  # "kind:item" -> array job id
-        self.inflight = self._load_json(LEDGER_FILE, {"int": [], "solve": []})
+        # {kind: {item: array job id}} -- in-flight membership IS the key set,
+        # so the two cannot drift the way separate files could
+        self.inflight = self._load_json(LEDGER_FILE, {"int": {}, "solve": {}})
         self.output_root = config.settings.io_settings["output_directory"]
         # proposal attribution, owned by the driver (not the proposer):
         dirs_map = self._load_json(DIRS_FILE, {})
@@ -139,16 +139,15 @@ class VeraDriver:
                 return 0
         charged = False
         for kind in ("int", "solve"):
-            live_items = []
-            for item in self.inflight.get(kind, []):
-                jid = self.jids.get(f"{kind}:{item}")
+            live_items = {}
+            for item, jid in dict(self.inflight.get(kind, {})).items():
                 if jid is None:
-                    # no ledger entry: treat as dead, not live. Stalling is the
+                    # no recorded job: treat as dead, not live. Stalling is the
                     # worse failure; a needless resubmit is bounded by
                     # ATTEMPT_LIMIT and short-circuits on the artifacts.
                     self.log.warning("no ledger jid for %s %s; assuming it died", kind, item)
                 elif jid in live:
-                    live_items.append(item)
+                    live_items[item] = jid
                     continue
                 # the job is gone. Charge an attempt only if THIS kind of work
                 # left no artifact: a finished integration lands its models in
@@ -165,10 +164,9 @@ class VeraDriver:
                 if states.get(item) not in succeeded:
                     self._charge_attempt(item)
                     charged = True
-                self.jids.pop(f"{kind}:{item}", None)
+
             self.inflight[kind] = live_items
         self._dump_json(LEDGER_FILE, self.inflight)
-        self._dump_json(JIDS_FILE, self.jids)
         if charged:
             self._dump_json(ATTEMPTS_FILE, self.attempts)
             states = self.scan()  # attempts changed: PARKED models drop out
@@ -212,7 +210,7 @@ class VeraDriver:
         gives a still-running model a brand-new package string and used to
         read as new work -- resubmitting a live integration.
         """
-        done = set(self.inflight.get(kind, []))
+        done = set(self.inflight.get(kind, {}))
         fresh = [[d for d in pkg if d not in done] for pkg in packages]
         fresh = [pkg for pkg in fresh if pkg]
         if not fresh:
@@ -250,12 +248,10 @@ class VeraDriver:
                 jid = submit_array(self.runner, spec, script, items, manifest)
             for pkg in chunk:
                 for d in pkg:
-                    self.jids[f"{kind}:{d}"] = jid
-                    self.inflight.setdefault(kind, []).append(d)
+                    self.inflight.setdefault(kind, {})[d] = jid
             print(f"submitted {kind} array job {jid} with {len(chunk)} task(s)")
             n_arrays += 1
         self._dump_json(LEDGER_FILE, self.inflight)
-        self._dump_json(JIDS_FILE, self.jids)
         return n_arrays
 
     def _charge_attempt(self, model_dir):
@@ -293,15 +289,24 @@ class VeraDriver:
         i = (rows if rows is not None else self._dir_to_row()).get(model_dir)
         if i is None:
             return
-        target_dir = os.path.join(self.output_root, "models", model_dir)
-        if os.path.isfile(os.path.join(target_dir, "vera_parset.json")):
-            return  # the parset never changes for a given directory
+
         payload = {"schema_version": SCHEMA_VERSION,
                    "par_names": list(self.config.parspace.par_names),
                    "values": {n: float(t[n][i])
                               for n in self.config.parspace.par_names}}
         target = os.path.join(self.output_root, "models", model_dir,
                               "vera_parset.json")
+        # rewrite only on change: this is called every cycle for work that is
+        # still queued, and an NFS create+rename per model per cycle is pure
+        # waste. Comparing content rather than mere existence keeps a
+        # re-clipped or resumed row from being driven by a stale file.
+        if os.path.isfile(target):
+            try:
+                with open(target) as f:
+                    if json.load(f) == payload:
+                        return
+            except (OSError, ValueError):
+                pass  # unreadable: fall through and rewrite it
         os.makedirs(os.path.dirname(target), exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target))
         with os.fdopen(fd, "w") as f:
