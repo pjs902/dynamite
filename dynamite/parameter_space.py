@@ -1326,7 +1326,16 @@ class BayesOptGenerator(ParameterGenerator):
                 steps[j] = step_raw / span
         return steps
 
-    def _snap_to_grid(self, unit_matrix):
+    def _unit_cube(self):
+        return np.zeros(len(self.free_par_idx)), np.ones(len(self.free_par_idx))
+
+    def _sobol_in_box(self, n, box=None):
+        """Feasible Sobol draws confined to `box` (default: the full cube)."""
+        lo, hi = self._unit_cube() if box is None else (box[0], box[1])
+        unit = lo + (hi - lo) * self._sobol_unit(n)
+        return np.clip(self._project_unit_to_feasible_qpu(unit), lo, hi)
+
+    def _snap_to_grid(self, unit_matrix, box=None):
         """Snap non-ml columns of unit_matrix to their normalized grid steps.
 
         unit_matrix : np.ndarray of shape (n_candidates, n_free), values in [0,1].
@@ -1337,10 +1346,16 @@ class BayesOptGenerator(ParameterGenerator):
         if not self.discretize_non_ml_params or self._norm_steps is None:
             return unit_matrix
         result = unit_matrix.copy()
+        lo, hi = self._unit_cube() if box is None else (box[0], box[1])
         for j, step in enumerate(self._norm_steps):
             if step <= 0:
                 continue
-            result[:, j] = np.clip(np.round(result[:, j] / step) * step, 0.0, 1.0)
+            col = np.round(result[:, j] / step) * step
+            # keep the snapped value inside the acquisition box, on-grid where
+            # the box is at least one step wide
+            lo_g, hi_g = np.ceil(lo[j] / step) * step, np.floor(hi[j] / step) * step
+            col = np.clip(col, lo_g, hi_g) if lo_g <= hi_g else np.clip(col, lo[j], hi[j])
+            result[:, j] = np.clip(col, 0.0, 1.0)
         return result
 
     def _initial_guess_to_unit(self):
@@ -1462,7 +1477,7 @@ class BayesOptGenerator(ParameterGenerator):
             return None
         return np.round(X_unit[:, cols] / steps[cols])
 
-    def _dedup_and_fill(self, X_unit):
+    def _dedup_and_fill(self, X_unit, box=None):
         """Keep the first candidate per snapped non-ml cell; refill freed
         slots with feasible Sobol draws so the batch stays full.
 
@@ -1482,7 +1497,7 @@ class BayesOptGenerator(ParameterGenerator):
         guard = 0
         while keep.shape[0] < n_target and guard < 100:
             guard += 1
-            filler = self._project_unit_to_feasible_qpu(self._sobol_unit(n_target))
+            filler = self._sobol_in_box(n_target, box)
             fkeys = self._cell_keys(filler)
             existing = self._cell_keys(keep)
             for row, k in zip(filler, fkeys):
@@ -1674,8 +1689,11 @@ class BayesOptGenerator(ParameterGenerator):
                         break
 
         if len(collected) < need:
-            while len(collected) < need:
-                collected.append(collected[len(collected) % max(1, len(collected))])
+            if not collected:
+                # box centre may violate the constraint; BoTorch reports it
+                self.logger.warning("feasible IC sampling found no feasible point; using box centre")
+                collected = [0.5 * (lo + hi)]
+            collected = (collected * need)[:need]
 
         result = torch.stack(collected[:need]).reshape(num_restarts, q, d)
         return result
@@ -1736,13 +1754,13 @@ class BayesOptGenerator(ParameterGenerator):
         self._last_acq_value = float(acq_value.item())
         self._gp_batches_done += 1
 
-        cand_np = self._dedup_and_fill(self._snap_to_grid(candidates.detach().numpy()))
+        cand_np = self._dedup_and_fill(self._snap_to_grid(candidates.detach().numpy(), tr), tr)
         if self.n_annealed_members > 0:
             tau = max(self.tau_min, self.tau_start * (self.tau_decay**self._gp_batches_done))
             n_annealed = min(self.n_annealed_members, self.batch_size - 1)
-            annealed = self._sample_annealed_members(n_annealed, tau)
+            annealed = self._sample_annealed_members(n_annealed, tau, tr)
             cand_np = np.vstack([cand_np[: self.batch_size - n_annealed], annealed])
-            cand_np = self._dedup_and_fill(cand_np)
+            cand_np = self._dedup_and_fill(cand_np, tr)
         raw_free = denormalize_to_raw(cand_np, lo_raw, hi_raw)
         import torch as _torch
 
@@ -1758,7 +1776,7 @@ class BayesOptGenerator(ParameterGenerator):
         with torch.no_grad():
             return self._gp_model.posterior(X_unit_t).mean
 
-    def _sample_annealed_members(self, n, tau):
+    def _sample_annealed_members(self, n, tau, box=None):
         """Draw n feasible unit-space points ~ exp(mu(x)/tau) by rejection
         (SALE's annealed objective, mean-only; spec R2).
 
@@ -1772,7 +1790,7 @@ class BayesOptGenerator(ParameterGenerator):
         out = []
         total = 0
         while len(out) < n and total < self.annealed_max_draws:
-            cand = self._project_unit_to_feasible_qpu(self._sobol_unit(min(chunk, self.annealed_max_draws - total)))
+            cand = self._sobol_in_box(min(chunk, self.annealed_max_draws - total), box)
             total += cand.shape[0]
             mu = self._gp_posterior_mean(torch.tensor(cand, dtype=torch.double)).numpy().ravel()
             w = np.exp((mu - mu.max()) / tau)
@@ -1782,7 +1800,7 @@ class BayesOptGenerator(ParameterGenerator):
             self.logger.warning(
                 f"annealed sampling accepted {len(out)}/{n}; filling remainder with projected Sobol draws"
             )
-            fill = self._project_unit_to_feasible_qpu(self._sobol_unit(n - len(out)))
+            fill = self._sobol_in_box(n - len(out), box)
             out.extend(fill.tolist())
         return np.array(out[:n])
 
@@ -1796,12 +1814,15 @@ class BayesOptGenerator(ParameterGenerator):
         frac = min(1.0, n_gp_batches_done / max(1, self.anneal_batches))
         return self.eta_start + frac * (self.eta_end - self.eta_start)
 
-    def _knn_radius(self, X_norm):
+    def _knn_radius(self, X_norm, y):
         """Mean distance from the incumbent to its 5 nearest evaluated
         neighbours, as a fraction of the box diagonal (SALE's local
-        resolution proxy, curvature dropped for v1)."""
-        chi2 = np.asarray(self.current_models.table[self.chi2], dtype=float)
-        i0 = int(np.nanargmin(np.where(np.isfinite(chi2), chi2, np.inf)))
+        resolution proxy, curvature dropped for v1).
+
+        `y` is the chi2 vector matching X_norm's rows, not the table's.
+        """
+        y = np.asarray(y, dtype=float)
+        i0 = int(np.nanargmin(np.where(np.isfinite(y), y, np.inf)))
         diffs = X_norm - X_norm[i0]
         dist = np.linalg.norm(diffs, axis=1)
         order = np.argsort(dist)
@@ -1834,10 +1855,10 @@ class BayesOptGenerator(ParameterGenerator):
         if not self.trust_region:
             return None
         table = self.current_models.table
-        X_norm, _, _, _, _ = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
+        X_norm, y_train, _, _, _ = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
         if X_norm.shape[0] < 10:
             return None
-        if self._knn_radius(X_norm) > self.tr_trigger_frac:
+        if self._knn_radius(X_norm, y_train) > self.tr_trigger_frac:
             return None
         self._maybe_update_tr(table)
         center = self._best_known_unit(table)

@@ -350,3 +350,25 @@ too strict; recalibrate before relying on it as a convergence diagnostic.
 Known harness gotcha (bit twice now): all_models tables store PAR values
 (10^raw for log params) - any custom evaluation loop must convert via
 parspace.get_raw_value_from_param_value before calling the landscape.
+
+### T2/T4/T5 results (2026-08-23)
+
+T2 warm-start dose-response (production-4d, 5 seeds): warm-start value
+depends entirely on history GEOMETRY, not size. Uniform-random history at
+d=4 HURTS (k=10: 112 fresh models vs 72 cold; k=60: 1/5 runs converge —
+uniform draws under-resolve the BH bowl and the GP prior misleads EI).
+Clustered near-optimum history (what a finished grid walk leaves) wins
+big: k=30 -> 24 fresh models, k=60 -> 9 fresh models median, 5/5 hits.
+Production guidance: let GridWalk cluster near its optimum, then switch.
+
+T4 noise robustness (extra multiplicative evaluation noise): BO median
+models-to-threshold 41 (sigma=0), 39 (0.3%), 36 (1%) — no degradation;
+at 1% noise GW drops to 4/5 hits. GP smoothing tolerates real
+orbit-library noise levels.
+
+T5 6D scaling (production + halo f free, c inert): 5/5 hits, median 94
+fresh models to threshold, best 8878 vs landscape floor ~8883 — the
+generator finds the global floor at d=6.
+
+T1/T3 recap: batch=4 best (med 26); TR helps (off: 46); R3 flag never
+fired at eps_rel=0.01 in 50 runs — recalibrate before production use.
