@@ -9,7 +9,7 @@ synthetic negative job ids so they are never mistaken for live Slurm jobs.
 import os
 import subprocess
 
-from .slurm import SlurmError
+from .slurm import SlurmError, write_manifest
 
 
 class LocalRunner:
@@ -28,13 +28,19 @@ class LocalRunner:
         raise SlurmError(f"LocalRunner cannot answer {cmd}")
 
     def submit_array(self, script_path, items):
-        for item in items:
+        # Drive the scripts exactly as Slurm does -- one manifest for the
+        # whole array, each task selecting its line by SLURM_ARRAY_TASK_ID.
+        # Passing the item on the command line here would make this backend
+        # more capable than the real one and hide indexing bugs.
+        run_dir = self.env.get("VERA_RUN_DIR") or os.getcwd()
+        manifest = write_manifest(run_dir, "local", items)
+        for idx, item in enumerate(items):
             self.executed.append((script_path, item))
             proc = subprocess.run(
-                ["bash", script_path, item],
+                ["bash", script_path, manifest],
                 capture_output=True,
                 text=True,
-                env={**os.environ, **self.env},
+                env={**os.environ, **self.env, "SLURM_ARRAY_TASK_ID": str(idx)},
             )
             if proc.returncode != 0:
                 tail = proc.stdout[-1500:] + proc.stderr[-1500:]

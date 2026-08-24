@@ -106,12 +106,18 @@ def test_first_pass_submits_int_and_solve_waves(world):
     kinds = [" ".join(a) for a in rr.sbatch_calls]
     assert any("--job-name=ocen-int" in k for k in kinds)
     assert any("--job-name=ocen-solve" in k for k in kinds)
-    # pending dir goes into the integration wave; built dir into solve wave
-    int_call = next(k for k in kinds if "ocen-int" in k)
-    solve_call = next(k for k in kinds if "ocen-solve" in k)
-    assert "ml02.pe" in int_call.split(";")[0] or "ml02.p" in int_call
-    assert dirs["built"].split("/")[-1] in solve_call
-    assert dirs["solved"].split("/")[-1] not in solve_call
+    # pending dir goes into the integration wave; built dir into solve wave.
+    # The items live in the manifest, NOT on the command line: every array
+    # task shares one argv, so per-task arguments must be looked up by index.
+    def _manifest_body(call):
+        path = next(a for a in call if a.endswith(".txt"))
+        return open(path).read()
+
+    int_call = next(c for c in rr.sbatch_calls if "--job-name=ocen-int" in " ".join(c))
+    solve_call = next(c for c in rr.sbatch_calls if "--job-name=ocen-solve" in " ".join(c))
+    assert dirs["pending"] in _manifest_body(int_call)
+    assert dirs["built"] in _manifest_body(solve_call)
+    assert dirs["solved"] not in _manifest_body(solve_call)
 
 
 def test_alive_jobs_not_resubmitted(world):

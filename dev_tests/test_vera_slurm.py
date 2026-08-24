@@ -9,6 +9,7 @@ import pytest  # noqa: E402
 
 from dynamite.vera.slurm import (  # noqa: E402
     submit_array,
+    write_manifest,
     running_job_ids,
     levelfs,
     build_solve_job_spec,
@@ -33,10 +34,12 @@ class FakeRunner:
         return r
 
 
-def test_submit_array_parses_job_id_and_flags():
+def test_submit_array_parses_job_id_and_flags(tmp_path):
     fr = FakeRunner({"sbatch": "Submitted batch job 424242\n"})
     spec = build_solve_job_spec(k=16, n_items=3)
-    jid = submit_array(fr, spec, "/path/solve_task.sh", ["m/a", "m/b", "m/c"])
+    items = ["m/a", "m/b", "m/c"]
+    manifest = write_manifest(str(tmp_path), "solve", items)
+    jid = submit_array(fr, spec, "/path/solve_task.sh", items, manifest)
     assert jid == 424242
     joined = " ".join(fr.calls[0])
     assert "--array=0-2%16" in joined
@@ -45,13 +48,17 @@ def test_submit_array_parses_job_id_and_flags():
     assert "--account=mia" in joined
     assert "--partition=p.large" in joined
     assert "--time=06:00:00" in joined
-    assert "m/a;m/b;m/c" in joined
+    # the per-task argument CANNOT ride on argv: every array task gets the
+    # same command line, so it is looked up from the manifest by index
+    assert manifest in joined
+    assert "m/a;m/b;m/c" not in joined
+    assert open(manifest).read().splitlines() == items
 
 
 def test_submit_failure_raises():
     fr = FakeRunner({"sbatch": RuntimeError("sbatch: error")})
     with pytest.raises(SlurmError):
-        submit_array(fr, build_solve_job_spec(k=16, n_items=1), "/path/x.sh", ["a"])
+        submit_array(fr, build_solve_job_spec(k=16, n_items=1), "/path/x.sh", ["a"], "/m.txt")
 
 
 def test_array_throttle_clamped_to_max_array_size():
@@ -76,7 +83,7 @@ def test_levelfs_float_or_none():
 def test_integration_spec_exclusive_vera():
     fr = FakeRunner({"sbatch": "Submitted batch job 7\n"})
     spec = build_integration_job_spec(n_items=2)
-    jid = submit_array(fr, spec, "/path/int_task.sh", ["pkg0", "pkg1"])
+    jid = submit_array(fr, spec, "/path/int_task.sh", ["pkg0", "pkg1"], "/m.txt")
     assert jid == 7
     joined = " ".join(fr.calls[0])
     assert "--exclusive" in joined

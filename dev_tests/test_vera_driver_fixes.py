@@ -180,3 +180,83 @@ def test_result_from_dict_rejects_foreign_payloads():
         Result.from_dict({**r.to_dict(), "schema_version": 99})
     with pytest.raises(ValueError):
         Result.from_dict({**r.to_dict(), "surprise": 1})
+
+
+def test_each_array_task_gets_its_own_item(tmp_path):
+    """Slurm hands every task identical argv; the item comes from the index.
+
+    Drives the real script helper: a task that read $1 as its model dir
+    would receive the entire wave instead.
+    """
+    import subprocess
+
+    from dynamite.vera.slurm import write_manifest
+
+    scripts = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "dynamite", "vera", "scripts",
+    )
+    items = [f"orblib_001_{i:03d}/ml02.60" for i in range(3)]
+    manifest = write_manifest(str(tmp_path), "solve", items)
+    probe = tmp_path / "probe.sh"
+    probe.write_text(
+        f'#!/bin/bash\nset -euo pipefail\n. "{scripts}/_select_item.sh"\necho "$ITEM"\n'
+    )
+    for idx, expected in enumerate(items):
+        out = subprocess.run(
+            ["bash", str(probe), manifest],
+            capture_output=True, text=True,
+            env={**os.environ, "SLURM_ARRAY_TASK_ID": str(idx)},
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == expected, f"task {idx} got {out.stdout!r}"
+
+
+def test_wave_larger_than_max_array_is_chunked_not_truncated(world):
+    """Every item must reach a real array; a truncated tail would sit in the
+    in-flight ledger forever, never run and never retried."""
+    from dynamite.vera.slurm import MAX_ARRAY_SIZE
+
+    cfg, dirs, run_dir = world([["tube_box_done"]])
+    runner = ArrayRunner()
+    drv = _drv(cfg, run_dir, runner)
+    n = MAX_ARRAY_SIZE + 5
+    drv._submit_wave("solve", [[f"d{i}"] for i in range(n)], dry_run=False)
+    scheduled = sum(
+        int(next(e for e in call if e.startswith("--array=")).split("%")[0].rsplit("-", 1)[-1]) + 1
+        for call in runner.sbatch
+    )
+    assert len(runner.sbatch) == 2, "wave should span two array jobs"
+    assert scheduled == n, f"only {scheduled} of {n} items actually scheduled"
+
+
+def test_missing_ledger_entry_does_not_stall(world):
+    """A lost jid must read as dead (resubmit), not live-forever (stall)."""
+    cfg, dirs, run_dir = world([["tube_box_done"]])
+    runner = ArrayRunner()
+    _drv(cfg, run_dir, runner).reconcile_and_submit()
+    assert len(runner.sbatch) == 1
+    os.remove(os.path.join(run_dir, "vera_ledger_jids.json"))  # ledger lost
+    runner.live = {7001}  # slurm still says the job is alive
+    _drv(cfg, run_dir, runner).reconcile_and_submit()
+    assert len(runner.sbatch) == 2, "work stalled instead of being retried"
+    attempts = json.load(open(os.path.join(run_dir, "vera_attempts.json")))
+    assert attempts.get(dirs[0], 0) >= 1
+
+
+def test_transient_squeue_failure_does_not_resubmit_everything(world):
+    """A flaky squeue must not read as 'every job died'."""
+    from dynamite.vera.slurm import SlurmError
+
+    cfg, dirs, run_dir = world([["tube_box_done"]])
+
+    class Flaky(ArrayRunner):
+        def __call__(self, argv):
+            if argv[0] == "squeue":
+                raise SlurmError("squeue: Socket timed out")
+            return super().__call__(argv)
+
+    runner = Flaky()
+    drv = _drv(cfg, run_dir, runner)
+    assert drv.reconcile_and_submit() == 0
+    assert runner.sbatch == [], "submitted work without knowing what was live"

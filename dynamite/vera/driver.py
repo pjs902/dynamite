@@ -24,12 +24,15 @@ from .classifier import ATTEMPT_LIMIT, ModelState, classify
 from .pack_integration import pack_libraries
 from .proposal import Result, validate_parset, SCHEMA_VERSION
 from .slurm import (
+    MAX_ARRAY_SIZE,
     RealRunner,
+    SlurmError,
     build_integration_job_spec,
     build_solve_job_spec,
     levelfs,
     running_job_ids,
     submit_array,
+    write_manifest,
 )
 
 POLL_INTERVAL_S = 300
@@ -121,12 +124,27 @@ class VeraDriver:
 
     def reconcile_and_submit(self, dry_run=False):
         states = self.scan()
-        live = set() if dry_run else running_job_ids(self.runner)
+        if dry_run:
+            live = set()
+        else:
+            try:
+                live = running_job_ids(self.runner)
+            except SlurmError as e:
+                # a flaky squeue must not look like "every job died", which
+                # would resubmit the whole campaign on top of itself
+                self.log.warning("squeue failed (%s); skipping this cycle", e)
+                return 0
         for kind in ("int", "solve"):
             live_items = []
             for item in self.inflight.get(kind, []):
                 jid = _ledger_jid(self.run_dir, kind, item)
-                if jid is None or jid in live:
+                if jid is None:
+                    # no ledger entry (lost or never written): treat as dead
+                    # rather than live. Stalling forever is the worse failure;
+                    # a needless resubmit is bounded by ATTEMPT_LIMIT and
+                    # short-circuits on the artifacts.
+                    self.log.warning("no ledger jid for %s %s; assuming it died", kind, item)
+                elif jid in live:
                     live_items.append(item)
                     continue
                 # the job is gone. If the artifacts are not there either, the
@@ -180,27 +198,30 @@ class VeraDriver:
             )
             return 0
         if kind == "int":
-            spec = build_integration_job_spec(n_items=len(new))
             script = os.path.join(
                 os.path.dirname(__file__), "scripts", "integrate_package.sh"
             )
         else:
-            spec = build_solve_job_spec(k=k or self.k_start, n_items=len(new))
             script = os.path.join(os.path.dirname(__file__), "scripts", "solve_task.sh")
-        if hasattr(self.runner, "submit_array"):
-            # local backend: execute synchronously, skip slurm argv plumbing
-            jid = self.runner.submit_array(script, new)
-        else:
-            jid = submit_array(self.runner, spec, script, new)
-        # every task of an array job reports to squeue as <jid>_<n>, and
-        # running_job_ids truncates at the underscore -- so the whole array
-        # shares ONE id. Recording jid+i invented ids that never appear live,
-        # and the work was resubmitted underneath itself.
-        for item in new:
-            _remember_ledger_jid(self.run_dir, kind, item, jid)
-        self.inflight.setdefault(kind, []).extend(new)
+        # a wave larger than the scheduler's MaxArraySize goes out as several
+        # arrays: truncating would leave the tail recorded as in-flight and
+        # never scheduled, so those models would never run and never retry
+        for chunk in [new[i:i + MAX_ARRAY_SIZE] for i in range(0, len(new), MAX_ARRAY_SIZE)]:
+            if kind == "int":
+                spec = build_integration_job_spec(n_items=len(chunk))
+            else:
+                spec = build_solve_job_spec(k=k or self.k_start, n_items=len(chunk))
+            if hasattr(self.runner, "submit_array"):
+                # local backend: synchronous, but same manifest/index contract
+                jid = self.runner.submit_array(script, chunk)
+            else:
+                manifest = write_manifest(self.run_dir, kind, chunk)
+                jid = submit_array(self.runner, spec, script, chunk, manifest)
+            for item in chunk:
+                _remember_ledger_jid(self.run_dir, kind, item, jid)
+            self.inflight.setdefault(kind, []).extend(chunk)
+            print(f"submitted {kind} array job {jid} with {len(chunk)} task(s)")
         self._dump_json(LEDGER_FILE, self.inflight)
-        print(f"submitted {kind} array job {jid} with {len(new)} task(s)")
         return 1
 
     def _charge_attempt(self, model_dir):
@@ -212,7 +233,11 @@ class VeraDriver:
         return n
 
     def _adaptive_k(self):
-        lf = levelfs(self.runner, _slurm_user())
+        try:
+            lf = levelfs(self.runner, _slurm_user())
+        except SlurmError as e:
+            self.log.warning("sshare failed (%s); using default throttle", e)
+            return self.k_start
         if lf is None:
             return self.k_start
         if lf > 10.0:
@@ -346,9 +371,21 @@ class VeraDriver:
         self._save_table_atomically()
         self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid})
 
-    def run_forever(self, dry_run=False, once=False):
+    def run_forever(self, dry_run=False, once=False, max_consecutive_errors=5):
+        """The daemon outlives transient failures; it gives up only if it
+        cannot complete several cycles in a row."""
+        errors = 0
         while True:
-            alive = self.step(dry_run=dry_run)
+            try:
+                alive = self.step(dry_run=dry_run)
+                errors = 0
+            except SlurmError as e:
+                errors += 1
+                self.log.warning("cycle failed (%d/%d): %s", errors, max_consecutive_errors, e)
+                if errors >= max_consecutive_errors:
+                    self.log.error("giving up after %d consecutive failures", errors)
+                    raise
+                alive = True
             if once or not alive:
                 break
             time.sleep(self.poll_interval)

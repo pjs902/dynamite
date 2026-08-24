@@ -8,6 +8,7 @@ Job specifications are pinned to the values in the spec's Global Constraints.
 import getpass
 import os
 import subprocess
+import uuid
 
 ACCOUNT = "mia"
 SOLVE_SPEC = dict(partition="p.large", mem_mb=200000, cpus=24, time="06:00:00")
@@ -80,9 +81,26 @@ def build_integration_job_spec(n_items):
     }
 
 
-def submit_array(runner, job_spec, script_path, items):
-    """items are per-task argument strings joined with ';' into one array."""
-    argv = ["sbatch"] + _base_flags(job_spec) + [script_path, ";".join(items)]
+def write_manifest(manifest_dir, kind, items):
+    """One item per line; the array task selects its own by index.
+
+    Slurm hands every task of an array the SAME argv, so the per-task
+    argument cannot be passed on the command line -- it has to be looked up
+    from SLURM_ARRAY_TASK_ID. A file also keeps argv well clear of ARG_MAX
+    for a thousand-model wave.
+    """
+    os.makedirs(manifest_dir, exist_ok=True)
+    path = os.path.join(manifest_dir, f"vera_items_{kind}_{uuid.uuid4().hex[:8]}.txt")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("".join(f"{item}\n" for item in items))
+    os.replace(tmp, path)
+    return path
+
+
+def submit_array(runner, job_spec, script_path, items, manifest_path):
+    """`items` are per-task arguments, resolved by the task from the manifest."""
+    argv = ["sbatch"] + _base_flags(job_spec) + [script_path, manifest_path]
     try:
         out = runner(argv)
     except SlurmError:
