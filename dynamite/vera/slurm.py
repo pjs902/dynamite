@@ -59,7 +59,7 @@ def _array_flag(n_items, throttle):
     one Slurm rejects the submission over.
     """
     n = max(0, min(int(n_items), MAX_ARRAY_SIZE) - 1)
-    k = max(1, min(int(throttle), MAX_ARRAY_SIZE))
+    k = max(1, int(throttle))
     return f"--array=0-{n}%{k}"
 
 

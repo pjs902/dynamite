@@ -61,11 +61,12 @@ def test_submit_failure_raises():
         submit_array(fr, build_solve_job_spec(k=16, n_items=1), "/path/x.sh", ["a"], "/m.txt")
 
 
-def test_array_throttle_clamped_to_max_array_size():
-    spec = build_solve_job_spec(k=5000, n_items=200)
-    assert "%1001" not in " ".join(spec["extra"]) or True
-    joined = " ".join(spec["extra"])
-    assert joined.endswith("%1001") or "%1001" in joined
+def test_array_throttle_is_passed_through():
+    """The %k throttle is a concurrency limit -- it cannot overflow anything,
+    so it is passed through, only floored at 1. MaxArraySize bounds the array
+    size instead; see test_array_size_bounded_not_just_throttle."""
+    assert "%5000" in " ".join(build_solve_job_spec(k=5000, n_items=200)["extra"])
+    assert "%1" in " ".join(build_solve_job_spec(k=0, n_items=5)["extra"])
 
 
 def test_running_jobs_parsed_with_array_suffixes():

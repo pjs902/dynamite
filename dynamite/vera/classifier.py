@@ -65,9 +65,13 @@ def classify(model_dir, attempts, now_ts, min_age_s=MIN_AGE_S_DEFAULT):
     if sent_age is not None:
         return ModelState.TO_SOLVE if sent_age > min_age_s else ModelState.INTEGRATING
 
-    for root, _dirs, files in os.walk(model_dir):
-        for f in files:
-            age = _age(os.path.join(root, f), now_ts)
-            if age is not None and 0 <= age <= min_age_s:
-                return ModelState.INTEGRATING
+    # Walk the library directory as well as the ml one: an integration writes
+    # into <noml>/datfil, so walking only the ml level left this freshness
+    # guard -- the whole point of the fallback -- unable to see a running job.
+    for base in {str(model_dir), _noml(model_dir)}:
+        for root, _dirs, files in os.walk(base):
+            for f in files:
+                age = _age(os.path.join(root, f), now_ts)
+                if age is not None and 0 <= age <= min_age_s:
+                    return ModelState.INTEGRATING
     return ModelState.PENDING_INTEGRATION

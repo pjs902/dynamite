@@ -194,6 +194,23 @@ def test_status_flag_raised_after_generate_is_seen(tmp_path):
     assert prop.exhausted()
 
 
+def test_freshness_guard_sees_a_running_integration(tmp_path):
+    """A live integration writes into <noml>/datfil, not the ml directory.
+
+    Walking only the ml level left this guard unable to see a running job, so
+    a model mid-integration classified PENDING_INTEGRATION.
+    """
+    model = tmp_path / "orblib_001_000" / "ml02.60"
+    (model / "datfil").mkdir(parents=True)
+    noml_datfil = tmp_path / "orblib_001_000" / "datfil"
+    noml_datfil.mkdir(parents=True, exist_ok=True)
+    # the integration is running: it just touched a scratch file, no sentinel
+    partial = noml_datfil / "orblib.tmp"
+    partial.write_text("half a library\n")
+    os.utime(partial, (NOW - 2, NOW - 2))
+    assert classify(str(model), attempts=0, now_ts=NOW) is ModelState.INTEGRATING
+
+
 def test_proposal_from_dict_rejects_foreign_payloads():
     """Mirrors Result.from_dict: a bare assert vanishes under python -O."""
     pr = Proposal(proposal_id="abc", parset={"ml": 2.6})

@@ -68,7 +68,7 @@ def run(proposer_cls, seed_offset=0, per_round=3):
     for _round in range(200):
         if len(evaluated) >= BUDGET or strat.exhausted():
             break
-        if strat.quorum_pending() == 0:
+        if strat.ready_to_propose():
             props = strat.propose()
             if props:
                 for pr in props:

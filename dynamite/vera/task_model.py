@@ -29,12 +29,14 @@ def build_model(config_path, model_dir):
     io = cfgd.setdefault("io_settings", {})
     outroot = os.path.abspath(io.get("output_directory", "."))
     io["all_models_file"] = f"all_models_task_{uuid.uuid4().hex[:8]}.ecsv"
-    # in its own subdir, not the shared output root: one file per task
-    # invocation accumulates, and a huge directory is what makes every later
-    # readdir/lookup there slow. Model.validate_config_file re-checks this
-    # path after parsing, so it must outlive Configuration().
+    # One file per MODEL rather than per task invocation, which grew without
+    # bound (thousands of models x retries x int+solve). NOT inside the model
+    # directory: setup_directories() recreates that and would delete the file
+    # before copy_config_file reads it back. It must outlive Configuration()
+    # for both validate_config_file and copy_config_file.
     task_cfg_path = os.path.join(
-        outroot, "vera_tasks", f"vera_task_{uuid.uuid4().hex[:8]}.yaml"
+        outroot, "vera_tasks",
+        model_dir.strip("/").replace("/", "_") + ".yaml",
     )
     os.makedirs(os.path.dirname(task_cfg_path), exist_ok=True)
     with open(task_cfg_path, "w") as f:

@@ -123,10 +123,10 @@ class VeraDriver:
             states[d] = classify(full, attempts=self.attempts.get(d, 0), now_ts=now)
         return states
 
-    def reconcile_and_submit(self, dry_run=False):
+    def reconcile_and_submit(self, dry_run=False, states=None):
         """Returns the number of Slurm ARRAY JOBS submitted this cycle (not
         the number of models: one array carries many)."""
-        states = self.scan()
+        states = self.scan() if states is None else states
         if dry_run:
             live = set()
         else:
@@ -149,13 +149,9 @@ class VeraDriver:
                 elif jid in live:
                     live_items[item] = jid
                     continue
-                # the job is gone. Charge an attempt only if THIS kind of work
-                # left no artifact: a finished integration lands its models in
-                # TO_SOLVE, which is success for an "int" job and failure only
-                # for a "solve" one. Billing both states for both kinds parked
-                # models that had never failed.
-                # charge unless THIS kind of work left its artifact: an int
-                # job succeeds at TO_SOLVE, a solve job only at SOLVED
+                # the job is gone. Charge unless THIS kind of work left its
+                # artifact: an int job succeeds at TO_SOLVE, a solve job only
+                # at SOLVED.
                 succeeded = (
                     (ModelState.TO_SOLVE, ModelState.SOLVED)
                     if kind == "int"
@@ -265,7 +261,6 @@ class VeraDriver:
         self.attempts[model_dir] = n
         if n >= ATTEMPT_LIMIT:
             self.log.warning("%s parked after %d failed attempt(s)", model_dir, n)
-        return n
 
     def _adaptive_k(self):
         try:
@@ -319,8 +314,8 @@ class VeraDriver:
             json.dump(payload, f, indent=1)
         os.replace(tmp, target)
 
-    def observe_completions(self):
-        states = self.scan()
+    def observe_completions(self, states=None):
+        states = self.scan() if states is None else states
         results = []
         t = self.config.all_models.table
         rows = self._dir_to_row()
@@ -365,8 +360,13 @@ class VeraDriver:
         return self.proposer.exhausted()
 
     def step(self, dry_run=False):
-        self.observe_completions()
-        self.reconcile_and_submit(dry_run=dry_run)
+        # one filesystem snapshot for both phases: classify() is a pure
+        # function of the filesystem plus self.attempts, and nothing between
+        # them changes either, so a second scan re-stats the whole campaign
+        # for the same answer
+        states = self.scan()
+        self.observe_completions(states)
+        self.reconcile_and_submit(dry_run=dry_run, states=states)
         if self.proposer.ready_to_propose() and not self.exhausted():
             t = self.config.all_models.table
             before = len(t)
