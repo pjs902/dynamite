@@ -125,11 +125,13 @@ def submit_array(runner, job_spec, script_path, items, manifest_path):
     argv = ["sbatch"] + _base_flags(job_spec) + [script_path, manifest_path]
     try:
         out = runner(argv)
+    except SlurmError:
+        raise
     except Exception as e:
-        # a runner may raise anything; callers catch SlurmError only
-        raise e if isinstance(e, SlurmError) else SlurmError(
-            f"sbatch invocation failed: {e!r}"
-        ) from e
+        # a runner may raise anything; callers catch SlurmError only. Two
+        # clauses, not one conditional raise: `from e` binds to the whole
+        # raise expression, so re-raising e would set its __cause__ to itself.
+        raise SlurmError(f"sbatch invocation failed: {e!r}") from e
     for token in out.split():
         if token.isdigit():
             return int(token)

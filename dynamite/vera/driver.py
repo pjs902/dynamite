@@ -533,8 +533,10 @@ class VeraDriver:
         a config with that halo has both p-stars and p-dh, and the
         triaxiality gate must not test the halo's axis ratios.
         """
+        from dynamite.physical_system import TriaxialVisibleComponent
+
         for cmp in self.config.system.cmp_list:
-            if type(cmp).__name__ != "TriaxialVisibleComponent":
+            if not isinstance(cmp, TriaxialVisibleComponent):
                 continue
             names = {cmp.get_parname(p.name): p.name for p in cmp.parameters}
             missing = {"q", "p", "u"} - set(names)
