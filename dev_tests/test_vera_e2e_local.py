@@ -90,6 +90,9 @@ def _make_driver(sandbox):
             # subprocesses must see the slurm-branch checkout, not the older
             # site-packages install that the live production grid uses
             "PYTHONPATH": REPO,
+            # ...and run under the interpreter running this test, not
+            # whatever `python` PATH happens to resolve to
+            "VERA_PYTHON": os.environ.get("VERA_PYTHON", sys.executable),
         }
     )
     return VeraDriver(
