@@ -67,6 +67,9 @@ class VeraDriver:
         # proposal attribution, owned by the driver (not the proposer):
         dirs_map = self._load_json(DIRS_FILE, {})
         self.dir_to_pid = dirs_map.get("dir_to_pid", {})
+        # parked models already announced to the proposer; persisted so a
+        # restart does not replay every past failure
+        self.reported_failed = set(dirs_map.get("reported_failed", []))
         self.rejected = {}
         self.log = logging.getLogger(f"{__name__}.VeraDriver")
 
@@ -333,11 +336,15 @@ class VeraDriver:
         failed = [d for d, s in states.items() if s is ModelState.PARKED]
         for d in failed:
             pid = self.dir_to_pid.get(d)
-            if pid is not None:
-                results.append(Result(proposal_id=pid, model_dir=d, status="failed"))
+            if pid is None or d in self.reported_failed:
+                continue  # a parked model stays parked; report it once
+            self.reported_failed.add(d)
+            results.append(Result(proposal_id=pid, model_dir=d, status="failed"))
         if results:
             self.proposer.observe(results)
             self._save_table_atomically()
+            self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid,
+                                        "reported_failed": sorted(self.reported_failed)})
         return len(results)
 
     def exhausted(self):
@@ -430,7 +437,8 @@ class VeraDriver:
             t["directory"][idx] = directory
             self.dir_to_pid[directory] = pid
         self._save_table_atomically()
-        self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid})
+        self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid,
+                                    "reported_failed": sorted(self.reported_failed)})
 
     def run_forever(self, dry_run=False, once=False, max_consecutive_errors=5):
         """The daemon outlives transient failures; it gives up only if it
@@ -440,7 +448,7 @@ class VeraDriver:
             try:
                 alive = self.step(dry_run=dry_run)
                 errors = 0
-            except SlurmError as e:
+            except Exception as e:  # NFS hiccups and half-written files too
                 errors += 1
                 self.log.warning("cycle failed (%d/%d): %s", errors, max_consecutive_errors, e)
                 if errors >= max_consecutive_errors:

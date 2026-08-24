@@ -188,6 +188,7 @@ def test_each_array_task_gets_its_own_item(tmp_path):
     Drives the real script helper: a task that read $1 as its model dir
     would receive the entire wave instead.
     """
+    import shutil
     import subprocess
 
     from dynamite.vera.slurm import write_manifest
@@ -198,18 +199,26 @@ def test_each_array_task_gets_its_own_item(tmp_path):
     )
     items = [f"orblib_001_{i:03d}/ml02.60" for i in range(3)]
     manifest = write_manifest(str(tmp_path), "solve", items)
-    probe = tmp_path / "probe.sh"
-    probe.write_text(
-        f'#!/bin/bash\nset -euo pipefail\n. "{scripts}/_select_item.sh"\necho "$ITEM"\n'
-    )
+
+    # Copy the script somewhere else first: sbatch runs a COPY from the node
+    # spool dir, so anything the script resolves via $0 must not be needed.
+    spooled = tmp_path / "slurm_script"
+    shutil.copy(os.path.join(scripts, "solve_task.sh"), spooled)
+
     for idx, expected in enumerate(items):
         out = subprocess.run(
-            ["bash", str(probe), manifest],
+            ["bash", str(spooled), manifest],
             capture_output=True, text=True,
-            env={**os.environ, "SLURM_ARRAY_TASK_ID": str(idx)},
+            env={
+                **os.environ,
+                "SLURM_ARRAY_TASK_ID": str(idx),
+                "VERA_CONFIG": "cfg.yaml",
+                "VERA_RUN_DIR": str(tmp_path),
+                "VERA_PYTHON": "/bin/echo",  # stand in for the interpreter
+            },
         )
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip() == expected, f"task {idx} got {out.stdout!r}"
+        assert out.stdout.split()[-1] == expected, f"task {idx} got {out.stdout!r}"
 
 
 def test_wave_larger_than_max_array_is_chunked_not_truncated(world):

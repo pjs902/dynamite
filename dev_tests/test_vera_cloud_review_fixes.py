@@ -87,6 +87,79 @@ def test_log_parameter_must_be_validated_in_raw_space():
     assert not np.isclose(clipped["m-bh"], physical)
 
 
+def test_levelfs_parses_real_sshare_output():
+    """sshare only emits '|' separated fields when asked with -P; without it
+    the split never yields 5 fields and the adaptive throttle is dead."""
+    from dynamite.vera.slurm import levelfs
+
+    calls = []
+
+    def runner(argv):
+        calls.append(argv)
+        # what sshare -P actually prints
+        return "pesmith|mia|9604|0.000002|1.7307e+03\n"
+
+    assert abs(levelfs(runner, "pesmith") - 1730.7) < 0.01
+    assert "-P" in calls[0], f"sshare invoked without parsable output: {calls[0]}"
+
+
+def test_parked_model_is_reported_once(tmp_path):
+    """A parked model stays parked; re-announcing it every poll cycle means
+    the driver never reaches quiescence."""
+    import json
+
+    from dynamite.vera.driver import VeraDriver
+    from test_vera_driver_fixes import ArrayRunner, RealisticProposer, WEIGHTS_ECSV  # noqa: F401
+    from test_vera_proposer_gridwalk import build_minimal_config
+
+    cfg = build_minimal_config()
+    outroot = tmp_path / "out"
+    rel = "orblib_001_000/ml02.60"
+    (outroot / "models" / rel / "datfil").mkdir(parents=True)
+    (outroot / "models" / "orblib_001_000" / "datfil").mkdir(parents=True, exist_ok=True)
+    cfg.all_models.table.add_row(
+        [2.6, 0.46, 0.90, np.nan, np.nan, np.nan, "", False, False, False, 1, rel]
+    )
+    cfg.settings.io_settings = {
+        "output_directory": str(outroot), "all_models_file": "all_models.ecsv",
+    }
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    with open(run_dir / "vera_attempts.json", "w") as f:
+        json.dump({rel: 5}, f)
+    with open(run_dir / "vera_dirs.json", "w") as f:
+        json.dump({"dir_to_pid": {rel: "deadbeef"}}, f)
+
+    prop = RealisticProposer()
+    drv = VeraDriver(cfg, prop, runner=ArrayRunner(), run_dir=str(run_dir),
+                     clock=lambda: NOW)
+    assert drv.observe_completions() == 1  # reported once
+    assert drv.observe_completions() == 0, "parked model re-reported every cycle"
+
+
+def test_daemon_survives_non_slurm_errors():
+    """The cycle does NFS I/O and astropy writes; a half-written ledger
+    raises OSError/JSONDecodeError, not SlurmError."""
+    from dynamite.vera.driver import VeraDriver
+
+    class Boom(VeraDriver):
+        def __init__(self):  # no config needed; we only exercise the loop
+            self.calls = 0
+            self.poll_interval = 0
+            import logging
+
+            self.log = logging.getLogger("test.boom")
+
+        def step(self, dry_run=False):
+            self.calls += 1
+            raise OSError("stale NFS file handle")
+
+    drv = Boom()
+    with pytest.raises(OSError):
+        drv.run_forever(max_consecutive_errors=3)
+    assert drv.calls == 3, f"gave up after {drv.calls} cycle(s), not 3"
+
+
 def test_proposal_from_dict_rejects_foreign_payloads():
     """Mirrors Result.from_dict: a bare assert vanishes under python -O."""
     pr = Proposal(proposal_id="abc", parset={"ml": 2.6})

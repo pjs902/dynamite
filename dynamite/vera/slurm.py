@@ -126,10 +126,13 @@ def running_job_ids(runner):
 
 
 def levelfs(runner, user):
+    # -P: without it sshare prints whitespace-aligned columns, the "|" split
+    # below never yields 5 fields, and the adaptive throttle silently dies.
     out = runner(
         [
             "sshare",
             "-U",
+            "-P",
             "--noheader",
             "--format=User,Account,RawUsage,NormUsage,LevelFS",
         ]
