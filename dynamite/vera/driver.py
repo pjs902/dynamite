@@ -89,6 +89,10 @@ class VeraDriver:
             json.dump(obj, f, indent=1)
         os.replace(tmp, os.path.join(self.run_dir, name))
 
+    def _save_dirs(self):
+        self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid,
+                                    "reported_failed": sorted(self.reported_failed)})
+
     def _save_table_atomically(self):
         tbl = self.config.all_models.table
         rel = self.config.settings.io_settings.get("all_models_file", "all_models.ecsv")
@@ -351,8 +355,7 @@ class VeraDriver:
         if results:
             self.proposer.observe(results)
             self._save_table_atomically()
-            self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid,
-                                        "reported_failed": sorted(self.reported_failed)})
+            self._save_dirs()
         return len(results)
 
     def exhausted(self):
@@ -372,7 +375,18 @@ class VeraDriver:
             before = len(t)
             self.proposer.propose()
             self._assign_directories(range(before, len(t)))
-            self.reconcile_and_submit(dry_run=dry_run)
+            # classify only the rows just named rather than re-scanning the
+            # whole campaign: nothing else touched the filesystem, and the new
+            # directories have nothing on disk yet
+            now = self.clock()
+            for i in range(before, len(t)):
+                d = str(t["directory"][i])
+                if d and not d.startswith("rejected"):
+                    states[d] = classify(
+                        os.path.join(self.output_root, "models", d),
+                        attempts=self.attempts.get(d, 0), now_ts=now,
+                    )
+            self.reconcile_and_submit(dry_run=dry_run, states=states)
         return not self.exhausted()
 
     # ------------------------------------------------------------ model rows
@@ -389,8 +403,8 @@ class VeraDriver:
         t = self.config.all_models.table
         bounds = self._intake_bounds()
         qobs = self._qobs()
-        u_fixed = self.proposer_u_fixed()
         shape_names = self._shape_param_names()
+        u_fixed = self.proposer_u_fixed(shape_names)
         sformat = self.config.system.parameters[0].sformat
         orblib_cols, orblib_index = self._orblib_index(self._orblib_parameters())
         n_assigned = sum(
@@ -447,8 +461,7 @@ class VeraDriver:
             self.dir_to_pid[directory] = pid
             n_assigned += 1
         self._save_table_atomically()
-        self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid,
-                                    "reported_failed": sorted(self.reported_failed)})
+        self._save_dirs()
 
     def run_forever(self, dry_run=False, once=False, max_consecutive_errors=5):
         """The daemon outlives transient failures; it gives up only if it
@@ -469,7 +482,7 @@ class VeraDriver:
                 break
             time.sleep(self.poll_interval)
 
-    # ------------------------------------------------------------ model rows
+    # -------------------------------------------------- orblib + intake helpers
     def _orblib_parameters(self):
         """Parameters that define the orbit library.
 
@@ -548,9 +561,11 @@ class VeraDriver:
             break
         return names
 
-    def proposer_u_fixed(self):
+    def proposer_u_fixed(self, shape_names=None):
         """The stars component's u, when it is held fixed."""
-        u_name = self._shape_param_names().get("u")
+        if shape_names is None:
+            shape_names = self._shape_param_names()
+        u_name = shape_names.get("u")
         for p in self.config.parspace:
             if p.name == u_name and getattr(p, "fixed", True):
                 return float(p.raw_value)

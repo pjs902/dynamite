@@ -19,6 +19,8 @@ from dynamite.vera.classifier import ModelState, classify  # noqa: E402
 from dynamite.vera.proposal import Proposal, validate_parset  # noqa: E402
 
 QOBS = 0.55097
+STARS_SHAPE = {"q": "q-stars", "p": "p-stars", "u": "u-stars"}
+BARE_SHAPE = {"q": "q", "p": "p", "u": "u"}
 NOW = time.time()
 
 # real parspace names, as config_reader builds them: f"{par}-{comp}"
@@ -36,28 +38,32 @@ def _parset(q, p, u, ml=2.6):
 
 def test_triaxiality_gate_fires_on_qualified_names():
     """p < q must be rejected even though the key is `p-stars`, not `p`."""
-    _, violations = validate_parset(_parset(0.85, 0.70, 0.99), BOUNDS, qobs=QOBS)
+    _, violations = validate_parset(_parset(0.85, 0.70, 0.99), BOUNDS, qobs=QOBS,
+                                     shape_names=STARS_SHAPE)
     assert violations, "impossible shape (p < q) passed the intake gate"
     assert any("oblate-equivalent" in v for v in violations), violations
 
 
 def test_axis_limit_fires_on_qualified_names():
     """q > u*qobs must be rejected under the suffixed names too."""
-    _, violations = validate_parset(_parset(0.95, 0.97, 0.60), BOUNDS, qobs=QOBS)
+    _, violations = validate_parset(_parset(0.95, 0.97, 0.60), BOUNDS, qobs=QOBS,
+                                     shape_names=STARS_SHAPE)
     assert any("axis limit" in v for v in violations), violations
 
 
 def test_feasible_shape_still_passes():
     q, p, u = 0.46, 0.90, 0.9925
     assert q <= u * QOBS * (1 - 1e-6) or True  # sanity of the fixture
-    _, violations = validate_parset(_parset(0.40, 0.90, 0.99), BOUNDS, qobs=QOBS)
+    _, violations = validate_parset(_parset(0.40, 0.90, 0.99), BOUNDS, qobs=QOBS,
+                                     shape_names=STARS_SHAPE)
     assert violations == [], violations
 
 
 def test_bare_names_still_work():
-    """System-level parameters (ml, bh.m) are unqualified; don't break them."""
+    """A caller may legitimately use bare names -- but it must SAY so via
+    shape_names rather than have the gate guess from the leading segment."""
     _, violations = validate_parset(
-        {"q": 0.85, "p": 0.70, "u": 0.99}, {}, qobs=QOBS
+        {"q": 0.85, "p": 0.70, "u": 0.99}, {}, qobs=QOBS, shape_names=BARE_SHAPE
     )
     assert violations, "bare-name parsets must still be validated"
 
@@ -80,7 +86,8 @@ def test_log_parameter_must_be_validated_in_raw_space():
     assert lo <= raw <= hi, "raw value must sit inside the raw bounds"
     # and the physical value would have been clipped to the raw ceiling
     clipped, violations = validate_parset(
-        {"m-bh": physical}, {"m-bh": {"lo": lo, "hi": hi}}, qobs=None
+        {"m-bh": physical}, {"m-bh": {"lo": lo, "hi": hi}}, qobs=None,
+        shape_names={},  # no shape parameters in this parset
     )
     assert violations == []  # silently "repaired", never flagged
     assert clipped["m-bh"] == hi  # ...to 10, from 100000

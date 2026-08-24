@@ -25,8 +25,6 @@ def main(argv=None):
         return 0
 
     try:
-        import dynamite as dyn
-
         _, mod = build_model(args.config, args.model_dir)
         cwd = os.getcwd()
         try:
@@ -39,16 +37,16 @@ def main(argv=None):
             mod.get_weights(orblib)
         finally:
             os.chdir(cwd)
-        from astropy.io import ascii
-
-        meta = ascii.read(os.path.join(mod.directory, dyn.constants.weight_file)).meta
+        # get_weights already set these from the solver's return value; the
+        # ecsv is the same numbers via an extra NFS read, on the one path
+        # where a partial flush is a known hazard
         print(
             json.dumps(
                 {
                     "model_dir": args.model_dir,
-                    "chi2_tot": float(meta["chi2_tot"]),
-                    "chi2_kin": float(meta["chi2_kin"]),
-                    "chi2_kinmap": float(meta["chi2_kinmap"]),
+                    "chi2_tot": float(mod.chi2),
+                    "chi2_kin": float(mod.kinchi2),
+                    "chi2_kinmap": float(mod.kinmapchi2),
                 }
             )
         )
