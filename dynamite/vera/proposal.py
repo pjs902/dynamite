@@ -65,13 +65,19 @@ class Result:
         return Result(**{k: v for k, v in d.items() if k in known})
 
 
-def validate_parset(parset, bounds, qobs, u_fixed=None):
+def validate_parset(parset, bounds, qobs, u_fixed=None, shape_names=None):
     """Clip parameters into bounds; reject geometrically impossible shapes.
 
     Returns (clipped_parset, violations). Bounds clipping silently repairs;
     triaxial feasibility violations (q > u*qobs, p < q, degenerate q) are
     hard rejections - the caller must not spend compute on them. Fixed axes
     take their parset/config values; only the free-subset case matters here.
+
+    `shape_names` maps 'q'/'p'/'u' to the qualified parset keys of the
+    STARS component (the driver builds it with Component.get_parname).
+    Without it we fall back to the leading segment of each name, which is
+    ambiguous: TriaxialCoredLogPotential also declares p and q, so a config
+    with that halo has both p-stars and p-dh and the wrong one can win.
     """
     clipped, violations = {}, []
 
@@ -93,11 +99,15 @@ def validate_parset(parset, bounds, qobs, u_fixed=None):
         clipped[name] = float(val)
 
     # Parspace names are qualified with their component -- q-stars, p-stars,
-    # u-stars (config_reader builds them as f"{par}-{comp}"), while
-    # system-level names like ml are bare. Match on the leading segment.
-    shape = {}
-    for name, val in clipped.items():
-        shape.setdefault(name.split("-")[0], val)
+    # u-stars (config_reader builds them as f"{par}-{comp}") -- while
+    # system-level names like ml are bare.
+    if shape_names:
+        shape = {axis: clipped[key] for axis, key in shape_names.items()
+                 if key in clipped}
+    else:
+        shape = {}
+        for name, val in clipped.items():
+            shape.setdefault(name.split("-")[0], val)
     q = shape.get("q")
     p = shape.get("p")
     u = shape.get("u", u_fixed)

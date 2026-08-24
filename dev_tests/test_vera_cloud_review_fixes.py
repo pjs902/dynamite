@@ -211,6 +211,36 @@ def test_freshness_guard_sees_a_running_integration(tmp_path):
     assert classify(str(model), attempts=0, now_ts=NOW) is ModelState.INTEGRATING
 
 
+def test_shape_lookup_is_not_confused_by_a_triaxial_halo():
+    """TriaxialCoredLogPotential declares p and q too.
+
+    With both p-stars and p-dh present, keying the gate on the leading
+    segment lets whichever comes first in dict order win -- so the
+    triaxiality test can be applied to the HALO's axis ratios.
+    """
+    # halo listed first, and geometrically fine on its own; the stars are not
+    parset = {
+        "q-dh": 0.90, "p-dh": 0.95,        # halo: p > q, looks feasible
+        "q-stars": 0.85, "p-stars": 0.70,  # stars: p < q, must be rejected
+        "u-stars": 0.99,
+    }
+    bounds = {k: {"lo": 0.05, "hi": 1.0} for k in parset}
+    shape_names = {"q": "q-stars", "p": "p-stars", "u": "u-stars"}
+
+    _, violations = validate_parset(
+        parset, bounds, qobs=QOBS, shape_names=shape_names
+    )
+    assert any("oblate-equivalent" in v for v in violations), violations
+
+    # and the converse: feasible stars must not be rejected because the halo
+    # happens to be flatter
+    ok = dict(parset, **{"p-stars": 0.90, "q-stars": 0.40})
+    _, violations = validate_parset(
+        ok, bounds, qobs=QOBS, shape_names=shape_names
+    )
+    assert violations == [], violations
+
+
 def test_proposal_from_dict_rejects_foreign_payloads():
     """Mirrors Result.from_dict: a bare assert vanishes under python -O."""
     pr = Proposal(proposal_id="abc", parset={"ml": 2.6})

@@ -390,6 +390,7 @@ class VeraDriver:
         bounds = self._intake_bounds()
         qobs = self._qobs()
         u_fixed = self.proposer_u_fixed()
+        shape_names = self._shape_param_names()
         sformat = self.config.system.parameters[0].sformat
         orblib_cols, orblib_index = self._orblib_index(self._orblib_parameters())
         n_assigned = sum(
@@ -416,7 +417,8 @@ class VeraDriver:
                 if name in pars and name in t.colnames
             }
             clipped, violations = validate_parset(
-                parset, bounds, qobs=qobs, u_fixed=u_fixed)
+                parset, bounds, qobs=qobs, u_fixed=u_fixed,
+                shape_names=shape_names)
             if violations:
                 t["directory"][idx] = f"rejected/{pid}/"
                 self.proposer.reject(pid, violations)
@@ -524,10 +526,33 @@ class VeraDriver:
 
         return get_qobs_from_system(getattr(self.config, "system", None))
 
+    def _shape_param_names(self):
+        """{'q': 'q-stars', ...} for the STARS component only.
+
+        Resolved with the component's own get_parname rather than by
+        splitting on '-': TriaxialCoredLogPotential declares p and q too, so
+        a config with that halo has both p-stars and p-dh, and the
+        triaxiality gate must not test the halo's axis ratios.
+        """
+        names = {}
+        for cmp in getattr(self.config.system, "cmp_list", []):
+            if type(cmp).__name__ != "TriaxialVisibleComponent":
+                continue
+            for par in getattr(cmp, "parameters", []):
+                try:
+                    bare = cmp.get_parname(par.name)
+                except Exception:
+                    continue
+                if bare in ("q", "p", "u"):
+                    names[bare] = par.name
+            break
+        return names
+
     def proposer_u_fixed(self):
-        """u is named u-<component> in the parspace, never bare "u"."""
+        """The stars component's u, when it is held fixed."""
+        u_name = self._shape_param_names().get("u")
         for p in self.config.parspace:
-            if p.name.split("-")[0] == "u" and getattr(p, "fixed", True):
+            if p.name == u_name and getattr(p, "fixed", True):
                 return float(p.raw_value)
         return None
 
