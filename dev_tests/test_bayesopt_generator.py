@@ -6,25 +6,25 @@ Run with:  /opt/miniconda3/envs/main/bin/python3 dev_tests/test_bayesopt_generat
 import sys
 import types
 import copy  # noqa: F401 — used by BayesOptGenerator methods added in later tasks
-import importlib.util as ilu
 import logging
 import numpy as np  # type: ignore[import-untyped]
 from astropy.table import Table, Column  # type: ignore[import-untyped]
 
-# --- Load dynamite.parameter_space without triggering dynamite/__init__ ----
-DYN_ROOT = "/Users/pesmith/research/dynamite"
+# Import dynamite.parameter_space normally.
+#
+# This module was previously hand-loaded under its own module object to avoid
+# executing dynamite/__init__ (~4 s, requires pymc). That produced a SECOND
+# Parameter class from the same source file, so any test module holding the
+# canonical one failed the `isinstance(t, parspace.Parameter)` check inside
+# ParameterGenerator.is_new_model. The effect was invisible when this file ran
+# alone and broke 11 vera tests when the suites shared a pytest process, since
+# pytest imports every test module before running any test. pymc is a hard
+# requirement in requirements.txt, so the isolation bought little.
+import os
+
+DYN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, DYN_ROOT)
-_stub = types.ModuleType("dynamite")
-sys.modules.setdefault("dynamite", _stub)
-_spec = ilu.spec_from_file_location("dynamite.parameter_space", f"{DYN_ROOT}/dynamite/parameter_space.py")
-if _spec is None:
-    raise ImportError("Could not find parameter_space.py")
-if _spec.loader is None:
-    raise ImportError("spec.loader is None")
-ps = ilu.module_from_spec(_spec)
-sys.modules["dynamite.parameter_space"] = ps
-setattr(sys.modules["dynamite"], "parameter_space", ps)
-_spec.loader.exec_module(ps)
+import dynamite.parameter_space as ps  # noqa: E402
 
 Parameter = ps.Parameter
 ParameterSpace = ps.ParameterSpace
