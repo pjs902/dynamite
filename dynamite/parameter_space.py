@@ -1330,10 +1330,24 @@ class BayesOptGenerator(ParameterGenerator):
         return np.zeros(len(self.free_par_idx)), np.ones(len(self.free_par_idx))
 
     def _sobol_in_box(self, n, box=None):
-        """Feasible Sobol draws confined to `box` (default: the full cube)."""
+        """Feasible Sobol draws confined to `box` (default: the full cube).
+
+        Feasibility is the hard constraint -- validate_parset silently drops
+        infeasible parsets -- so points the triaxiality projection pushes out
+        of the box are resampled rather than clipped back in, which would undo
+        the projection. If the box is too tight for the feasible region, a
+        feasible point outside the box beats an infeasible one inside it.
+        """
         lo, hi = self._unit_cube() if box is None else (box[0], box[1])
-        unit = lo + (hi - lo) * self._sobol_unit(n)
-        return np.clip(self._project_unit_to_feasible_qpu(unit), lo, hi)
+        kept = np.empty((0, len(lo)))
+        for _ in range(10):
+            cand = self._project_unit_to_feasible_qpu(lo + (hi - lo) * self._sobol_unit(n))
+            inside = np.all((cand >= lo - 1e-9) & (cand <= hi + 1e-9), axis=1)
+            kept = np.vstack([kept, cand[inside]])
+            if kept.shape[0] >= n:
+                return kept[:n]
+        pad = self._project_unit_to_feasible_qpu(lo + (hi - lo) * self._sobol_unit(n - kept.shape[0]))
+        return np.vstack([kept, pad])[:n]
 
     def _snap_to_grid(self, unit_matrix, box=None):
         """Snap non-ml columns of unit_matrix to their normalized grid steps.
@@ -1351,10 +1365,19 @@ class BayesOptGenerator(ParameterGenerator):
             if step <= 0:
                 continue
             col = np.round(result[:, j] / step) * step
-            # keep the snapped value inside the acquisition box, on-grid where
-            # the box is at least one step wide
-            lo_g, hi_g = np.ceil(lo[j] / step) * step, np.floor(hi[j] / step) * step
-            col = np.clip(col, lo_g, hi_g) if lo_g <= hi_g else np.clip(col, lo[j], hi[j])
+            # keep the snapped value inside the acquisition box. The tolerance
+            # matters: 0.6/0.1 is 5.999..., so a bare floor() would put the
+            # box edge a full step out of reach.
+            tol = 1.0e-9
+            lo_g = np.ceil(lo[j] / step - tol) * step
+            hi_g = np.floor(hi[j] / step + tol) * step
+            if lo_g <= hi_g + tol:
+                col = np.clip(col, lo_g, hi_g)
+            else:
+                # box narrower than one step: stay on-grid (that is the whole
+                # point of discretizing) at the grid point nearest the box,
+                # even though it falls outside
+                col = np.full_like(col, np.round(0.5 * (lo[j] + hi[j]) / step) * step)
             result[:, j] = np.clip(col, 0.0, 1.0)
         return result
 
@@ -1506,6 +1529,15 @@ class BayesOptGenerator(ParameterGenerator):
                 if not np.any(np.all(existing == k, axis=1)):
                     keep = np.vstack([keep, row[None, :]])
                     existing = np.vstack([existing, k[None, :]])
+        if keep.shape[0] < n_target:
+            # the box holds fewer free cells than the batch needs; fall back to
+            # full-cube fillers rather than returning a short batch, which
+            # would read as "no new models" and stop the run
+            self.logger.warning(
+                f"acquisition box has too few free cells for batch of {n_target}; "
+                f"filling {n_target - keep.shape[0]} from the full cube"
+            )
+            keep = np.vstack([keep, self._sobol_in_box(n_target - keep.shape[0], None)])
         return keep[:n_target]
 
     def _propose_random_batch(self):
@@ -1669,10 +1701,11 @@ class BayesOptGenerator(ParameterGenerator):
         while len(collected) < need and attempts < max_attempts:
             attempts += 1
             n_try = max(need * 30, 512)
-            unit = torch.rand(n_try, d, dtype=bounds.dtype)
-            unit_np = self._project_unit_to_feasible_qpu(unit.numpy())
-            unit = torch.tensor(unit_np, dtype=bounds.dtype)
-            cand = lo + (hi - lo) * unit
+            # rescale into `bounds` FIRST: the projection is defined on
+            # normalized coordinates, so projecting a full-cube draw and then
+            # rescaling would land somewhere the projection never vetted
+            unit = lo + (hi - lo) * torch.rand(n_try, d, dtype=bounds.dtype)
+            cand = torch.tensor(self._project_unit_to_feasible_qpu(unit.numpy()), dtype=bounds.dtype)
 
             for i in range(cand.shape[0]):
                 x = cand[i]
