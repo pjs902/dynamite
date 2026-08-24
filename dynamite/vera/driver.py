@@ -155,9 +155,8 @@ class VeraDriver:
                 unfinished = (
                     ModelState.PENDING_INTEGRATION if kind == "int" else ModelState.TO_SOLVE
                 )
-                for d in item.split(";"):
-                    if states.get(d) is unfinished:
-                        self._charge_attempt(d)
+                if states.get(item) is unfinished:
+                    self._charge_attempt(item)
                 _forget_ledger_jid(self.run_dir, kind, item)
             self.inflight[kind] = live_items
         self._dump_json(LEDGER_FILE, self.inflight)
@@ -186,18 +185,23 @@ class VeraDriver:
         return submitted
 
     def _submit_wave(self, kind, packages, dry_run, k=None):
+        """`packages` groups model dirs into one array task each.
+
+        Membership is tracked per MODEL DIR, never per joined package
+        string: a wave repacks whenever its composition changes, which
+        gives a still-running model a brand-new package string and used to
+        read as new work -- resubmitting a live integration.
+        """
         done = set(self.inflight.get(kind, []))
-        if kind == "int":
-            items = [";".join(pkg) for pkg in packages]
-        else:
-            items = [pkg[0] for pkg in packages]
-        new = [it for it in items if it not in done]
-        if not new:
+        fresh = [[d for d in pkg if d not in done] for pkg in packages]
+        fresh = [pkg for pkg in fresh if pkg]
+        if not fresh:
             return 0
         if dry_run:
+            flat = [d for pkg in fresh for d in pkg]
             print(
-                f"[dry-run] would submit {len(new)} {kind} package(s): "
-                f"{new[:3]}{'...' if len(new) > 3 else ''}"
+                f"[dry-run] would submit {len(flat)} {kind} model(s) in "
+                f"{len(fresh)} package(s): {flat[:3]}{'...' if len(flat) > 3 else ''}"
             )
             return 0
         if kind == "int":
@@ -209,20 +213,22 @@ class VeraDriver:
         # a wave larger than the scheduler's MaxArraySize goes out as several
         # arrays: truncating would leave the tail recorded as in-flight and
         # never scheduled, so those models would never run and never retry
-        for chunk in [new[i:i + MAX_ARRAY_SIZE] for i in range(0, len(new), MAX_ARRAY_SIZE)]:
+        for chunk in [fresh[i:i + MAX_ARRAY_SIZE] for i in range(0, len(fresh), MAX_ARRAY_SIZE)]:
+            items = [";".join(pkg) for pkg in chunk]
             if kind == "int":
                 spec = build_integration_job_spec(n_items=len(chunk))
             else:
                 spec = build_solve_job_spec(k=k or self.k_start, n_items=len(chunk))
             if hasattr(self.runner, "submit_array"):
                 # local backend: synchronous, but same manifest/index contract
-                jid = self.runner.submit_array(script, chunk)
+                jid = self.runner.submit_array(script, items)
             else:
-                manifest = write_manifest(self.run_dir, kind, chunk)
-                jid = submit_array(self.runner, spec, script, chunk, manifest)
-            for item in chunk:
-                _remember_ledger_jid(self.run_dir, kind, item, jid)
-            self.inflight.setdefault(kind, []).extend(chunk)
+                manifest = write_manifest(self.run_dir, kind, items)
+                jid = submit_array(self.runner, spec, script, items, manifest)
+            for pkg in chunk:
+                for d in pkg:
+                    _remember_ledger_jid(self.run_dir, kind, d, jid)
+                    self.inflight.setdefault(kind, []).append(d)
             print(f"submitted {kind} array job {jid} with {len(chunk)} task(s)")
         self._dump_json(LEDGER_FILE, self.inflight)
         return 1
@@ -287,7 +293,13 @@ class VeraDriver:
             if pid is None or row is None:
                 continue
             if state is ModelState.SOLVED and not bool(t["all_done"][row]):
-                meta = _read_weights_meta(os.path.join(self.output_root, "models", d))
+                try:
+                    meta = _read_weights_meta(os.path.join(self.output_root, "models", d))
+                except Exception as e:
+                    # a partially-flushed ecsv on NFS is readable next cycle;
+                    # it is not a reason to lose the campaign
+                    self.log.warning("weights for %s not readable yet (%s)", d, e)
+                    continue
                 results.append(
                     Result(proposal_id=pid, model_dir=d, status="done", **meta)
                 )

@@ -21,8 +21,6 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     try:
-        import dynamite as dyn
-
         c, mod = build_model(args.config, args.model_dir)
         cwd = os.getcwd()
         try:

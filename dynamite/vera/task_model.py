@@ -75,6 +75,9 @@ def build_model(config_path, model_dir):
             rowd[cn] = False
         else:
             rowd[cn] = np.nan
-    if len(tbl) == 0:
+    if not any(str(r["directory"]) == model_dir for r in tbl):
+        # keyed on the directory, not on emptiness: Configuration init can
+        # leave rows behind, and the model must still be findable by
+        # get_model_from_parset after integration
         tbl.add_row(rowd)
     return c, mod

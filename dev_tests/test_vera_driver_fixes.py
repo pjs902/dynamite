@@ -289,6 +289,46 @@ def test_finished_work_is_pruned_from_the_ledger(world):
     assert json.load(open(ledger)) == {}, "dead entry was never pruned"
 
 
+def test_repacked_wave_does_not_resubmit_live_models(world):
+    """In-flight membership is per model dir, not per joined package string.
+
+    A wave repacks whenever its composition changes; a model still running
+    inside a live package then appears in a differently-composed package and
+    used to look like new work.
+    """
+    cfg, dirs, run_dir = world([[], [], []])  # three PENDING_INTEGRATION models
+    runner = ArrayRunner()
+    drv = _drv(cfg, run_dir, runner)
+    # pack all three into ONE package, as pack_libraries would
+    drv._submit_wave("int", [list(dirs)], dry_run=False)
+    assert len(runner.sbatch) == 1
+    assert set(drv.inflight["int"]) == set(dirs), drv.inflight
+
+    # next cycle: the wave repacks differently (say one model per package)
+    # while the original array job is still running
+    runner.live = {7001}
+    drv2 = _drv(cfg, run_dir, runner)
+    drv2._submit_wave("int", [[d] for d in dirs], dry_run=False)
+    assert len(runner.sbatch) == 1, "live models were resubmitted after a repack"
+
+
+def test_unreadable_weights_do_not_kill_the_daemon(world):
+    """A partially-flushed ecsv is readable next cycle, not a fatal error."""
+    cfg, dirs, run_dir = world([["tube_box_done", "orbit_weights.ecsv"]])
+    weights = os.path.join(
+        cfg.settings.io_settings["output_directory"], "models", dirs[0],
+        "orbit_weights.ecsv",
+    )
+    with open(weights, "w") as f:
+        f.write("# %ECSV 1.0\n# ---\n# datatype:\n")  # truncated mid-write
+    _aged(weights)
+    with open(os.path.join(run_dir, "vera_dirs.json"), "w") as f:
+        json.dump({"dir_to_pid": {dirs[0]: "abc123"}}, f)
+    drv = _drv(cfg, run_dir, ArrayRunner())
+    assert drv.observe_completions() == 0  # skipped, not raised
+    assert not bool(cfg.all_models.table["all_done"][-1])
+
+
 def test_transient_squeue_failure_does_not_resubmit_everything(world):
     """A flaky squeue must not read as 'every job died'."""
     from dynamite.vera.slurm import SlurmError
