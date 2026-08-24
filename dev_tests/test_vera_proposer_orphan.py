@@ -21,7 +21,7 @@ def test_no_generator_row_is_orphaned():
     prop = GridWalkProposer(cfg)
     t = cfg.all_models.table
     before = len(t)
-    props = prop.propose(max_batch=1)  # advisory only
+    props = prop.propose()
     appended = len(t) - before
     assert appended > 1, "need a multi-row generator batch to exercise this"
     assert len(props) == appended, f"{appended - len(props)} row(s) orphaned"

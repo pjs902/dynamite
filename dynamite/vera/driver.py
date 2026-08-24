@@ -137,7 +137,7 @@ class VeraDriver:
                 # would resubmit the whole campaign on top of itself
                 self.log.warning("squeue failed (%s); skipping this cycle", e)
                 return 0
-        charged = False
+        charged = set()
         for kind in ("int", "solve"):
             live_items = {}
             for item, jid in dict(self.inflight.get(kind, {})).items():
@@ -163,13 +163,19 @@ class VeraDriver:
                 )
                 if states.get(item) not in succeeded:
                     self._charge_attempt(item)
-                    charged = True
+                    charged.add(item)
 
             self.inflight[kind] = live_items
         self._dump_json(LEDGER_FILE, self.inflight)
         if charged:
             self._dump_json(ATTEMPTS_FILE, self.attempts)
-            states = self.scan()  # attempts changed: PARKED models drop out
+            # patch rather than re-scan: only the charged rows can have changed
+            # state, and only to PARKED (classify checks attempts right after
+            # the weights file). A full re-scan re-stats the whole campaign.
+            for d in charged:
+                if (self.attempts.get(d, 0) >= ATTEMPT_LIMIT
+                        and states.get(d) is not ModelState.SOLVED):
+                    states[d] = ModelState.PARKED
 
         # One integration per LIBRARY, not per model: ml variants share a
         # library (and its noml directory), so submitting each of them would
@@ -276,7 +282,7 @@ class VeraDriver:
         return self.k_start
 
 
-    def _write_parset_file(self, model_dir, rows=None):
+    def _write_parset_file(self, model_dir, rows):
         """Drop <models>/<dir>/vera_parset.json next to the artifacts.
 
         Workers are pure functions of (config, parset): they never read the
@@ -286,7 +292,7 @@ class VeraDriver:
         contract). Full par-values, fixed parameters included.
         """
         t = self.config.all_models.table
-        i = (rows if rows is not None else self._dir_to_row()).get(model_dir)
+        i = rows.get(model_dir)
         if i is None:
             return
 
@@ -339,7 +345,7 @@ class VeraDriver:
                 t["kinmapchi2"][row] = meta["kinmapchi2"]
                 t["all_done"][row] = True
                 t["weights_done"][row] = True
-                t["time_modified"][row] = str(_now64())
+                t["time_modified"][row] = str(np.datetime64("now", "ms"))
         failed = [d for d, s in states.items() if s is ModelState.PARKED]
         for d in failed:
             pid = self.dir_to_pid.get(d)
@@ -361,13 +367,13 @@ class VeraDriver:
     def step(self, dry_run=False):
         self.observe_completions()
         self.reconcile_and_submit(dry_run=dry_run)
-        if self.proposer.quorum_pending() == 0 and not self.proposer.exhausted():
+        if self.proposer.ready_to_propose() and not self.exhausted():
             t = self.config.all_models.table
             before = len(t)
             self.proposer.propose()
             self._assign_directories(range(before, len(t)))
             self.reconcile_and_submit(dry_run=dry_run)
-        return not self.proposer.exhausted()
+        return not self.exhausted()
 
     # ------------------------------------------------------------ model rows
     def _assign_directories(self, row_indices):
@@ -412,13 +418,8 @@ class VeraDriver:
             clipped, violations = validate_parset(
                 parset, bounds, qobs=qobs, u_fixed=u_fixed)
             if violations:
-                self.log.warning("intake rejected %s: %s", pid, violations)
                 t["directory"][idx] = f"rejected/{pid}/"
-                result = Result(proposal_id=pid,
-                                model_dir=t["directory"][idx],
-                                status="failed")
-                self.proposer.observe([result])
-                del self.proposer.pid_to_row[pid]
+                self.proposer.reject(pid, violations)
                 continue
             for name, raw in clipped.items():
                 repaired = float(pars[name].get_par_value_from_raw_value(raw))
@@ -493,7 +494,7 @@ class VeraDriver:
         index = []
         for j in range(len(t)):
             d = str(t["directory"][j])
-            if not d or d.startswith("rejected") or d.startswith("pending"):
+            if not d or d.startswith("rejected"):
                 continue
             index.append((np.array([float(t[c][j]) for c in cols]),
                           d.rstrip("/").rsplit("/", 1)[0]))
@@ -519,12 +520,9 @@ class VeraDriver:
         return bounds
 
     def _qobs(self):
-        try:
-            stars = [c for c in self.config.system.cmp_list
-                     if type(c).__name__ == "TriaxialVisibleComponent"]
-            return float(stars[0].qobs) if stars else None
-        except (AttributeError, IndexError, TypeError):
-            return None
+        from dynamite.parameter_space import get_qobs_from_system
+
+        return get_qobs_from_system(getattr(self.config, "system", None))
 
     def proposer_u_fixed(self):
         """u is named u-<component> in the parspace, never bare "u"."""
@@ -534,12 +532,6 @@ class VeraDriver:
         return None
 
 # ------------------------------------------------------------------ helpers
-def _now64():
-    import numpy as np
-
-    return np.datetime64("now", "ms")
-
-
 def _read_weights_meta(model_full_dir):
     from astropy.io import ascii
 

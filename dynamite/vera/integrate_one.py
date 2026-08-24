@@ -21,7 +21,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     try:
-        c, mod = build_model(args.config, args.model_dir)
+        _, mod = build_model(args.config, args.model_dir)
         cwd = os.getcwd()
         try:
             mod.setup_directories()

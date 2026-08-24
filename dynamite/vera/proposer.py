@@ -7,7 +7,7 @@ through the table and only failures need a channel of their own.
 
 import logging
 
-from .proposal import Proposal, canonical_hash
+from .proposal import Proposal, Result, canonical_hash
 
 
 class TableProposer:
@@ -37,30 +37,35 @@ class TableProposer:
         t = self.config.all_models.table
         return {name: float(t[name][row_idx]) for name in self.par_names}
 
-    def propose(self, max_batch=None):
+    def propose(self):
         """Every row the generator appended becomes a proposal.
 
-        max_batch is advisory: a row left un-proposed gets no proposal_id and
-        no directory, is skipped by the driver's scan, and is never revisited
-        -- the parameter set would vanish. Batch size is a generator setting.
+        No batch cap: a row left un-proposed gets no proposal_id and no
+        directory, is skipped by the driver's scan, and is never revisited --
+        the parameter set would simply vanish. How many rows appear is the
+        generator's batch_size to decide.
         """
         t = self.config.all_models.table
         before = len(t)
         self.generator.generate(current_models=self.config.all_models)
-        if max_batch is not None and len(t) - before > max_batch:
-            self.log.warning(
-                "generator produced %d rows, above the advisory max_batch %d; "
-                "proposing all of them", len(t) - before, max_batch,
-            )
         props = []
         for i in range(before, len(t)):
             parset = self._row_to_parset(i)
             pid = canonical_hash(parset)
             self.pid_to_row[pid] = i
             props.append(Proposal(proposal_id=pid, parset=parset))
-            t["directory"][i] = t["directory"][i] or f"pending/{pid}"
         self.log.info("propose(): %d new proposal(s)", len(props))
         return props
+
+    def reject(self, pid, violations):
+        """Record an intake rejection and stop tracking the proposal.
+
+        One call so the two halves cannot be done out of order: recording the
+        failure against a pid already dropped from tracking loses it.
+        """
+        self.observe([Result(proposal_id=pid, model_dir="", status="failed")])
+        self.pid_to_row.pop(pid, None)
+        self.log.warning("intake rejected %s: %s", pid, violations)
 
     def observe(self, results):
         """Chi2 reaches the generator through the table; failures never appear
@@ -70,10 +75,26 @@ class TableProposer:
                 self.failed_pids.add(r.proposal_id)
 
     def quorum_pending(self):
+        """How many tracked proposals are still unsolved. An honest count --
+        the driver gates on ready_to_propose(), not on this."""
         t = self.config.all_models.table
         return sum(
             1 for row in self.pid_to_row.values() if not bool(t["all_done"][row])
         )
 
+    def ready_to_propose(self):
+        """Whether the driver may ask for a fresh batch now."""
+        return self.quorum_pending() == 0
+
     def exhausted(self):
-        raise NotImplementedError
+        """The generator owns stopping.
+
+        Same rule as check_stopping_criteria itself -- any boolean in status
+        means stop -- rather than reading status["stop"], which is only
+        recomputed inside generate(): flags raised during observation (the R3
+        gp_predictions_accurate counter) would otherwise be missed until the
+        next batch. Covers max_mods, max_iter, min_delta_chi2 and the GP
+        flags alike, so no proposer needs its own list.
+        """
+        status = getattr(self.generator, "status", {}) or {}
+        return any(v for v in status.values() if isinstance(v, bool))

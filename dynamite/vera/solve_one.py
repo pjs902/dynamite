@@ -27,7 +27,7 @@ def main(argv=None):
     try:
         import dynamite as dyn
 
-        c, mod = build_model(args.config, args.model_dir)
+        _, mod = build_model(args.config, args.model_dir)
         cwd = os.getcwd()
         try:
             mod.setup_directories()

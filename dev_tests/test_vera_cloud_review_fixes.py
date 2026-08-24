@@ -160,6 +160,40 @@ def test_daemon_survives_non_slurm_errors():
     assert drv.calls == 3, f"gave up after {drv.calls} cycle(s), not 3"
 
 
+def test_converged_generator_ends_the_campaign(tmp_path):
+    """A generator that has stopped must exhaust the proposer.
+
+    Counting only completed models against n_max_mods left a campaign that
+    converged on delta-chi2 (or hit max_iter) with fewer models looking
+    unfinished forever: propose() returns nothing, nothing is submitted, and
+    run_forever sleeps and repeats on a live allocation.
+    """
+    from dynamite.vera.proposer_gridwalk import GridWalkProposer
+    from test_vera_proposer_gridwalk import build_minimal_config
+
+    cfg = build_minimal_config(n_max_mods=10_000)  # far from reachable
+    prop = GridWalkProposer(cfg)
+    prop.propose()
+    assert not prop.exhausted()
+
+    # the generator converges: min_delta_chi2 met, well short of n_max_mods
+    prop.generator.status["min_delta_chi2_reached"] = True
+    assert prop.exhausted(), "converged generator left the campaign idling"
+
+
+def test_status_flag_raised_after_generate_is_seen(tmp_path):
+    """gp_predictions_accurate is raised while observing, but status["stop"]
+    is only recomputed inside generate() -- reading `stop` alone misses it."""
+    from dynamite.vera.proposer_gridwalk import GridWalkProposer
+    from test_vera_proposer_gridwalk import build_minimal_config
+
+    prop = GridWalkProposer(build_minimal_config(n_max_mods=10_000))
+    prop.propose()
+    prop.generator.status["stop"] = False
+    prop.generator.status["gp_predictions_accurate"] = True
+    assert prop.exhausted()
+
+
 def test_proposal_from_dict_rejects_foreign_payloads():
     """Mirrors Result.from_dict: a bare assert vanishes under python -O."""
     pr = Proposal(proposal_id="abc", parset={"ml": 2.6})

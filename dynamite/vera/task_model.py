@@ -29,14 +29,26 @@ def build_model(config_path, model_dir):
     io = cfgd.setdefault("io_settings", {})
     outroot = os.path.abspath(io.get("output_directory", "."))
     io["all_models_file"] = f"all_models_task_{uuid.uuid4().hex[:8]}.ecsv"
-    task_cfg_path = os.path.join(outroot, f"vera_task_{uuid.uuid4().hex[:8]}.yaml")
+    # in its own subdir, not the shared output root: one file per task
+    # invocation accumulates, and a huge directory is what makes every later
+    # readdir/lookup there slow. Model.validate_config_file re-checks this
+    # path after parsing, so it must outlive Configuration().
+    task_cfg_path = os.path.join(
+        outroot, "vera_tasks", f"vera_task_{uuid.uuid4().hex[:8]}.yaml"
+    )
     os.makedirs(os.path.dirname(task_cfg_path), exist_ok=True)
     with open(task_cfg_path, "w") as f:
         yaml.safe_dump(cfgd, f, sort_keys=False)
 
     cwd = os.getcwd()
     try:
-        c = dyn.config_reader.Configuration(task_cfg_path, reset_logging=True)
+        # user_logfile=None: the default ('dynamite') is a RELATIVE path opened
+        # with mode='w', and every task runs with cwd = the shared run dir --
+        # so all 12-24 concurrent tasks would truncate and interleave one NFS
+        # file. Slurm already captures stdout/stderr per array task.
+        c = dyn.config_reader.Configuration(
+            task_cfg_path, reset_logging=True, user_logfile=None
+        )
     finally:
         os.chdir(cwd)
 

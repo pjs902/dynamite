@@ -27,7 +27,6 @@ class ModelState(enum.Enum):
     INTEGRATING = "integrating"
     TO_SOLVE = "to_solve"
     SOLVED = "solved"
-    FAILED = "failed"  # intake rejection only; set by caller
     PARKED = "parked"
 
 

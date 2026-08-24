@@ -16,10 +16,12 @@ class MicroBatchWalkProposer(GridWalkProposer):
             raise ValueError("min_solved_fraction must be in (0, 1]")
         self.min_solved_fraction = float(min_solved_fraction)
 
-    def quorum_pending(self):
+    def ready_to_propose(self):
+        """Re-center as soon as `min_solved_fraction` of the batch is in --
+        overriding the gate, not the count, so quorum_pending() stays honest.
+        """
         tracked_n = len(self.pid_to_row)
         if tracked_n == 0:
-            return 0
-        remaining = super().quorum_pending()
-        solved_frac = 1.0 - remaining / tracked_n
-        return 0 if solved_frac >= self.min_solved_fraction else remaining
+            return True
+        solved_frac = 1.0 - self.quorum_pending() / tracked_n
+        return solved_frac >= self.min_solved_fraction

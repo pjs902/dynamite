@@ -134,7 +134,7 @@ def _solve_all(strat):
 
 def test_propose_returns_new_rows_as_proposals(minimal_config):
     strat = GridWalkProposer(minimal_config)
-    props = strat.propose(max_batch=500)
+    props = strat.propose()
     assert len(props) >= 1
     assert len({p.proposal_id for p in props}) == len(props)
     for p in props:
@@ -143,7 +143,7 @@ def test_propose_returns_new_rows_as_proposals(minimal_config):
 
 def test_quorum_counts_only_tracked_unsolved(minimal_config):
     strat = GridWalkProposer(minimal_config)
-    props = strat.propose(max_batch=500)
+    props = strat.propose()
     n = len(props)
     assert strat.quorum_pending() == n
     # solve exactly one tracked proposal directly in the table
@@ -177,6 +177,7 @@ def test_wrong_generator_type_rejected(minimal_config):
 
 def test_observe_is_noop_but_channel_consistent(minimal_config):
     strat = GridWalkProposer(minimal_config)
-    strat.propose(max_batch=500)
+    strat.propose()
     assert strat.observe([]) is None
     assert strat.pid_to_row  # the table is the observation channel
+    assert not strat.ready_to_propose()  # nothing solved yet
