@@ -375,18 +375,12 @@ class VeraDriver:
             before = len(t)
             self.proposer.propose()
             self._assign_directories(range(before, len(t)))
-            # classify only the rows just named rather than re-scanning the
-            # whole campaign: nothing else touched the filesystem, and the new
-            # directories have nothing on disk yet
-            now = self.clock()
-            for i in range(before, len(t)):
-                d = str(t["directory"][i])
-                if d and not d.startswith("rejected"):
-                    states[d] = classify(
-                        os.path.join(self.output_root, "models", d),
-                        attempts=self.attempts.get(d, 0), now_ts=now,
-                    )
-            self.reconcile_and_submit(dry_run=dry_run, states=states)
+            # Fresh scan here, unlike the pair above: a synchronous backend
+            # (LocalRunner) has actually RUN the work submitted a few lines
+            # earlier, so the snapshot from the top of the cycle is stale by
+            # now. Proposing cycles only happen when a batch has drained, so
+            # this scan is rare; the savings are on the common path above.
+            self.reconcile_and_submit(dry_run=dry_run)
         return not self.exhausted()
 
     # ------------------------------------------------------------ model rows
