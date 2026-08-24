@@ -60,8 +60,8 @@ class TableProposer:
     def reject(self, pid, violations):
         """Record an intake rejection and stop tracking the proposal.
 
-        One call so the two halves cannot be done out of order: recording the
-        failure against a pid already dropped from tracking loses it.
+        One call so the two cannot happen out of order: recording a failure
+        against an already-dropped pid loses it.
         """
         self.observe([Result(proposal_id=pid, model_dir="", status="failed")])
         self.pid_to_row.pop(pid, None)
@@ -71,7 +71,7 @@ class TableProposer:
         """Chi2 reaches the generator through the table; failures never appear
         there at all, so they are recorded here."""
         for r in results:
-            if getattr(r, "status", None) == "failed":
+            if r.status == "failed":
                 self.failed_pids.add(r.proposal_id)
 
     def quorum_pending(self):
@@ -89,12 +89,9 @@ class TableProposer:
     def exhausted(self):
         """The generator owns stopping.
 
-        Same rule as check_stopping_criteria itself -- any boolean in status
-        means stop -- rather than reading status["stop"], which is only
-        recomputed inside generate(): flags raised during observation (the R3
-        gp_predictions_accurate counter) would otherwise be missed until the
-        next batch. Covers max_mods, max_iter, min_delta_chi2 and the GP
-        flags alike, so no proposer needs its own list.
+        Any boolean in status means stop -- the same rule
+        check_stopping_criteria uses. Reading status["stop"] instead would
+        miss flags raised during observation, since it is only recomputed
+        inside generate().
         """
-        status = getattr(self.generator, "status", {}) or {}
-        return any(v for v in status.values() if isinstance(v, bool))
+        return any(v for v in self.generator.status.values() if isinstance(v, bool))

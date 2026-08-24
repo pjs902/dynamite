@@ -109,8 +109,8 @@ class VeraDriver:
 
     # ------------------------------------------------------------ phases
     def _dir_to_row(self):
-        """directory -> table row index, derived fresh from the table, which
-        is the source of truth (a cached copy goes stale across restarts)."""
+        """directory -> table row index, derived fresh; the table is the
+        source of truth and a cached copy goes stale across restarts."""
         t = self.config.all_models.table
         return {str(r["directory"]): i for i, r in enumerate(t) if r["directory"]}
 
@@ -300,10 +300,9 @@ class VeraDriver:
                               for n in self.config.parspace.par_names}}
         target = os.path.join(self.output_root, "models", model_dir,
                               "vera_parset.json")
-        # rewrite only on change: this is called every cycle for work that is
-        # still queued, and an NFS create+rename per model per cycle is pure
-        # waste. Comparing content rather than mere existence keeps a
-        # re-clipped or resumed row from being driven by a stale file.
+        # Rewrite only on change: this runs every cycle for work still
+        # queued. Compare content, not existence, so a re-clipped row is not
+        # left driven by a stale file.
         if os.path.isfile(target):
             try:
                 with open(target) as f:
@@ -409,10 +408,8 @@ class VeraDriver:
             if pid is None:
                 continue
             # par_generator_settings lo/hi are RAW (log10 for logarithmic
-            # params) while the table column holds par_value (physical), so
-            # comparing them directly made the bounds gate a no-op for every
-            # log parameter -- and would have destroyed them outright the
-            # moment `clipped` was written back. Validate in raw space.
+            # params) while the table column holds par_value (physical).
+            # Validate in raw space or the gate is a no-op for log params.
             pars = {p.name: p for p in self.config.parspace}
             parset = {
                 name: float(pars[name].get_raw_value_from_par_value(float(t[name][idx])))
@@ -526,7 +523,7 @@ class VeraDriver:
     def _qobs(self):
         from dynamite.parameter_space import get_qobs_from_system
 
-        return get_qobs_from_system(getattr(self.config, "system", None))
+        return get_qobs_from_system(self.config.system)
 
     def _shape_param_names(self):
         """{'q': 'q-stars', ...} for the STARS component only.
@@ -536,19 +533,19 @@ class VeraDriver:
         a config with that halo has both p-stars and p-dh, and the
         triaxiality gate must not test the halo's axis ratios.
         """
-        names = {}
-        for cmp in getattr(self.config.system, "cmp_list", []):
+        for cmp in self.config.system.cmp_list:
             if type(cmp).__name__ != "TriaxialVisibleComponent":
                 continue
-            for par in getattr(cmp, "parameters", []):
-                try:
-                    bare = cmp.get_parname(par.name)
-                except Exception:
-                    continue
-                if bare in ("q", "p", "u"):
-                    names[bare] = par.name
-            break
-        return names
+            names = {cmp.get_parname(p.name): p.name for p in cmp.parameters}
+            missing = {"q", "p", "u"} - set(names)
+            if missing:
+                # validate() guarantees par == [q, p, u], so this cannot
+                # happen -- but returning {} on a partial match would leave
+                # validate_parset with no shape gate and no way to tell that
+                # apart from a system that legitimately has no stars.
+                raise ValueError(f"{cmp.name} lacks shape parameter(s) {sorted(missing)}")
+            return {k: names[k] for k in ("q", "p", "u")}
+        return {}
 
     def proposer_u_fixed(self, shape_names=None):
         """The stars component's u, when it is held fixed."""

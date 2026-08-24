@@ -49,13 +49,10 @@ def validate_parset(parset, bounds, qobs, shape_names, u_fixed=None):
     hard rejections - the caller must not spend compute on them. Fixed axes
     take their parset/config values; only the free-subset case matters here.
 
-    `shape_names` maps 'q'/'p'/'u' to the qualified parset keys of the STARS
-    component; the driver builds it with Component.get_parname. It is
-    REQUIRED rather than guessed: deriving it from the leading segment of
-    each name is ambiguous (TriaxialCoredLogPotential also declares p and q,
-    so a config with that halo has both p-stars and p-dh), and defaulting to
-    no shape gate at all would silently pass every proposal -- the exact
-    failure this gate was written to stop. Pass {} to check bounds only.
+    `shape_names` maps 'q'/'p'/'u' to the qualified parset keys of the stars
+    component. Required, not guessed: the leading segment is ambiguous, since
+    TriaxialCoredLogPotential declares p and q too. Pass {} for a system with
+    no triaxial stars, which checks bounds only.
     """
     clipped, violations = {}, []
 
@@ -76,9 +73,6 @@ def validate_parset(parset, bounds, qobs, shape_names, u_fixed=None):
             val = hi
         clipped[name] = float(val)
 
-    # Parspace names are qualified with their component -- q-stars, p-stars,
-    # u-stars (config_reader builds them as f"{par}-{comp}") -- while
-    # system-level names like ml are bare.
     shape = {axis: clipped[key] for axis, key in shape_names.items()
              if key in clipped}
     q = shape.get("q")

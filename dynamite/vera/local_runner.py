@@ -28,10 +28,10 @@ class LocalRunner:
         raise SlurmError(f"LocalRunner cannot answer {cmd}")
 
     def submit_array(self, script_path, items):
-        # Drive the scripts exactly as Slurm does -- one manifest for the
-        # whole array, each task selecting its line by SLURM_ARRAY_TASK_ID.
-        # Passing the item on the command line here would make this backend
-        # more capable than the real one and hide indexing bugs.
+        # Drive the scripts exactly as Slurm does: one manifest for the whole
+        # array, each task selecting its line by SLURM_ARRAY_TASK_ID. Passing
+        # the item as an argument would make this backend more capable than
+        # the real one and hide indexing bugs.
         run_dir = self.env.get("VERA_RUN_DIR") or os.getcwd()
         manifest = write_manifest(run_dir, "local", items)
         for idx, item in enumerate(items):
