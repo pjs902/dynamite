@@ -16,20 +16,10 @@ class MicroBatchWalkProposer(GridWalkProposer):
             raise ValueError("min_solved_fraction must be in (0, 1]")
         self.min_solved_fraction = float(min_solved_fraction)
 
-    def _outstanding(self):
-        t = self.config.all_models.table
-        return sum(
-            1 for row in self.pid_to_row.values() if not bool(t["all_done"][row])
-        )
-
     def quorum_pending(self):
         tracked_n = len(self.pid_to_row)
         if tracked_n == 0:
             return 0
-        remaining = self._outstanding()
+        remaining = super().quorum_pending()
         solved_frac = 1.0 - remaining / tracked_n
         return 0 if solved_frac >= self.min_solved_fraction else remaining
-
-    def exhausted(self):
-        # stopping still governed by n_max_mods via the parent
-        return super().exhausted()

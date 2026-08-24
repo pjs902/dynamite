@@ -52,17 +52,9 @@ def build_model(config_path, model_dir):
     # Register into the private table: post-integration machinery (intrinsic
     # masses) looks the model up via get_model_from_parset.
     tbl = c.all_models.table
-    defaults = {
-        "chi2": np.nan,
-        "kinchi2": np.nan,
-        "kinmapchi2": np.nan,
-        "time_modified": "",
-        "orblib_done": False,
-        "weights_done": False,
-        "all_done": False,
-        "which_iter": 0,
-        "directory": model_dir,
-    }
+    # only what the dtype-based fallback below cannot get right: nan is not a
+    # valid int, and the directory is this task's identity
+    defaults = {"which_iter": 0, "directory": model_dir}
     rowd = {}
     for cn in tbl.colnames:
         if cn in values:

@@ -1339,15 +1339,18 @@ class BayesOptGenerator(ParameterGenerator):
         feasible point outside the box beats an infeasible one inside it.
         """
         lo, hi = self._unit_cube() if box is None else (box[0], box[1])
+
+        def draw(m):
+            return self._project_unit_to_feasible_qpu(lo + (hi - lo) * self._sobol_unit(m))
+
         kept = np.empty((0, len(lo)))
         for _ in range(10):
-            cand = self._project_unit_to_feasible_qpu(lo + (hi - lo) * self._sobol_unit(n))
+            cand = draw(n)
             inside = np.all((cand >= lo - 1e-9) & (cand <= hi + 1e-9), axis=1)
             kept = np.vstack([kept, cand[inside]])
             if kept.shape[0] >= n:
                 return kept[:n]
-        pad = self._project_unit_to_feasible_qpu(lo + (hi - lo) * self._sobol_unit(n - kept.shape[0]))
-        return np.vstack([kept, pad])[:n]
+        return np.vstack([kept, draw(n - kept.shape[0])])[:n]
 
     def _snap_to_grid(self, unit_matrix, box=None):
         """Snap non-ml columns of unit_matrix to their normalized grid steps.

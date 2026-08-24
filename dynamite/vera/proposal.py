@@ -93,17 +93,14 @@ def validate_parset(parset, bounds, qobs, u_fixed=None):
         clipped[name] = float(val)
 
     # Parspace names are qualified with their component -- q-stars, p-stars,
-    # u-stars (config_reader builds them as f"{par}-{comp}"). Looking up bare
-    # "q"/"p"/"u" found nothing, so every guard below short-circuited on
-    # `is not None` and the whole triaxiality gate passed everything.
+    # u-stars (config_reader builds them as f"{par}-{comp}"), while
+    # system-level names like ml are bare. Match on the leading segment.
     shape = {}
     for name, val in clipped.items():
         shape.setdefault(name.split("-")[0], val)
     q = shape.get("q")
     p = shape.get("p")
     u = shape.get("u", u_fixed)
-    if u is None:
-        u = u_fixed
 
     if (
         q is not None

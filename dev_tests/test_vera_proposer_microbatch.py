@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from astropy.table import Column  # noqa: E402
 
 from test_vera_proposer_gridwalk import build_minimal_config  # noqa
+from dynamite.vera.proposer_gridwalk import GridWalkProposer  # noqa: E402
 from dynamite.vera.proposer_microbatch import (  # noqa: E402
     MicroBatchWalkProposer,
 )
@@ -45,7 +46,8 @@ def test_quorum_fraction_semantics(minimal_config):
     assert n > 0
     assert strat.quorum_pending() == n  # nothing solved yet
     _solve_n(strat, props, max(1, int(0.5 * n)))  # ~50% < 80%
-    assert strat.quorum_pending() == strat._outstanding() > 0
+    # below the fraction, quorum reports what is still outstanding
+    assert strat.quorum_pending() == GridWalkProposer.quorum_pending(strat) > 0
     _solve(strat, props)  # 100% >= 80%
     assert strat.quorum_pending() == 0
 

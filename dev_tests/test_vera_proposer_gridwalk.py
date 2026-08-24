@@ -179,4 +179,4 @@ def test_observe_is_noop_but_channel_consistent(minimal_config):
     strat = GridWalkProposer(minimal_config)
     strat.propose(max_batch=500)
     assert strat.observe([]) is None
-    assert isinstance(strat.tracked_results(), dict)
+    assert strat.pid_to_row  # the table is the observation channel

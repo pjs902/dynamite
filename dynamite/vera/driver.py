@@ -27,6 +27,7 @@ from .slurm import (
     MAX_ARRAY_SIZE,
     RealRunner,
     SlurmError,
+    _current_user,
     build_integration_job_spec,
     build_solve_job_spec,
     levelfs,
@@ -38,6 +39,7 @@ from .slurm import (
 POLL_INTERVAL_S = 300
 K_START = 16
 ATTEMPTS_FILE = "vera_attempts.json"
+JIDS_FILE = "vera_ledger_jids.json"
 LEDGER_FILE = "vera_inflight.json"
 DIRS_FILE = "vera_dirs.json"
 
@@ -62,6 +64,7 @@ class VeraDriver:
         self.poll_interval = poll_interval
         self.k_start = k_start
         self.attempts = self._load_json(ATTEMPTS_FILE, {})
+        self.jids = self._load_json(JIDS_FILE, {})  # "kind:item" -> array job id
         self.inflight = self._load_json(LEDGER_FILE, {"int": [], "solve": []})
         self.output_root = config.settings.io_settings["output_directory"]
         # proposal attribution, owned by the driver (not the proposer):
@@ -70,7 +73,6 @@ class VeraDriver:
         # parked models already announced to the proposer; persisted so a
         # restart does not replay every past failure
         self.reported_failed = set(dirs_map.get("reported_failed", []))
-        self.rejected = {}
         self.log = logging.getLogger(f"{__name__}.VeraDriver")
 
     # ------------------------------------------------------------ persistence
@@ -104,12 +106,8 @@ class VeraDriver:
 
     # ------------------------------------------------------------ phases
     def _dir_to_row(self):
-        """directory -> table row index, derived fresh from the table.
-
-        Never cached across restarts: the table is the source of truth, and a
-        stale copy is how the observer used to KeyError on the first cycle
-        after the driver came back up.
-        """
+        """directory -> table row index, derived fresh from the table, which
+        is the source of truth (a cached copy goes stale across restarts)."""
         t = self.config.all_models.table
         return {str(r["directory"]): i for i, r in enumerate(t) if r["directory"]}
 
@@ -139,15 +137,15 @@ class VeraDriver:
                 # would resubmit the whole campaign on top of itself
                 self.log.warning("squeue failed (%s); skipping this cycle", e)
                 return 0
+        charged = False
         for kind in ("int", "solve"):
             live_items = []
             for item in self.inflight.get(kind, []):
-                jid = _ledger_jid(self.run_dir, kind, item)
+                jid = self.jids.get(f"{kind}:{item}")
                 if jid is None:
-                    # no ledger entry (lost or never written): treat as dead
-                    # rather than live. Stalling forever is the worse failure;
-                    # a needless resubmit is bounded by ATTEMPT_LIMIT and
-                    # short-circuits on the artifacts.
+                    # no ledger entry: treat as dead, not live. Stalling is the
+                    # worse failure; a needless resubmit is bounded by
+                    # ATTEMPT_LIMIT and short-circuits on the artifacts.
                     self.log.warning("no ledger jid for %s %s; assuming it died", kind, item)
                 elif jid in live:
                     live_items.append(item)
@@ -157,11 +155,8 @@ class VeraDriver:
                 # TO_SOLVE, which is success for an "int" job and failure only
                 # for a "solve" one. Billing both states for both kinds parked
                 # models that had never failed.
-                # Charge unless the work COMPLETED. Testing for the
-                # not-started state instead let a library that crashed
-                # mid-integration escape: it leaves fresh files behind, so it
-                # classifies INTEGRATING at this moment, went uncharged, and
-                # was resubmitted next cycle with attempts still 0 -- forever.
+                # charge unless THIS kind of work left its artifact: an int
+                # job succeeds at TO_SOLVE, a solve job only at SOLVED
                 succeeded = (
                     (ModelState.TO_SOLVE, ModelState.SOLVED)
                     if kind == "int"
@@ -169,10 +164,14 @@ class VeraDriver:
                 )
                 if states.get(item) not in succeeded:
                     self._charge_attempt(item)
-                _forget_ledger_jid(self.run_dir, kind, item)
+                    charged = True
+                self.jids.pop(f"{kind}:{item}", None)
             self.inflight[kind] = live_items
         self._dump_json(LEDGER_FILE, self.inflight)
-        states = self.scan()  # attempts changed: PARKED models must drop out
+        self._dump_json(JIDS_FILE, self.jids)
+        if charged:
+            self._dump_json(ATTEMPTS_FILE, self.attempts)
+            states = self.scan()  # attempts changed: PARKED models drop out
 
         # One integration per LIBRARY, not per model: ml variants share a
         # library (and its noml directory), so submitting each of them would
@@ -189,12 +188,12 @@ class VeraDriver:
             to_int.append(d)
         to_sol = sorted(d for d, s in states.items() if s is ModelState.TO_SOLVE)
 
+        rows = self._dir_to_row()
         for d in list(to_int) + list(to_sol):
-            self._write_parset_file(d)
-        if os.environ.get("VERA_DEBUG"):
-            print(f"[dbg] states={ {k: v.value for k, v in states.items()} } "
-                  f"to_int={to_int} to_sol={to_sol} "
-                  f"inflight={self.inflight}", flush=True)
+            self._write_parset_file(d, rows)
+        self.log.debug("states=%s to_int=%s to_sol=%s inflight=%s",
+                       {k: v.value for k, v in states.items()},
+                       to_int, to_sol, self.inflight)
         submitted = 0
         if to_int:
             submitted += self._submit_wave("int", pack_libraries(to_int), dry_run)
@@ -202,11 +201,10 @@ class VeraDriver:
             # a built library always earns its weights: chi2 feeds every
             # future proposer decision. The quorum gate lives on PROPOSING
             # new work (step()), never on draining existing artifacts.
-            k = self._adaptive_k()
-            submitted += self._submit_wave("solve", [[d] for d in to_sol], dry_run, k=k)
+            submitted += self._submit_wave("solve", [[d] for d in to_sol], dry_run)
         return submitted
 
-    def _submit_wave(self, kind, packages, dry_run, k=None):
+    def _submit_wave(self, kind, packages, dry_run):
         """`packages` groups model dirs into one array task each.
 
         Membership is tracked per MODEL DIR, never per joined package
@@ -241,7 +239,9 @@ class VeraDriver:
             if kind == "int":
                 spec = build_integration_job_spec(n_items=len(chunk))
             else:
-                spec = build_solve_job_spec(k=k or self.k_start, n_items=len(chunk))
+                # fairshare-adaptive throttle, asked for only when we
+                # actually have solve work to submit
+                spec = build_solve_job_spec(k=self._adaptive_k(), n_items=len(chunk))
             if hasattr(self.runner, "submit_array"):
                 # local backend: synchronous, but same manifest/index contract
                 jid = self.runner.submit_array(script, items)
@@ -250,24 +250,24 @@ class VeraDriver:
                 jid = submit_array(self.runner, spec, script, items, manifest)
             for pkg in chunk:
                 for d in pkg:
-                    _remember_ledger_jid(self.run_dir, kind, d, jid)
+                    self.jids[f"{kind}:{d}"] = jid
                     self.inflight.setdefault(kind, []).append(d)
             print(f"submitted {kind} array job {jid} with {len(chunk)} task(s)")
             n_arrays += 1
         self._dump_json(LEDGER_FILE, self.inflight)
+        self._dump_json(JIDS_FILE, self.jids)
         return n_arrays
 
     def _charge_attempt(self, model_dir):
         n = int(self.attempts.get(model_dir, 0)) + 1
         self.attempts[model_dir] = n
-        self._dump_json(ATTEMPTS_FILE, self.attempts)
         if n >= ATTEMPT_LIMIT:
             self.log.warning("%s parked after %d failed attempt(s)", model_dir, n)
         return n
 
     def _adaptive_k(self):
         try:
-            lf = levelfs(self.runner, _slurm_user())
+            lf = levelfs(self.runner, _current_user())
         except SlurmError as e:
             self.log.warning("sshare failed (%s); using default throttle", e)
             return self.k_start
@@ -280,7 +280,7 @@ class VeraDriver:
         return self.k_start
 
 
-    def _write_parset_file(self, model_dir):
+    def _write_parset_file(self, model_dir, rows=None):
         """Drop <models>/<dir>/vera_parset.json next to the artifacts.
 
         Workers are pure functions of (config, parset): they never read the
@@ -290,10 +290,12 @@ class VeraDriver:
         contract). Full par-values, fixed parameters included.
         """
         t = self.config.all_models.table
-        match = [i for i, r in enumerate(t) if r["directory"] == model_dir]
-        if not match:
+        i = (rows if rows is not None else self._dir_to_row()).get(model_dir)
+        if i is None:
             return
-        i = match[0]
+        target_dir = os.path.join(self.output_root, "models", model_dir)
+        if os.path.isfile(os.path.join(target_dir, "vera_parset.json")):
+            return  # the parset never changes for a given directory
         payload = {"schema_version": SCHEMA_VERSION,
                    "par_names": list(self.config.parspace.par_names),
                    "values": {n: float(t[n][i])
@@ -378,7 +380,11 @@ class VeraDriver:
         qobs = self._qobs()
         u_fixed = self.proposer_u_fixed()
         sformat = self.config.system.parameters[0].sformat
-        orblib_pars = self._orblib_parameters()
+        orblib_cols, orblib_index = self._orblib_index(self._orblib_parameters())
+        n_assigned = sum(
+            1 for r in t
+            if r["directory"] and not str(r["directory"]).startswith("rejected")
+        )
 
         row_to_pid = {row: pid for pid, row in
                       self.proposer.pid_to_row.items()}
@@ -402,7 +408,6 @@ class VeraDriver:
                 parset, bounds, qobs=qobs, u_fixed=u_fixed)
             if violations:
                 self.log.warning("intake rejected %s: %s", pid, violations)
-                self.rejected[pid] = violations
                 t["directory"][idx] = f"rejected/{pid}/"
                 result = Result(proposal_id=pid,
                                 model_dir=t["directory"][idx],
@@ -418,24 +423,21 @@ class VeraDriver:
                     )
                     t[name][idx] = repaired
             iteration = int(t["which_iter"][idx])
-            prior = t[:idx]
             ml_val = float(t["ml"][idx]) if "ml" in t.colnames else 0.0
-            # Reuse the library of any earlier row sharing this potential:
-            # only ml differs, and an orbit library is ml-independent. Minting
-            # a fresh prefix per row cost a full ~18 h re-integration for every
-            # ml variant -- exactly the reuse ModelInnerIterator provides.
-            reuse = self._existing_orblib_dir(idx, orblib_pars)
+            # reuse the library of any earlier row sharing this potential:
+            # an orbit library is ml-independent (as ModelInnerIterator does)
+            reuse = self._existing_orblib_dir(idx, orblib_cols, orblib_index)
             if reuse is not None:
                 directory = f"{reuse}/ml{ml_val:{sformat}}/"
             else:
-                n = sum(1 for r in prior
-                        if int(r["which_iter"]) == iteration
-                        and r["directory"]
-                        and not str(r["directory"]).startswith("rejected"))
-                directory = (f"orblib_{iteration:03d}_{n:03d}"
-                             f"/ml{ml_val:{sformat}}/")
+                prefix = f"orblib_{iteration:03d}_{n_assigned:03d}"
+                directory = f"{prefix}/ml{ml_val:{sformat}}/"
+                orblib_index.append(
+                    (np.array([float(t[c][idx]) for c in orblib_cols]), prefix)
+                )
             t["directory"][idx] = directory
             self.dir_to_pid[directory] = pid
+            n_assigned += 1
         self._save_table_atomically()
         self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid,
                                     "reported_failed": sorted(self.reported_failed)})
@@ -461,24 +463,47 @@ class VeraDriver:
 
     # ------------------------------------------------------------ model rows
     def _orblib_parameters(self):
-        """Parameters that define the orbit library: everything but ml (an
-        orbit library is integrated in a potential and scaled by ml later)."""
-        return [n for n in self.config.parspace.par_names if n != "ml"]
+        """Parameters that define the orbit library.
 
-    def _existing_orblib_dir(self, idx, orblib_pars):
-        """The orblib_XXX_YYY prefix of an earlier row with the same potential,
-        or None. Mirrors ModelInnerIterator.is_new_orblib's np.allclose match."""
+        Same rule as ModelInnerIterator.__init__: everything except ml and
+        the parameters of the chi2_ext component, since neither changes the
+        orbits. Dropping only ml would treat an ext-only change as a new
+        potential and re-integrate a library that could have been reused.
+        """
+        names = list(self.config.parspace.par_names)
+        non_orblib = {"ml"}
+        if getattr(self.config.system, "has_chi2_ext", False):
+            ext = self.config.system.get_unique_ext_chi2_component()
+            non_orblib.update(p.name for p in ext.parameters)
+        return [n for n in names if n not in non_orblib]
+
+    def _orblib_index(self, orblib_pars):
+        """{potential -> orblib prefix} for every already-named row.
+
+        Built once per _assign_directories instead of rescanning the table
+        per row, which was quadratic in the number of models.
+        """
         t = self.config.all_models.table
         cols = [c for c in orblib_pars if c in t.colnames]
-        if not cols:
-            return None
-        row = tuple(float(t[c][idx]) for c in cols)
-        for j in range(idx):
+        index = []
+        for j in range(len(t)):
             d = str(t["directory"][j])
             if not d or d.startswith("rejected") or d.startswith("pending"):
                 continue
-            if np.allclose(row, tuple(float(t[c][j]) for c in cols)):
-                return d.rstrip("/").rsplit("/", 1)[0] if "/" in d.rstrip("/") else d.rstrip("/")
+            index.append((np.array([float(t[c][j]) for c in cols]),
+                          d.rstrip("/").rsplit("/", 1)[0]))
+        return cols, index
+
+    def _existing_orblib_dir(self, idx, cols, index):
+        """The orblib prefix of an earlier row with the same potential, or
+        None. Same np.allclose match as ModelInnerIterator.is_new_orblib."""
+        if not cols:
+            return None
+        t = self.config.all_models.table
+        row = np.array([float(t[c][idx]) for c in cols])
+        for potential, prefix in index:
+            if np.allclose(row, potential):
+                return prefix
         return None
 
     def _intake_bounds(self):
@@ -504,13 +529,6 @@ class VeraDriver:
         return None
 
 # ------------------------------------------------------------------ helpers
-def _slurm_user():
-    """The account whose fairshare governs our queue depth."""
-    import getpass
-
-    return os.environ.get("VERA_USER") or getpass.getuser()
-
-
 def _now64():
     import numpy as np
 
@@ -529,45 +547,8 @@ def _read_weights_meta(model_full_dir):
     }
 
 
-def _ledger_path(run_dir):
-    return os.path.join(run_dir, "vera_ledger_jids.json")
 
 
-def _remember_ledger_jid(run_dir, kind, item, jid):
-    p = _ledger_path(run_dir)
-    data = {}
-    if os.path.isfile(p):
-        with open(p) as f:
-            data = json.load(f)
-    data[f"{kind}:{item}"] = jid
-    tmp = p + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, p)
-
-
-def _forget_ledger_jid(run_dir, kind, item):
-    """Drop a finished/dead item's jid so the ledger cannot grow without
-    bound, and a stale id can never be read back for a resubmitted item."""
-    p = _ledger_path(run_dir)
-    if not os.path.isfile(p):
-        return
-    with open(p) as f:
-        data = json.load(f)
-    if data.pop(f"{kind}:{item}", None) is None:
-        return
-    tmp = p + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, p)
-
-
-def _ledger_jid(run_dir, kind, item):
-    p = _ledger_path(run_dir)
-    if not os.path.isfile(p):
-        return None
-    with open(p) as f:
-        return json.load(f).get(f"{kind}:{item}")
 
 
 def main(argv=None):
