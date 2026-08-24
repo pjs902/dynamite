@@ -86,10 +86,19 @@ Record measured numbers below as they land.
 | median solve wall (20 models) | TBD | |
 | driver restart duplicates | expected 0 | |
 
-## Appendix B - known local-box caveat
+## Appendix B - local-box BO-stack caveat and workaround
 
-On the KVM dev box, importing torch before pymc trips a libstdc++/ICU ABI
-clash (`CXXABI_1.3.15`), so BO-proposer tests skip locally
-(`test_vera_proposer_bayesopt.py`). The clean VERA conda env does not have
-this problem; if it ever appears there, pin `libstdcxx-ng` to match torch's
-bundled runtime inside the env.
+On the KVM dev box, once torch is imported its bundled libstdc++/libicu win
+symbol resolution, and any later `sqlite3` C-extension load (pymc/IPython
+chain) fails the ABI check regardless of import order. Workaround that makes
+the BO stack fully usable locally:
+
+```bash
+LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6 python script.py
+```
+
+Verified 2026-08-23: with the preload, BayesOptGenerator generates
+proposals from a warm-started mock table on this box. BO-proposer pytest
+tests still module-skip (they do not set the preload); run them manually
+with the variable when needed. The clean VERA conda env does not exhibit
+the clash.
