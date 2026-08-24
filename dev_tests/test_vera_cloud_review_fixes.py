@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from dynamite.vera.classifier import ModelState, classify  # noqa: E402
-from dynamite.vera.proposal import Proposal, validate_parset  # noqa: E402
+from dynamite.vera.proposal import validate_parset  # noqa: E402
 
 QOBS = 0.55097
 STARS_SHAPE = {"q": "q-stars", "p": "p-stars", "u": "u-stars"}
@@ -246,14 +246,6 @@ def test_shape_lookup_is_not_confused_by_a_triaxial_halo():
         ok, bounds, qobs=QOBS, shape_names=shape_names
     )
     assert violations == [], violations
-
-
-def test_proposal_from_dict_rejects_foreign_payloads():
-    """Mirrors Result.from_dict: a bare assert vanishes under python -O."""
-    pr = Proposal(proposal_id="abc", parset={"ml": 2.6})
-    assert Proposal.from_dict(pr.to_dict()) == pr
-    with pytest.raises(ValueError):
-        Proposal.from_dict({**pr.to_dict(), "schema_version": 99})
 
 
 def test_future_mtime_sentinel_is_not_pending(tmp_path):

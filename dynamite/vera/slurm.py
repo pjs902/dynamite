@@ -6,8 +6,10 @@ Job specifications are pinned to the values in the spec's Global Constraints.
 """
 
 import getpass
+import json
 import os
 import subprocess
+import tempfile
 import uuid
 
 ACCOUNT = "mia"
@@ -24,16 +26,40 @@ def _current_user():
     return os.environ.get("VERA_USER") or getpass.getuser()
 
 
-class RealRunner:
-    """Runs argv for real; stdout only. Non-zero exit raises SlurmError."""
+def run_argv(argv):
+    """Runs argv for real; stdout only. Non-zero exit raises SlurmError.
 
-    def __call__(self, argv):
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
-            raise SlurmError(
-                f"{argv[0]} failed rc={proc.returncode}: {proc.stderr.strip()}"
-            )
-        return proc.stdout
+    A runner is just argv -> stdout, so this is a function; it held no state
+    and every use site was `RealRunner()(argv)`.
+    """
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise SlurmError(f"{argv[0]} failed rc={proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def atomic_write(path, text):
+    """Write `text` to `path` via a same-directory temp file and rename.
+
+    Every persistent file vera writes lands on NFS where a reader can catch a
+    partial flush -- the ledgers, the manifests, the parset files. One
+    implementation so they cannot drift.
+    """
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def atomic_write_json(path, obj):
+    atomic_write(path, json.dumps(obj, indent=1))
 
 
 def _base_flags(spec):
@@ -89,12 +115,8 @@ def write_manifest(manifest_dir, kind, items):
     from SLURM_ARRAY_TASK_ID. A file also keeps argv well clear of ARG_MAX
     for a thousand-model wave.
     """
-    os.makedirs(manifest_dir, exist_ok=True)
     path = os.path.join(manifest_dir, f"vera_items_{kind}_{uuid.uuid4().hex[:8]}.txt")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        f.write("".join(f"{item}\n" for item in items))
-    os.replace(tmp, path)
+    atomic_write(path, "".join(f"{item}\n" for item in items))
     return path
 
 
@@ -103,10 +125,11 @@ def submit_array(runner, job_spec, script_path, items, manifest_path):
     argv = ["sbatch"] + _base_flags(job_spec) + [script_path, manifest_path]
     try:
         out = runner(argv)
-    except SlurmError:
-        raise
     except Exception as e:
-        raise SlurmError(f"sbatch invocation failed: {e!r}") from e
+        # a runner may raise anything; callers catch SlurmError only
+        raise e if isinstance(e, SlurmError) else SlurmError(
+            f"sbatch invocation failed: {e!r}"
+        ) from e
     for token in out.split():
         if token.isdigit():
             return int(token)

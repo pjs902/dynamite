@@ -98,7 +98,7 @@ def test_real_runner_rejects_on_error():
 
     if shutil.which("sbatch") is None:
         pytest.skip("no slurm on this host (local dev box)")
-    from dynamite.vera.slurm import RealRunner
+    from dynamite.vera.slurm import run_argv
 
     with pytest.raises(SlurmError):
-        RealRunner()(["sbatch", "--definitely-not-a-flag"])
+        run_argv(["sbatch", "--definitely-not-a-flag"])

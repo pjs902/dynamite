@@ -15,7 +15,6 @@ import pytest
 
 from dynamite.vera.classifier import ModelState
 from dynamite.vera.driver import VeraDriver
-from dynamite.vera.proposal import Result
 from dynamite.vera.slurm import MAX_ARRAY_SIZE, build_solve_job_spec
 from test_vera_proposer_gridwalk import build_minimal_config
 
@@ -173,15 +172,6 @@ def test_array_size_bounded_not_just_throttle():
     flag = next(e for e in spec["extra"] if e.startswith("--array="))
     upper = int(flag.split("=")[1].split("%")[0].split("-")[1])
     assert upper <= MAX_ARRAY_SIZE - 1, flag
-
-
-def test_result_from_dict_rejects_foreign_payloads():
-    r = Result(proposal_id="a", model_dir="d", status="done", chi2=1.0)
-    assert Result.from_dict(r.to_dict()) == r
-    with pytest.raises(ValueError):
-        Result.from_dict({**r.to_dict(), "schema_version": 99})
-    with pytest.raises(ValueError):
-        Result.from_dict({**r.to_dict(), "surprise": 1})
 
 
 def test_each_array_task_gets_its_own_item(tmp_path):

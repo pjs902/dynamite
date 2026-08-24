@@ -5,60 +5,30 @@ Mirrors ModelInnerIterator's weights pass: get_orblib() short-circuits on
 the sentinel, then get_weights() writes orbit_weights.ecsv with chi2 meta.
 """
 
-import argparse
-import json
-import os
 import sys
 
-from .task_model import build_model
+from .task_model import task_main
+
+
+def _solve(mod):
+    orblib = mod.get_orblib()  # sentinel short-circuit
+    if getattr(orblib, "vel_histograms", None) is None:
+        # resume path: library built by an earlier task/process;
+        # chi2_kinmap needs in-memory histograms
+        orblib.read_vel_histograms()
+    mod.get_weights(orblib)
+    # get_weights already set these from the solver's return value; the ecsv
+    # is the same numbers via an extra NFS read, on the one path where a
+    # partial flush is a known hazard
+    return {
+        "chi2_tot": float(mod.chi2),
+        "chi2_kin": float(mod.kinchi2),
+        "chi2_kinmap": float(mod.kinmapchi2),
+    }
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="one-model weight solve")
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--model-dir", required=True)
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args(argv)
-
-    if args.dry_run:
-        print(json.dumps({"model_dir": args.model_dir, "dry_run": True}))
-        return 0
-
-    try:
-        _, mod = build_model(args.config, args.model_dir)
-        cwd = os.getcwd()
-        try:
-            mod.setup_directories()
-            orblib = mod.get_orblib()          # sentinel short-circuit
-            if getattr(orblib, "vel_histograms", None) is None:
-                # resume path: library built by an earlier task/process;
-                # chi2_kinmap needs in-memory histograms
-                orblib.read_vel_histograms()
-            mod.get_weights(orblib)
-        finally:
-            os.chdir(cwd)
-        # get_weights already set these from the solver's return value; the
-        # ecsv is the same numbers via an extra NFS read, on the one path
-        # where a partial flush is a known hazard
-        print(
-            json.dumps(
-                {
-                    "model_dir": args.model_dir,
-                    "chi2_tot": float(mod.chi2),
-                    "chi2_kin": float(mod.kinchi2),
-                    "chi2_kinmap": float(mod.kinmapchi2),
-                }
-            )
-        )
-        return 0
-    except Exception as e:  # task boundary: report, don't die
-        import traceback
-
-        traceback.print_exc()
-        print(
-            json.dumps({"error": repr(e), "model_dir": args.model_dir}), file=sys.stderr
-        )
-        return 3
+    return task_main("one-model weight solve", _solve, argv)
 
 
 if __name__ == "__main__":

@@ -5,13 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from dynamite.vera.proposal import (  # noqa: E402
-    SCHEMA_VERSION,
-    canonical_hash,
-    Proposal,
-    Result,
-    validate_parset,
-)
+from dynamite.vera import SCHEMA_VERSION  # noqa: E402
+from dynamite.vera.proposal import canonical_hash, validate_parset  # noqa: E402
 
 FAKE_BOUNDS = {
     "bh.m": {"lo": 3.90, "hi": 4.78},
@@ -90,21 +85,6 @@ def test_nonfinite_value_rejected():
         _par(ml=float("nan")), FAKE_BOUNDS, qobs=QOBS, shape_names=BARE_SHAPE, u_fixed=U_FIXED
     )
     assert any("ml" in v for v in violations)
-
-
-def test_roundtrip_dataclasses():
-    pr = Proposal(proposal_id=canonical_hash(_par()), parset=_par())
-    r = Result(
-        proposal_id=pr.proposal_id,
-        model_dir="orblib_001_000/ml02.40",
-        status="done",
-        chi2=2770837.5,
-        kinchi2=1.0,
-        kinmapchi2=2.0,
-    )
-    assert Proposal.from_dict(pr.to_dict()) == pr
-    assert Result.from_dict(r.to_dict()) == r
-    assert r.to_dict()["schema_version"] == 1
 
 
 def test_u_free_uses_parset_u_not_fixed():

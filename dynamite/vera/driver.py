@@ -22,15 +22,17 @@ import numpy as np
 
 from .classifier import ATTEMPT_LIMIT, WEIGHTS, ModelState, _noml, classify
 from .pack_integration import pack_libraries
-from .proposal import Result, validate_parset, SCHEMA_VERSION
+from . import SCHEMA_VERSION
+from .proposal import Result, validate_parset
 from .slurm import (
     MAX_ARRAY_SIZE,
-    RealRunner,
     SlurmError,
     _current_user,
+    atomic_write_json,
     build_integration_job_spec,
     build_solve_job_spec,
     levelfs,
+    run_argv,
     running_job_ids,
     submit_array,
     write_manifest,
@@ -58,7 +60,7 @@ class VeraDriver:
         self.clock = clock
         self.config = config
         self.proposer = proposer
-        self.runner = runner or RealRunner()
+        self.runner = runner or run_argv
         self.run_dir = os.path.abspath(run_dir)
         self.poll_interval = poll_interval
         self.k_start = k_start
@@ -84,10 +86,7 @@ class VeraDriver:
         return default
 
     def _dump_json(self, name, obj):
-        fd, tmp = tempfile.mkstemp(dir=self.run_dir)
-        with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, indent=1)
-        os.replace(tmp, os.path.join(self.run_dir, name))
+        atomic_write_json(os.path.join(self.run_dir, name), obj)
 
     def _save_dirs(self):
         self._dump_json(DIRS_FILE, {"dir_to_pid": self.dir_to_pid,
@@ -312,11 +311,7 @@ class VeraDriver:
                         return
             except (OSError, ValueError):
                 pass  # unreadable: fall through and rewrite it
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target))
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=1)
-        os.replace(tmp, target)
+        atomic_write_json(target, payload)
 
     def observe_completions(self, states=None):
         states = self.scan() if states is None else states

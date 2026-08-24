@@ -7,9 +7,14 @@ init runs update_model_table(), whose janitor would otherwise delete
 sibling rows that other tasks are still working on.
 """
 
+import argparse
 import json
 import os
+import sys
+import traceback
 import uuid
+
+from . import SCHEMA_VERSION
 
 
 def build_model(config_path, model_dir):
@@ -29,6 +34,19 @@ def build_model(config_path, model_dir):
     io = cfgd.setdefault("io_settings", {})
     outroot = os.path.abspath(io.get("output_directory", "."))
     io["all_models_file"] = f"all_models_task_{uuid.uuid4().hex[:8]}.ecsv"
+
+    # Parset first: it is the cheapest step and gates everything after it.
+    # The driver stamps schema_version; a worker from a different deployment
+    # (a stale $PYTHONPATH on a cluster is enough) must refuse rather than
+    # spend a node-hour reading `values` under a foreign schema.
+    with open(os.path.join(outroot, "models", model_dir, "vera_parset.json")) as f:
+        payload = json.load(f)
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"vera_parset.json schema_version {payload.get('schema_version')!r} "
+            f"!= {SCHEMA_VERSION} for {model_dir}"
+        )
+    values = payload["values"]
     # One file per MODEL rather than per task invocation, which grew without
     # bound (thousands of models x retries x int+solve). NOT inside the model
     # directory: setup_directories() recreates that and would delete the file
@@ -53,10 +71,6 @@ def build_model(config_path, model_dir):
         )
     finally:
         os.chdir(cwd)
-
-    with open(os.path.join(outroot, "models", model_dir, "vera_parset.json")) as f:
-        payload = json.load(f)
-    values = payload["values"]
 
     row = Table()
     for n in payload["par_names"]:
@@ -87,3 +101,33 @@ def build_model(config_path, model_dir):
         # get_model_from_parset after integration
         tbl.add_row(rowd)
     return c, mod
+
+
+def task_main(description, run, argv=None):
+    """Shared main() for the array tasks: argparse, cwd discipline, reporting.
+
+    integrate_one and solve_one differed only in `run`; everything around it
+    -- the two flags, saving/restoring cwd around DYNAMITE's chdir, and the
+    task boundary that must exit non-zero with a parseable line rather than
+    let a traceback take the array task down -- was duplicated verbatim.
+    """
+    ap = argparse.ArgumentParser(description=description)
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--model-dir", required=True)
+    args = ap.parse_args(argv)
+    try:
+        _, mod = build_model(args.config, args.model_dir)
+        cwd = os.getcwd()
+        try:
+            mod.setup_directories()
+            payload = run(mod)
+        finally:
+            os.chdir(cwd)
+        print(json.dumps({"model_dir": args.model_dir, **payload}))
+        return 0
+    except Exception as e:  # task boundary: report, don't die
+        traceback.print_exc()
+        print(
+            json.dumps({"error": repr(e), "model_dir": args.model_dir}), file=sys.stderr
+        )
+        return 3
