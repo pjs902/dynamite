@@ -773,6 +773,16 @@ class NNLS(WeightSolver):
         self.adelie_bvls_max_iters = int(
             self.settings.get("adelie_bvls_max_iters", int(2e5))
         )
+        # cvxopt interior-point tolerances (abstol/reltol/feastol share one
+        # value) and iteration cap; the library defaults are 1e-7/1e-6/1e-7
+        # and 100. 1e-11 is not conservatism: measured against an independent
+        # constrained solve (scipy lsq_linear) on four seeds of a matrix with
+        # this row structure, cvxopt lands 1.25-3.3x above the optimal chi2 at
+        # 1e-9 and at 1.00-1.03x at 1e-11, for ~3 extra iterations. cvxopt
+        # reports 'optimal' in BOTH cases, so the status flag will not warn
+        # you. See dev_tests/test_cvxopt_equality.py.
+        self.cvxopt_tol = float(self.settings.get("cvxopt_tol", 1e-11))
+        self.cvxopt_maxiters = int(self.settings.get("cvxopt_maxiters", 200))
         # Optional float32 mode: roughly halves the memory of the orbit
         # library data retained for the solve (vel_histograms/intrinsic_masses
         # /projected_masses) and of the NNLS matrix/solve arrays. Validated
@@ -1635,17 +1645,59 @@ class NNLS(WeightSolver):
                     weights = np.full(A.shape[1], np.nan)
             elif self.nnls_solver == "cvxopt":
                 A, b = self.construct_nnls_matrix_and_rhs(orblib)
-                A_max = np.max(np.abs(A), axis=0)
-                A_normalized = A / A_max
-                b_max = np.max(np.abs(b))
-                b_normalized = b / b_max
+                # Row 0 is the total-mass constraint: orbmat[0,:] is all ones
+                # and econ[0] = max(|1 - total_mass|, 1e-8), which for a
+                # normalised MGE lands on the 1e-8 FLOOR. So A[0,:] = 1e8 in
+                # EVERY column - one constant row, six orders above the rest.
+                # As a least-squares row it costs ~5 orders of magnitude of
+                # conditioning, and P = An^T An squares that, putting the QP
+                # past float64's limit (measured kappa(P) ~ 3e14, at which
+                # cvxopt returns 'optimal' on a badly wrong answer).
+                # cvxopt takes equality constraints natively, so state
+                # sum(w) = total_mass exactly and drop the row.
+                A_rest, b_rest = A[1:], b[1:]
+                # Unit-L2 column scaling (marginally better conditioned than
+                # the max-abs scaling the scipy path uses, and it matches the
+                # adelie path's _scale_columns). Null orbits give a zero norm;
+                # leave those columns unscaled rather than dividing by zero.
+                col_norm = np.linalg.norm(A_rest, axis=0)
+                col_norm[col_norm == 0] = 1.0
+                b_max = np.max(np.abs(b_rest))
+                if b_max == 0:
+                    b_max = 1.0
+                A_normalized = A_rest / col_norm
+                b_normalized = b_rest / b_max
                 try:
                     P = np.dot(A_normalized.T, A_normalized)
                     q = -1.0 * np.dot(A_normalized.T, b_normalized)
-                    solver = CvxoptNonNegSolver(P, q)
+                    # w = x * b_max / col_norm, so the mass constraint
+                    # sum(w) = total_mass becomes (b_max/col_norm) . x = total_mass
+                    solver = CvxoptNonNegSolver(
+                        P, q,
+                        eq_coeff=b_max / col_norm,
+                        eq_rhs=self.total_mass,
+                        tol=self.cvxopt_tol,
+                        maxiters=self.cvxopt_maxiters,
+                    )
                     x_normalized = solver.beta
                     # Scale the solution back to the original scale
-                    weights = x_normalized * b_max / A_max
+                    weights = x_normalized * b_max / col_norm
+                    self.logger.info(
+                        f"cvxopt QP: status={solver.status}, "
+                        f"{solver.iterations} iterations, tol={self.cvxopt_tol:.1e}, "
+                        f"sum(w)={weights.sum():.10f} (target {self.total_mass:.10f})"
+                    )
+                    if not solver.success:
+                        # 'unknown' means the iteration limit was reached or the
+                        # search stalled; cvxopt still returns iterates, and
+                        # without this they would become a chi2 like any other.
+                        self.logger.warning(
+                            f"cvxopt QP did NOT converge (status "
+                            f"'{solver.status}' after {solver.iterations} "
+                            f"iterations, maxiters={self.cvxopt_maxiters}). The "
+                            "returned weights are the last iterate, not a "
+                            "verified optimum."
+                        )
                 except Exception as e:
                     txt = (
                         f"Orblib {orblib.mod_dir}, ml={orblib.parset['ml']}"
@@ -1719,14 +1771,38 @@ class CvxoptNonNegSolver:
 
     """
 
-    def __init__(self, P=None, q=None):
+    def __init__(self, P=None, q=None, eq_coeff=None, eq_rhs=None,
+                 tol=1e-9, maxiters=200):
         p = P.shape[0]
-        P = cvxopt.matrix(P)
-        q = cvxopt.matrix(q)
-        G = cvxopt.matrix(-np.identity(p))
+        # -I as a SPARSE matrix. The dense np.identity(p) this replaces is
+        # p**2 doubles - 16.2 GiB at omega Cen's 45000 orbits - to express a
+        # constraint with p nonzeros, and it costs per-iteration work too.
+        G = cvxopt.spmatrix(-1.0, range(p), range(p))
         h = cvxopt.matrix(np.zeros(p))
-        sol = cvxopt.solvers.qp(P, q, G, h)
-        self.success = sol["status"] == "optimal"
+        kwargs = {}
+        if eq_coeff is not None:
+            # A single linear equality, e.g. total mass. cvxopt handles this
+            # natively; expressing it instead as a heavily weighted ROW of the
+            # least-squares matrix is what destroys the conditioning of P.
+            kwargs["A"] = cvxopt.matrix(
+                np.asarray(eq_coeff, dtype=float).reshape(1, p)
+            )
+            kwargs["b"] = cvxopt.matrix(np.array([float(eq_rhs)]))
+        # cvxopt.solvers.options is module-global state; leave it as found.
+        saved = dict(cvxopt.solvers.options)
+        cvxopt.solvers.options.update(
+            {"abstol": tol, "reltol": tol, "feastol": tol,
+             "maxiters": int(maxiters), "show_progress": False}
+        )
+        try:
+            sol = cvxopt.solvers.qp(cvxopt.matrix(P), cvxopt.matrix(q), G, h, **kwargs)
+        finally:
+            cvxopt.solvers.options.clear()
+            cvxopt.solvers.options.update(saved)
+        self.status = sol["status"]
+        self.success = self.status == "optimal"
+        self.iterations = sol.get("iterations")
+        self.gap = sol.get("gap")
         self.beta = np.squeeze(np.array(sol["x"]))
 
 
