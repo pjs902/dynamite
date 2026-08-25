@@ -762,8 +762,8 @@ class NNLS(WeightSolver):
         # oscillated. See docs/source/adelie_branch_migration.md.
         self.adelie_mu = float(self.settings.get("adelie_mu", 1.0e7))
         self.adelie_alm_iters = int(self.settings.get("adelie_alm_iters", 200))
-        self.adelie_tol = float(self.settings.get("adelie_tol", 1.0e-10))
-        self.adelie_gap_tol = float(self.settings.get("adelie_gap_tol", 1e-10))
+        # adelie_tol / adelie_gap_tol are set below, AFTER nnls_dtype: their
+        # safe values depend on the dtype's epsilon.
         # Coordinate-descent budget for ONE inner BVLS solve. adelie's own
         # default is 1e5; the 2e5 kept here preserves the previous hard-coded
         # value. Exposed as a setting because at omega Cen's matrix size a
@@ -794,6 +794,33 @@ class NNLS(WeightSolver):
         nnls_dtype = self.settings.get("nnls_dtype", "float64")
         assert nnls_dtype in ("float32", "float64"), "nnls_dtype must be 'float32' or 'float64'"
         self.nnls_dtype = np.float32 if nnls_dtype == "float32" else np.float64
+        # Solver tolerances are DERIVED FROM THE DTYPE, because a tolerance at
+        # or below the dtype's epsilon makes the convergence test unsatisfiable:
+        # the solve can then only ever stop by exhausting its iteration budget.
+        # This is not hypothetical. A production grid inherited the float64
+        # default 1e-10 while running float32 (eps 1.19e-07) and every BVLS call
+        # ran to max_iters=2e5. At omega Cen's matrix size that is ~29 h per ALM
+        # iterate, x200 iterates: five workers sat in ALM iterate 0 for 31.5 h
+        # and finished 0 of 90 models, with flat RSS and nothing in the logs.
+        _eps = np.finfo(self.nnls_dtype).eps
+        _tol_default = 1.0e-10 if self.nnls_dtype is np.float64 else 1.0e-6
+        # gap_tol likewise cannot beat the accuracy of the inner solve that
+        # produces the weights it measures. Kept at the historical 1e-10 for
+        # float64 so results do not shift; at float32 that is below eps and
+        # therefore dead code, so it tracks the dtype instead.
+        _gap_default = 1.0e-10 if self.nnls_dtype is np.float64 else 1.0e-6
+        self.adelie_tol = float(self.settings.get("adelie_tol", _tol_default))
+        self.adelie_gap_tol = float(self.settings.get("adelie_gap_tol", _gap_default))
+        for _name, _val in (("adelie_tol", self.adelie_tol),
+                            ("adelie_gap_tol", self.adelie_gap_tol)):
+            if _val <= _eps:
+                self.logger.warning(
+                    f"{_name}={_val:.1e} is at or below the {nnls_dtype} epsilon "
+                    f"({_eps:.2e}), so the test it controls can never be "
+                    "satisfied and the solver will run its full iteration "
+                    f"budget every time. Raise {_name} above {_eps:.2e} or use "
+                    "nnls_dtype 'float64'."
+                )
         # Stream orbit-library histogram reads set-by-set in the fused adelie
         # constructor. Pure memory setting: results are bit-identical either
         # way (validated by dev_tests/_real_fused_check.py).
@@ -1516,7 +1543,9 @@ class NNLS(WeightSolver):
         # the inner solves had to work to produce it.
         self.logger.info(
             f"adelie ALM: returned iterate {best_it} has gap={best_gap:.2e} "
-            f"(adelie_gap_tol={self.adelie_gap_tol:.1e}), peak BVLS iters in any "
+            f"(adelie_gap_tol={self.adelie_gap_tol:.1e}), "
+            f"adelie_tol={self.adelie_tol:.1e} vs {np.dtype(dtype).name} eps="
+            f"{np.finfo(dtype).eps:.1e}, peak BVLS iters in any "
             f"ALM iterate {inner_iters_max}/{bvls_max_iters}"
             + (
                 f", {n_saturated} of {it + 1} ALM iterates UNCONVERGED"
