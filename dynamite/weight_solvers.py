@@ -24,6 +24,7 @@ try:
     # would put it back).
     _saved_affinity = os.sched_getaffinity(0) if hasattr(os, "sched_getaffinity") else None
     import adelie.solver as _adelie_solver
+    import adelie.matrix as _adelie_matrix
 
     _ADELIE_AVAILABLE = True
     if _saved_affinity is not None:
@@ -1467,6 +1468,16 @@ class NNLS(WeightSolver):
         # mismatch makes an internal `np.array(..., copy=False)` raise under
         # numpy>=2.0. Passing weights explicitly in X's dtype avoids it.
         weights_arr = np.full(X.shape[0], 1 / X.shape[0], dtype=dtype)
+        # Hand adelie a matrix OBJECT rather than the raw ndarray, built once
+        # outside the loop. Given an ndarray, bvls() recomputes
+        #     X_vars = np.sum(weights[:, None] * X**2, axis=0)
+        # on EVERY call, which materialises a full-size temporary - ~67 GiB per
+        # ALM iterate at omega Cen in float32, times adelie_alm_iters. The
+        # matrix object takes bvls()'s other branch, where the same quantity
+        # comes from the compiled X.sq_mul() with no allocation at all.
+        # matrix.dense wraps the existing buffer (verified: np.shares_memory),
+        # so this costs nothing and the two X_vars agree to ~1e-15.
+        X_solver = _adelie_matrix.dense(X, method="naive", n_threads=n_threads)
 
         lam = 0.0
         state = None
@@ -1482,7 +1493,7 @@ class NNLS(WeightSolver):
         for it in range(self.adelie_alm_iters):
             y[0] = sqrt_mu * (1.0 + lam / mu)
             state = _adelie_solver.bvls(
-                X,
+                X_solver,
                 np.ascontiguousarray(y),
                 lower,
                 upper,
