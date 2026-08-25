@@ -764,6 +764,15 @@ class NNLS(WeightSolver):
         self.adelie_alm_iters = int(self.settings.get("adelie_alm_iters", 200))
         self.adelie_tol = float(self.settings.get("adelie_tol", 1.0e-10))
         self.adelie_gap_tol = float(self.settings.get("adelie_gap_tol", 1e-10))
+        # Coordinate-descent budget for ONE inner BVLS solve. adelie's own
+        # default is 1e5; the 2e5 kept here preserves the previous hard-coded
+        # value. Exposed as a setting because at omega Cen's matrix size a
+        # single sweep costs seconds, so this is effectively a wall-clock
+        # budget, and because the saturation path needs to be reachable in
+        # tests without a pathological problem.
+        self.adelie_bvls_max_iters = int(
+            self.settings.get("adelie_bvls_max_iters", int(2e5))
+        )
         # Optional float32 mode: roughly halves the memory of the orbit
         # library data retained for the solve (vel_histograms/intrinsic_masses
         # /projected_masses) and of the NNLS matrix/solve arrays. Validated
@@ -1425,6 +1434,14 @@ class NNLS(WeightSolver):
         lam = 0.0
         state = None
         best_chi2, best_w, best_it = np.inf, None, -1
+        best_gap = np.nan
+        # adelie returns an unconverged iterate WITHOUT raising when the inner
+        # solve exhausts its budget, so the caller has to look. Tracked here
+        # because a silently unconverged w becomes a silently wrong chi2 in
+        # all_models.ecsv, indistinguishable from a real one.
+        bvls_max_iters = self.adelie_bvls_max_iters
+        inner_iters_max = 0
+        n_saturated = 0
         for it in range(self.adelie_alm_iters):
             y[0] = sqrt_mu * (1.0 + lam / mu)
             state = _adelie_solver.bvls(
@@ -1435,9 +1452,24 @@ class NNLS(WeightSolver):
                 weights=weights_arr,
                 n_threads=n_threads,
                 tol=self.adelie_tol,
-                max_iters=int(2e5),
+                max_iters=bvls_max_iters,
                 warm_start=state,
             )
+            # state.iters counts coordinate descents for THIS call; the counter
+            # restarts on every warm-started call, so compare it per call.
+            inner_iters = int(state.iters)
+            inner_iters_max = max(inner_iters_max, inner_iters)
+            if inner_iters >= bvls_max_iters:
+                n_saturated += 1
+                if n_saturated == 1:  # once per solve, not once per iterate
+                    self.logger.warning(
+                        f"adelie ALM: BVLS reached max_iters={bvls_max_iters} at "
+                        f"ALM iterate {it} - the inner solve did NOT converge and "
+                        f"its weights are being used regardless. adelie_tol="
+                        f"{self.adelie_tol:.1e} against {np.dtype(dtype).name} eps="
+                        f"{np.finfo(dtype).eps:.1e}; a tolerance at or below eps "
+                        "cannot be reached at this dtype."
+                    )
             w = (np.asarray(state.beta).ravel() / col_norm).astype(np.float64)
             gap = float(w.sum() - 1.0)
             lam -= mu * gap
@@ -1457,6 +1489,7 @@ class NNLS(WeightSolver):
             chi2 = row0 * row0 + float(resid @ resid)
             if chi2 < best_chi2:
                 best_chi2, best_w, best_it = chi2, w.copy(), it
+                best_gap = gap
             if abs(gap) < self.adelie_gap_tol:
                 break
 
@@ -1464,6 +1497,22 @@ class NNLS(WeightSolver):
             f"adelie ALM: {it + 1} iterations, mu={mu:.1e}, "
             f"final gap={gap:.2e}, best iterate {best_it}, "
             f"chi2={best_chi2:.4f}, sum(w)={best_w.sum():.10f}"
+        )
+        # The line above reports the FINAL gap, but the weights returned are
+        # best_w, from iterate best_it. Those are different iterates whenever
+        # the ALM is still oscillating, and best_w is selected on chi2 alone -
+        # which measures ||Aw - b|| and says nothing about sum(w) = 1. So report
+        # the feasibility of the iterate actually being returned, plus how hard
+        # the inner solves had to work to produce it.
+        self.logger.info(
+            f"adelie ALM: returned iterate {best_it} has gap={best_gap:.2e} "
+            f"(adelie_gap_tol={self.adelie_gap_tol:.1e}), peak BVLS iters in any "
+            f"ALM iterate {inner_iters_max}/{bvls_max_iters}"
+            + (
+                f", {n_saturated} of {it + 1} ALM iterates UNCONVERGED"
+                if n_saturated
+                else ""
+            )
         )
         # plain residual at the returned weights, aligned to A's rows, built
         # from X: rows 1.. via the exact column scaling (round-off-level
