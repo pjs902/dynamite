@@ -60,17 +60,19 @@ class Decomposition:
         if no config object is given or the kin_set does not exist.
 
     """
-    def __init__(self,
-                 config=None,
-                 model=None,
-                 ocut=None,
-                 names='bulgedisk',
-                 cache=True,
-                 comps_weights=False):
-        self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+
+    def __init__(
+        self,
+        config=None,
+        model=None,
+        ocut=None,
+        names="bulgedisk",
+        cache=True,
+        comps_weights=False,
+    ):
+        self.logger = logging.getLogger(f"{__name__}.{__class__.__name__}")
         if config is None:
-            text = f'{__class__.__name__} needs configuration object, ' \
-                   'None provided.'
+            text = f"{__class__.__name__} needs configuration object, None provided."
             self.logger.error(text)
             raise ValueError(text)
         self.config = config
@@ -78,21 +80,40 @@ class Decomposition:
             best_model_idx = config.all_models.get_best_n_models_idx(n=1)[0]
             model = config.all_models.get_model_from_row(best_model_idx)
         self.model = model
-        comp_names = {'bulgedisk': ['thin_d', 'thick_d', 'disk',
-                                    'cr_thin_d', 'cr_thick_d', 'cr_disk',
-                                    'bulge', 'all'],
-                      'hotcold': ['cold', 'warm', 'cold+warm',
-                                  'cr_cold', 'cr_warm', 'cr_cold+warm',
-                                  'hot', 'all']}
+        comp_names = {
+            "bulgedisk": [
+                "thin_d",
+                "thick_d",
+                "disk",
+                "cr_thin_d",
+                "cr_thick_d",
+                "cr_disk",
+                "bulge",
+                "all",
+            ],
+            "hotcold": [
+                "cold",
+                "warm",
+                "cold+warm",
+                "cr_cold",
+                "cr_warm",
+                "cr_cold+warm",
+                "hot",
+                "all",
+            ],
+        }
         self.comps = comp_names.get(names, None)
         if self.comps is None or names not in comp_names.keys():
-            txt = f'Unknown component names option: {names}. Use one of ' \
-                  f'{comp_names.keys()}.'
+            txt = (
+                f"Unknown component names option: {names}. Use one of "
+                f"{comp_names.keys()}."
+            )
             self.logger.error(txt)
             raise ValueError(txt)
         # Important: the 'all' component needs to be the last one in the list!
-        self.logger.info('Performing decomposition '
-                         f'for model in {self.model.directory}.')
+        self.logger.info(
+            f"Performing decomposition for model in {self.model.directory}."
+        )
         # Get orblib and orbit weights and store them in self.model.weights
         self.orblib = self.model.get_orblib()
         _ = self.model.get_weights(self.orblib)
@@ -100,62 +121,72 @@ class Decomposition:
         if ocut is not None:
             self.ocut = ocut
         else:
-            self.ocut = [  0.8,     0.25,   -0.25,        -0.8        ]
+            self.ocut = [0.8, 0.25, -0.25, -0.8]
         #             thin_d  thick_d   bulge    cr_thick_d   cr_thin_d
         #             cold    warm      hot      cr_warm      cr_cold
-        file_name = self.model.directory + 'decomp_table.ecsv'
+        file_name = self.model.directory + "decomp_table.ecsv"
         if cache and os.path.isfile(file_name):
-            decomp = astropy.table.Table.read(file_name, format='ascii.ecsv')
-            ocut_file = decomp.meta.get('ocut', None)
+            decomp = astropy.table.Table.read(file_name, format="ascii.ecsv")
+            ocut_file = decomp.meta.get("ocut", None)
             if ocut_file == self.ocut:
-                self.logger.info('Reading decomposition into components '
-                                 f'{self.comps} from cache file {file_name}.')
-                c_file = decomp.meta.get('comps', None)
+                self.logger.info(
+                    "Reading decomposition into components "
+                    f"{self.comps} from cache file {file_name}."
+                )
+                c_file = decomp.meta.get("comps", None)
                 if c_file is None:
-                    self.logger.warning(f'Cache file {file_name} has no '
-                                        'component list in meta data. '
-                                        'Recomputing decomposition.')
+                    self.logger.warning(
+                        f"Cache file {file_name} has no "
+                        "component list in meta data. "
+                        "Recomputing decomposition."
+                    )
                     decomp = None
                 elif c_file != self.comps:
-                    self.logger.info('Converting component names in file to '
-                                     'nomenclature defined in names parameter.')
-                    comp_list = decomp['component']
+                    self.logger.info(
+                        "Converting component names in file to "
+                        "nomenclature defined in names parameter."
+                    )
+                    comp_list = decomp["component"]
                     for i, comp in enumerate(self.comps):
-                        comp_list = [s.replace(f'|{c_file[i]}|', f'|{comp}|')
-                                     for s in comp_list]
-                    decomp['component'] = comp_list
-                    decomp.meta['comps'] = self.comps
+                        comp_list = [
+                            s.replace(f"|{c_file[i]}|", f"|{comp}|") for s in comp_list
+                        ]
+                    decomp["component"] = comp_list
+                    decomp.meta["comps"] = self.comps
             else:
-                self.logger.warning('Decomposition cache file found, but ocut '
-                                    f'values differ: {ocut_file} (file) != '
-                                    f'{self.ocut} (input). '
-                                    'Recomputing decomposition.')
+                self.logger.warning(
+                    "Decomposition cache file found, but ocut "
+                    f"values differ: {ocut_file} (file) != "
+                    f"{self.ocut} (input). "
+                    "Recomputing decomposition."
+                )
                 decomp = None
         else:
             decomp = None
         if decomp is None:
             self.decomp = self.decompose_orbits()
             if cache:
-                self.decomp.write(file_name,
-                                  format='ascii.ecsv',
-                                  overwrite=True)
-                self.logger.info('Orbit decomposition information written to '
-                                 f'{file_name}.')
+                self.decomp.write(file_name, format="ascii.ecsv", overwrite=True)
+                self.logger.info(
+                    f"Orbit decomposition information written to {file_name}."
+                )
         else:
             self.decomp = decomp
         if comps_weights:
             self.comps_weights()
 
-    def plot_decomp(self,
-                    xlim=None,
-                    ylim=None,
-                    kin_set=0,
-                    v_sigma_option='fit',
-                    comps_plot='all',
-                    individual_colorbars=False,
-                    figtype='.png',
-                    dpi=100):
-        """ Generate decomposition plots.
+    def plot_decomp(
+        self,
+        xlim=None,
+        ylim=None,
+        kin_set=0,
+        v_sigma_option="fit",
+        comps_plot="all",
+        individual_colorbars=False,
+        figtype=".png",
+        dpi=100,
+    ):
+        """Generate decomposition plots.
 
         Parameters
         ----------
@@ -208,59 +239,65 @@ class Decomposition:
         None.
 
         """
-        mpl.rcParams['savefig.dpi'] = dpi
+        mpl.rcParams["savefig.dpi"] = dpi
         stars = self.config.system.get_unique_triaxial_visible_component()
         n_kin = len(stars.kinematic_data)
         if kin_set >= n_kin:
-            text = f'kin_set must be < {n_kin}, but it is {kin_set}'
+            text = f"kin_set must be < {n_kin}, but it is {kin_set}"
             self.logger.error(text)
             raise ValueError(text)
         self.kin_set = kin_set
-        self.logger.info(f'Creating decomposition plots for kin_set number '
-                         f'{kin_set}: {stars.kinematic_data[kin_set].name}')
+        self.logger.info(
+            f"Creating decomposition plots for kin_set number "
+            f"{kin_set}: {stars.kinematic_data[kin_set].name}"
+        )
         comp_kinem_moments = self.comps_aphist(v_sigma_option)
-        self.logger.info('Component data done. '
-                         f'Plotting decomposition for {v_sigma_option=}.')
+        self.logger.info(
+            f"Component data done. Plotting decomposition for {v_sigma_option=}."
+        )
         weights = self.model.weights
         comps = self.decomp.meta["comps"]
 
-        if comps_plot == 'all':
+        if comps_plot == "all":
             comps_plot = {comp: True for comp in comps}
         for comp in comps:
             if comp not in comps_plot:
                 comps_plot[comp] = False
         for comp in comps_plot:
             if comp not in comps:
-                text = f'Component {comp} in comps_plot not in {comps = }.'
+                text = f"Component {comp} in comps_plot not in {comps = }."
                 self.logger.error(text)
                 raise ValueError(text)
-        self.logger.info(f'Plotting data for components {comps_plot}.')
+        self.logger.info(f"Plotting data for components {comps_plot}.")
 
         if type(individual_colorbars) is bool:
             switch = individual_colorbars
-            individual_colorbars = {k: switch for k in ['sb', 'vel', 'sig']}
+            individual_colorbars = {k: switch for k in ["sb", "vel", "sig"]}
         else:
-            for k in ['sb', 'vel', 'sig']:
+            for k in ["sb", "vel", "sig"]:
                 if k not in individual_colorbars:
                     individual_colorbars[k] = False
 
         dp_args = stars.kinematic_data[self.kin_set].dp_args
-        xi = dp_args['x']
-        yi = dp_args['y']
-        dx = dp_args['dx']
-        grid = dp_args['idx_bin_to_pix']
+        xi = dp_args["x"]
+        yi = dp_args["y"]
+        dx = dp_args["dx"]
+        grid = dp_args["idx_bin_to_pix"]
         # The angle that is saved in this file is measured counter clock-wise
         # from the galaxy major axis to the X-axis of the input data.
-        angle_deg = dp_args['angle']
-        self.logger.debug(f'Pixel grid dimension is {dx=}, {len(xi)=}, '
-                          f'{len(yi)=}, {grid.shape}, {angle_deg=}.')
+        angle_deg = dp_args["angle"]
+        self.logger.debug(
+            f"Pixel grid dimension is {dx=}, {len(xi)=}, "
+            f"{len(yi)=}, {grid.shape}, {angle_deg=}."
+        )
 
         if xlim is None:
             xlim = np.max(np.abs(xi))
         if ylim is None:
             ylim = np.max(np.abs(yi))
-        s = np.ravel(np.where((grid >= 0) & (np.abs(xi) <= xlim)
-                              & (np.abs(yi) <= ylim)))
+        s = np.ravel(
+            np.where((grid >= 0) & (np.abs(xi) <= xlim) & (np.abs(yi) <= ylim))
+        )
         s_wide = np.ravel(np.where(grid >= 0))
 
         vel = []
@@ -273,14 +310,15 @@ class Decomposition:
         max_sig = {}
         last_comps_idx = len(comps) - 1
         for c_idx, comp in enumerate(comps):
-            labels = [col for col in comp_kinem_moments.colnames
-                          if col.startswith(comp)]
+            labels = [
+                col for col in comp_kinem_moments.colnames if col.startswith(comp)
+            ]
             flux = comp_kinem_moments[labels[0]]
-            w = weights[[f'|{comp}|' in s for s in self.decomp['component']]]
+            w = weights[[f"|{comp}|" in s for s in self.decomp["component"]]]
             fhist, fbinedge = np.histogram(grid[s_wide], bins=len(flux))
             flux = flux / fhist
-            tt = flux[grid]*1.
-            tt = tt * np.sum(w)/np.sum(tt)
+            tt = flux[grid] * 1.0
+            tt = tt * np.sum(w) / np.sum(tt)
             t.append(tt.copy())
             vel.append(comp_kinem_moments[labels[1]])
             sig.append(comp_kinem_moments[labels[2]])
@@ -297,14 +335,14 @@ class Decomposition:
                 # maxs = max_sig[comp]
                 totalf = np.sum(tt)  # tt here refers to the 'all' comp
 
-        t = t/totalf
+        t = t / totalf
         for comp in comps:
-            if not individual_colorbars['sb']:
+            if not individual_colorbars["sb"]:
                 min_flux[comp] = min(min_flux[c] for c in comps)
                 max_flux[comp] = max(max_flux[c] for c in comps)
-            if not individual_colorbars['vel']:
+            if not individual_colorbars["vel"]:
                 max_vel[comp] = max(max_vel[c] for c in comps)
-            if not individual_colorbars['sig']:
+            if not individual_colorbars["sig"]:
                 min_sig[comp] = min(min_sig[c] for c in comps)
                 max_sig[comp] = max(max_sig[c] for c in comps)
 
@@ -319,96 +357,120 @@ class Decomposition:
         # smax = np.nanmax(sig_t[sig_t > 0])
         # smin = np.nanmin(sig_t[sig_t > 0])
 
-        xi_t=(xi[s])
-        yi_t=(yi[s])
+        xi_t = xi[s]
+        yi_t = yi[s]
 
-        table = {'x/arcs':xi_t,'y/arcs':yi_t}
+        table = {"x/arcs": xi_t, "y/arcs": yi_t}
         for c_idx, comp in enumerate(comps):
-            labels = [col for col in comp_kinem_moments.colnames
-                          if col.startswith(comp)]
-            table.update({labels[0]:t[c_idx][s],
-                         labels[1]:vel[c_idx][grid[s]],
-                         labels[2]:sig[c_idx][grid[s]]})
+            labels = [
+                col for col in comp_kinem_moments.colnames if col.startswith(comp)
+            ]
+            table.update(
+                {
+                    labels[0]: t[c_idx][s],
+                    labels[1]: vel[c_idx][grid[s]],
+                    labels[2]: sig[c_idx][grid[s]],
+                }
+            )
         comps_kin = astropy.table.Table(table)
 
         kin_name = stars.kinematic_data[self.kin_set].name
-        file_name = f'comps_kin_{v_sigma_option}_{kin_name}'
-        table_file_name = self.model.directory + file_name + '.ecsv'
-        plot_file_name = self.config.settings.io_settings['plot_directory'] \
-                         + file_name \
-                         + figtype
-        comps_kin.write(table_file_name, format='ascii.ecsv', overwrite=True)
-        self.logger.info('Component grid kinematics written to '
-                         f'{table_file_name}.')
+        file_name = f"comps_kin_{v_sigma_option}_{kin_name}"
+        table_file_name = self.model.directory + file_name + ".ecsv"
+        plot_file_name = (
+            self.config.settings.io_settings["plot_directory"] + file_name + figtype
+        )
+        comps_kin.write(table_file_name, format="ascii.ecsv", overwrite=True)
+        self.logger.info(f"Component grid kinematics written to {table_file_name}.")
 
-        self.logger.debug(f'{v_sigma_option}: {min_flux=}, {max_flux=}, '
-                          f'{max_vel=}, {min_sig=}, {max_sig=}.')
+        self.logger.debug(
+            f"{v_sigma_option}: {min_flux=}, {max_flux=}, "
+            f"{max_vel=}, {min_sig=}, {max_sig=}."
+        )
 
         c_skipped = len([comp for comp in comps_plot if not comps_plot[comp]])
         LL = len(comps) - c_skipped
-        map1 = cmr.get_sub_cmap('twilight_shifted', 0.05, 0.6)
-        map2 = cmr.get_sub_cmap('twilight_shifted', 0.05, 0.95)
+        map1 = cmr.get_sub_cmap("twilight_shifted", 0.05, 0.6)
+        map2 = cmr.get_sub_cmap("twilight_shifted", 0.05, 0.95)
         # titles = ['THIN DISK','THICK DISK','DISK','BULGE','ALL']
         # compon = np.array(['thin_d','thick_d','disk','bulge','all'])
-        titles = [c.replace('_disk', ' disk').replace('_d', ' disk').replace('_',' ')
-                  for c in comps]
+        titles = [
+            c.replace("_disk", " disk").replace("_d", " disk").replace("_", " ")
+            for c in comps
+        ]
         compon = np.array(comps)
-        kwtext = dict(size=20, ha='center', va='center', rotation=90.)
-        kw_display1 = dict(pixelsize=dx, colorbar=True,
-                                  nticks=7, cmap=map1)
-        kw_display2 = dict(pixelsize=dx, colorbar=True,
-                                  nticks=7, cmap=map2)
+        kwtext = dict(size=20, ha="center", va="center", rotation=90.0)
+        kw_display1 = dict(pixelsize=dx, colorbar=True, nticks=7, cmap=map1)
+        kw_display2 = dict(pixelsize=dx, colorbar=True, nticks=7, cmap=map2)
 
-        plt.figure(figsize=(16, int((LL+2)*3)*ylim/xlim))
-        plt.subplots_adjust(hspace=0.7, wspace=0.01, left=0.01,
-                            bottom=0.05, top=0.99, right=0.99)
+        plt.figure(figsize=(16, int((LL + 2) * 3) * ylim / xlim))
+        plt.subplots_adjust(
+            hspace=0.7, wspace=0.01, left=0.01, bottom=0.05, top=0.99, right=0.99
+        )
 
         i_plot = 0
         for c_idx, comp in enumerate(comps):
             if not comps_plot[comp]:
                 continue
-            ax = plt.subplot(LL, 3, 3*i_plot+1)
+            ax = plt.subplot(LL, 3, 3 * i_plot + 1)
             if i_plot == 0:
-                ax.set_title('surface brightness (log)',fontsize=20,pad=20)
+                ax.set_title("surface brightness (log)", fontsize=20, pad=20)
             t_comp = np.full_like(t[c_idx][s], np.nan)
-            np.log10(t[c_idx][s], where=(t[c_idx][s]>0), out=t_comp)
-            display_pixels(xi_t,
-                           yi_t,
-                           t_comp - max_flux[comp],
-                           vmin=min_flux[comp]-max_flux[comp],
-                           vmax=0,
-                           **kw_display1)
-            ax.text(-0.32, 0.5, titles[np.where(compon==comp)[0][0]],
-                    **kwtext, transform=ax.transAxes)
-            ax.set_ylabel('arcsec')
+            np.log10(t[c_idx][s], where=(t[c_idx][s] > 0), out=t_comp)
+            display_pixels(
+                xi_t,
+                yi_t,
+                t_comp - max_flux[comp],
+                vmin=min_flux[comp] - max_flux[comp],
+                vmax=0,
+                **kw_display1,
+            )
+            ax.text(
+                -0.32,
+                0.5,
+                titles[np.where(compon == comp)[0][0]],
+                **kwtext,
+                transform=ax.transAxes,
+            )
+            ax.set_ylabel("arcsec")
             if i_plot == LL - 1:
-                ax.set_xlabel('arcsec')
+                ax.set_xlabel("arcsec")
 
-            ax = plt.subplot(LL, 3, 3*i_plot+2)
+            ax = plt.subplot(LL, 3, 3 * i_plot + 2)
             if i_plot == 0:
-                plt.title('velocity',fontsize=20,pad=20)
-            display_pixels(xi_t, yi_t, vel[c_idx][grid[s]],
-                           vmin=-1.0*max_vel[comp], vmax=max_vel[comp],
-                           **kw_display2)
+                plt.title("velocity", fontsize=20, pad=20)
+            display_pixels(
+                xi_t,
+                yi_t,
+                vel[c_idx][grid[s]],
+                vmin=-1.0 * max_vel[comp],
+                vmax=max_vel[comp],
+                **kw_display2,
+            )
             if i_plot == LL - 1:
-                ax.set_xlabel('arcsec')
+                ax.set_xlabel("arcsec")
 
-            ax = plt.subplot(LL, 3, 3*i_plot+3)
+            ax = plt.subplot(LL, 3, 3 * i_plot + 3)
             if i_plot == 0:
-                plt.title('velocity dispersion',fontsize=20,pad=20)
-            display_pixels(xi_t, yi_t, sig[c_idx][grid[s]],
-                           vmin=min_sig[comp], vmax=max_sig[comp],
-                           **kw_display1)
+                plt.title("velocity dispersion", fontsize=20, pad=20)
+            display_pixels(
+                xi_t,
+                yi_t,
+                sig[c_idx][grid[s]],
+                vmin=min_sig[comp],
+                vmax=max_sig[comp],
+                **kw_display1,
+            )
             if i_plot == LL - 1:
-                ax.set_xlabel('arcsec')
+                ax.set_xlabel("arcsec")
             i_plot += 1
 
         plt.tight_layout()
         plt.savefig(plot_file_name)
-        self.logger.info(f'Component plots written to {plot_file_name}.')
+        self.logger.info(f"Component plots written to {plot_file_name}.")
         plt.close()
 
-    def comps_aphist(self, v_sigma_option='fit'):
+    def comps_aphist(self, v_sigma_option="fit"):
         """Calculate components' flux, mean velocity, and velocity dispersion.
 
         Parameters
@@ -432,50 +494,58 @@ class Decomposition:
             The chosen v_sigma_option is in the table meta data.
 
         """
-        v_sigma_options = ['moments', 'fit']
+        v_sigma_options = ["moments", "fit"]
         if v_sigma_option not in v_sigma_options:
-            text = f'Unknown v_sigma_option {v_sigma_option}, ' \
-                   f'must be one of {v_sigma_options}.'
+            text = (
+                f"Unknown v_sigma_option {v_sigma_option}, "
+                f"must be one of {v_sigma_options}."
+            )
             self.logger.error(text)
             raise ValueError(text)
-        self.logger.info('Calculating flux, v, and sigma for components '
-                         f'{self.decomp.meta["comps"]}, {v_sigma_option=}.')
+        self.logger.info(
+            "Calculating flux, v, and sigma for components "
+            f"{self.decomp.meta['comps']}, {v_sigma_option=}."
+        )
         # Get losvd_histograms and projected_masses
         self.orblib.read_vel_histograms()
         losvd_histograms = self.orblib.vel_histograms[self.kin_set]
         proj_mass = self.orblib.projected_masses[self.kin_set]
-        self.logger.debug(f'{losvd_histograms.y.shape=}, {proj_mass.shape=}.')
+        self.logger.debug(f"{losvd_histograms.y.shape=}, {proj_mass.shape=}.")
         comp_flux_v_sigma = astropy.table.Table(
-                            {'ap_id':range(losvd_histograms.y.shape[-1])},
-                            dtype=[int],
-                            meta={'v_sigma_option':v_sigma_option})
-        for comp in self.decomp.meta['comps']:
-            self.logger.info(f'Component {comp}...')
+            {"ap_id": range(losvd_histograms.y.shape[-1])},
+            dtype=[int],
+            meta={"v_sigma_option": v_sigma_option},
+        )
+        for comp in self.decomp.meta["comps"]:
+            self.logger.info(f"Component {comp}...")
             # calculate flux and losvd histograms for component
-            orb_sel = np.array([f'|{comp}|' in s
-                                for s in self.decomp['component']],
-                               dtype=bool)
+            orb_sel = np.array(
+                [f"|{comp}|" in s for s in self.decomp["component"]], dtype=bool
+            )
             flux = np.dot(proj_mass[orb_sel].T, self.model.weights[orb_sel])
-            losvd = np.dot(losvd_histograms.y[orb_sel,:,:].T,
-                           self.model.weights[orb_sel]).T
+            losvd = np.dot(
+                losvd_histograms.y[orb_sel, :, :].T, self.model.weights[orb_sel]
+            ).T
             losvd = losvd[np.newaxis]
-            self.logger.debug(f'{comp}: {np.count_nonzero(orb_sel)} orbits, '
-                              f'{flux.shape=}, {losvd.shape=}.')
-            losvd_hist = dyn.kinematics.Histogram(losvd_histograms.xedg,
-                                                  y=losvd)
-            if v_sigma_option == 'moments':
-                v_mean, v_sigma = (np.squeeze(x) for x in
-                                   losvd_hist.get_sigma(get_mean=True))
-            elif v_sigma_option == 'fit':
+            self.logger.debug(
+                f"{comp}: {np.count_nonzero(orb_sel)} orbits, "
+                f"{flux.shape=}, {losvd.shape=}."
+            )
+            losvd_hist = dyn.kinematics.Histogram(losvd_histograms.xedg, y=losvd)
+            if v_sigma_option == "moments":
+                v_mean, v_sigma = (
+                    np.squeeze(x) for x in losvd_hist.get_sigma(get_mean=True)
+                )
+            elif v_sigma_option == "fit":
                 v_mean, v_sigma = losvd_hist.get_mean_sigma_gaussfit()
                 v_mean = np.squeeze(v_mean)
                 v_sigma = np.squeeze(v_sigma)
             else:
                 pass
-            comp_flux_v_sigma.add_columns([flux, v_mean, v_sigma],
-                                           names=[f'{comp}_lsb',
-                                                  f'{comp}_v',
-                                                  f'{comp}_sig'])
+            comp_flux_v_sigma.add_columns(
+                [flux, v_mean, v_sigma],
+                names=[f"{comp}_lsb", f"{comp}_v", f"{comp}_sig"],
+            )
             # Important: the sequence of lsb - v - sig matters!
         return comp_flux_v_sigma
 
@@ -503,33 +573,37 @@ class Decomposition:
         if ocut is None:
             ocut = self.ocut
         else:
-            self.logger.warning('Argument ocut is DEPRECATED and will be '
-                                'removed in the next major release. Use '
-                                'ocut= when instatiating the '
-                                f'{__class__.__name__} object.')
-        self.logger.debug(f'Cut lines are: {ocut}.')
-        file2 = self.model.directory_noml + 'datfil/orblib.dat_orbclass.out'
-        file3 = self.model.directory_noml + 'datfil/orblibbox.dat_orbclass.out'
+            self.logger.warning(
+                "Argument ocut is DEPRECATED and will be "
+                "removed in the next major release. Use "
+                "ocut= when instatiating the "
+                f"{__class__.__name__} object."
+            )
+        self.logger.debug(f"Cut lines are: {ocut}.")
+        file2 = self.model.directory_noml + "datfil/orblib.dat_orbclass.out"
+        file3 = self.model.directory_noml + "datfil/orblibbox.dat_orbclass.out"
         file3_test = os.path.isfile(file3)
         if not file3_test:
-            file3 = '%s' % file2
+            file3 = "%s" % file2
 
-        n_orb = self.config.settings.orblib_settings['nE'] * \
-                self.config.settings.orblib_settings['nI2'] * \
-                self.config.settings.orblib_settings['nI3']
-        n_dither = self.config.settings.orblib_settings['dithering']
-        conversion_factor=self.config.system.distMPc*1.0e6*1.49598e8
+        n_orb = (
+            self.config.settings.orblib_settings["nE"]
+            * self.config.settings.orblib_settings["nI2"]
+            * self.config.settings.orblib_settings["nI3"]
+        )
+        n_dither = self.config.settings.orblib_settings["dithering"]
+        conversion_factor = self.config.system.distMPc * 1.0e6 * 1.49598e8
 
-        ncol = n_dither ** 3
-        orbclass1=self.orblib.read_orbit_property_file_base(file2, ncol, n_orb)
-        orbclass2=self.orblib.read_orbit_property_file_base(file3, ncol, n_orb)
+        ncol = n_dither**3
+        orbclass1 = self.orblib.read_orbit_property_file_base(file2, ncol, n_orb)
+        orbclass2 = self.orblib.read_orbit_property_file_base(file3, ncol, n_orb)
 
         orbw = self.model.weights
         n_orbs = len(orbw)
-        self.logger.debug(f'{n_orb=}, {n_orbs=}.')
+        self.logger.debug(f"{n_orb=}, {n_orbs=}.")
 
         orbclass = np.dstack((orbclass1, orbclass1, orbclass2))
-        self.logger.debug(f'{len(orbclass) = }.')
+        self.logger.debug(f"{len(orbclass) = }.")
         orbclass1a = np.copy(orbclass1)
         orbclass1a[0:3, :, :] *= -1  # the reverse rotating orbits of orbclass
 
@@ -538,70 +612,72 @@ class Decomposition:
             orbclass[:, :, i * 2 + 1] = orbclass1a[:, :, i]
 
         ## define circularity of each orbit [nditcher^3, n_orb]
-        lz = (orbclass[2, :, :] / orbclass[3, :, :] / np.sqrt(orbclass[4, :, :]))
+        lz = orbclass[2, :, :] / orbclass[3, :, :] / np.sqrt(orbclass[4, :, :])
 
         # Average values for the orbits in the same bundle (n_dither^3).
         # Only include the orbits within Rmax_arcs
-        rm = np.sum(orbclass[3, :, :]/conversion_factor, axis=0) / n_dither**3
+        rm = np.sum(orbclass[3, :, :] / conversion_factor, axis=0) / n_dither**3
 
         # flip the sign of lz to confirm total(lz) > 0
         t = np.ravel(np.argsort(rm))
 
         yy = np.max(np.ravel(np.where(np.cumsum(orbw[t]) <= 0.5)))
         k = t[0:yy]
-        if np.sum(np.sum(lz[:, k], axis=0) / (n_dither ** 3) * orbw[k]) < 0:
+        if np.sum(np.sum(lz[:, k], axis=0) / (n_dither**3) * orbw[k]) < 0:
             lz *= -1.0
 
-        lzm_sign= np.sum(lz, axis=0) / n_dither ** 3
+        lzm_sign = np.sum(lz, axis=0) / n_dither**3
 
-        self.logger.info(f'Decomposing {n_orbs} orbits into {comps=}...')
-        decomp = astropy.table.Table({'id':range(n_orbs),
-                                      'component':['']*n_orbs},
-                                     dtype=[int, 'U256'],
-                                     meta={'comps':comps, 'ocut':ocut})
+        self.logger.info(f"Decomposing {n_orbs} orbits into {comps=}...")
+        decomp = astropy.table.Table(
+            {"id": range(n_orbs), "component": [""] * n_orbs},
+            dtype=[int, "U256"],
+            meta={"comps": comps, "ocut": ocut},
+        )
         # map components
         comp_map = np.zeros(n_orbs, dtype=int)
         # cold component (thin disk)
-        comp_map[np.ravel(np.where(lzm_sign > ocut[0]))] += 2 ** 0
+        comp_map[np.ravel(np.where(lzm_sign > ocut[0]))] += 2**0
         # warm component (thick disk)
-        comp_map[np.ravel(np.where((lzm_sign > ocut[1])
-                                 & (lzm_sign <= ocut[0])))] += 2 ** 1
+        comp_map[np.ravel(np.where((lzm_sign > ocut[1]) & (lzm_sign <= ocut[0])))] += (
+            2**1
+        )
         # hot component (bulge)
-        comp_map[np.ravel(np.where((lzm_sign > ocut[2])
-                                 & (lzm_sign <= ocut[1])))] += 2 ** 6
+        comp_map[np.ravel(np.where((lzm_sign > ocut[2]) & (lzm_sign <= ocut[1])))] += (
+            2**6
+        )
         # disk component (disk)
-        comp_map[np.ravel(np.where(lzm_sign > ocut[1]))] += 2 ** 2
+        comp_map[np.ravel(np.where(lzm_sign > ocut[1]))] += 2**2
         # counter-rotating cold component (cr thin disk)
-        comp_map[np.ravel(np.where(lzm_sign <= ocut[3]))] += 2 ** 3
+        comp_map[np.ravel(np.where(lzm_sign <= ocut[3]))] += 2**3
         # counter-rotating warm component (cr thick disk)
-        comp_map[np.ravel(np.where((lzm_sign > ocut[3])
-                                 & (lzm_sign <= ocut[2])))] += 2 ** 4
+        comp_map[np.ravel(np.where((lzm_sign > ocut[3]) & (lzm_sign <= ocut[2])))] += (
+            2**4
+        )
         # counter-rotating disk (cr disk)
-        comp_map[np.ravel(np.where((lzm_sign <= ocut[2])))] += 2 ** 5
+        comp_map[np.ravel(np.where((lzm_sign <= ocut[2])))] += 2**5
         # whole component (all)
-        comp_map += 2 ** 7
+        comp_map += 2**7
         for i in np.ravel(np.where(comp_map > 0)):
             for k, comp in enumerate(comps):
                 if comp_map[i] & (1 << k):
-                    decomp['component'][i] += f'|{comp}|'
+                    decomp["component"][i] += f"|{comp}|"
         return decomp
 
     def comps_weights(self):
-        """ Write a table of aggregated weights in each component.
-        """
+        """Write a table of aggregated weights in each component."""
         weights = self.model.weights
         comps = self.decomp.meta["comps"]
         comps_weights = []
         for comp in comps:
-            w = weights[[f'|{comp}|' in s for s in self.decomp['component']]]
+            w = weights[[f"|{comp}|" in s for s in self.decomp["component"]]]
             comps_weights.append(sum(w))
-        weights_table = astropy.table.Table([comps, comps_weights],
-                                            names=('component', 'weight'),
-                                            dtype=['U256', float])
-        file_name = self.model.directory + 'comps_weights.ecsv'
-        weights_table.write(file_name, format='ascii.ecsv', overwrite=True)
-        self.logger.info(f'Component aggregate weights written to {file_name}.')
-
+        weights_table = astropy.table.Table(
+            [comps, comps_weights], names=("component", "weight"), dtype=["U256", float]
+        )
+        file_name = self.model.directory + "comps_weights.ecsv"
+        weights_table.write(file_name, format="ascii.ecsv", overwrite=True)
+        self.logger.info(f"Component aggregate weights written to {file_name}.")
 
 
 class Analysis:
@@ -619,10 +695,9 @@ class Analysis:
     """
 
     def __init__(self, config, model=None, kin_set=0):
-        self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+        self.logger = logging.getLogger(f"{__name__}.{__class__.__name__}")
         if config is None:
-            text = f'{__class__.__name__} needs configuration object, ' \
-                   'None provided.'
+            text = f"{__class__.__name__} needs configuration object, None provided."
             self.logger.error(text)
             raise ValueError(text)
         if model is None:
@@ -632,16 +707,18 @@ class Analysis:
         self.model = model
         self.kin_set = kin_set
 
-    def get_orbit_bundle_maps(self,
-                              model=None,
-                              kin_set=None,
-                              pop_set=None,
-                              weights=None,
-                              bundle_mapping=None,
-                              normalize=False,
-                              flux_as='table',
-                              create_figure=False,
-                              figtype='.png'):
+    def get_orbit_bundle_maps(
+        self,
+        model=None,
+        kin_set=None,
+        pop_set=None,
+        weights=None,
+        bundle_mapping=None,
+        normalize=False,
+        flux_as="table",
+        create_figure=False,
+        figtype=".png",
+    ):
         """
         Generates an astropy table that holds the weight-contribution of the
         orbit bundles defined in bundle_mapping to the model's projected mass
@@ -730,10 +807,10 @@ class Analysis:
 
         """
         if bundle_mapping is None:
-            txt = 'No bundle_mapping provided, cannot calculate flux.'
+            txt = "No bundle_mapping provided, cannot calculate flux."
             self.logger.error(txt)
             raise ValueError(txt)
-        if flux_as not in ['table', 'file', 'both']:
+        if flux_as not in ["table", "file", "both"]:
             txt = f"{flux_as=} but must be either 'table', 'file', or 'both'."
             self.logger.error(txt)
             raise ValueError(txt)
@@ -743,22 +820,22 @@ class Analysis:
         if isinstance(kin_set, int) or (kin_set is None and pop_set is None):
             if kin_set is None:
                 kin_set = self.kin_set
-            self.logger.debug(f'Using kinematics set {kin_set} for spatial '
-                              'binning.')
+            self.logger.debug(f"Using kinematics set {kin_set} for spatial binning.")
             kin = True
             kinpop_name = stars.kinematic_data[kin_set].name
         elif kin_set is None and isinstance(pop_set, int):
-            self.logger.debug(f'Using populations set {pop_set} for spatial '
-                              'binning.')
+            self.logger.debug(f"Using populations set {pop_set} for spatial binning.")
             kin = False
             kinpop_name = stars.population_data[pop_set].name
         else:
-            text = f'Invalid {kin_set=}, {pop_set=}. ' \
-                   'Choose (kin_set, pop_set) = ' \
-                   '(None, None), (None, <int>), or (<int>, None).'
+            text = (
+                f"Invalid {kin_set=}, {pop_set=}. "
+                "Choose (kin_set, pop_set) = "
+                "(None, None), (None, <int>), or (<int>, None)."
+            )
             self.logger.error(text)
             raise ValueError(text)
-        self.logger.info('Getting model projected masses.')
+        self.logger.info("Getting model projected masses.")
         orblib = model.get_orblib()
         if weights is None:
             _ = model.get_weights(orblib)
@@ -766,34 +843,34 @@ class Analysis:
         # Get projected masses if necessary
         # and calculate flux. flux.shape = (n_bundles, n_aperture)
         if kin:
-            if not hasattr(orblib, 'projected_masses'):
+            if not hasattr(orblib, "projected_masses"):
                 orblib.read_vel_histograms()  # default is pops=False
             flux = np.matmul(bundle_mapping, orblib.projected_masses[kin_set])
         else:
             # If kin is False, we need to read the projected masses binned for
             # the populations.
             orblib.read_vel_histograms(pops=True)
-            flux = np.matmul(bundle_mapping,
-                             orblib.pops_projected_masses[pop_set])
+            flux = np.matmul(bundle_mapping, orblib.pops_projected_masses[pop_set])
         flux_all = np.sum(flux, axis=0)
         if normalize:
             # Normalize fluxes to total flux in each aperture,
             # deal with zero flux apertures
-            flux = np.divide(flux,
-                             flux_all[np.newaxis, :],
-                             where=flux_all[np.newaxis, :] != 0)
+            flux = np.divide(
+                flux, flux_all[np.newaxis, :], where=flux_all[np.newaxis, :] != 0
+            )
         n_bundles = bundle_mapping.shape[0]  # number of orbit bundles
         map_table = astropy.table.Table(
-            np.hstack((flux.T, flux_all[:,np.newaxis])),
-            names = [f'flux_{i:03d}' for i in range(n_bundles)] + ['flux_all'],
-            meta={('kin_set' if kin else 'pop_set'): kinpop_name})
+            np.hstack((flux.T, flux_all[:, np.newaxis])),
+            names=[f"flux_{i:03d}" for i in range(n_bundles)] + ["flux_all"],
+            meta={("kin_set" if kin else "pop_set"): kinpop_name},
+        )
         # Create surface brightness maps if requested
         if create_figure:
             if kin:  # get mapping aperture -> pixel, grid.shape=(n_pixels,)
-                grid = stars.kinematic_data[kin_set].dp_args['idx_bin_to_pix']
+                grid = stars.kinematic_data[kin_set].dp_args["idx_bin_to_pix"]
                 map_plotter = stars.kinematic_data[kin_set].get_map_plotter()
             else:
-                grid = stars.population_data[pop_set].dp_args['idx_bin_to_pix']
+                grid = stars.population_data[pop_set].dp_args["idx_bin_to_pix"]
                 map_plotter = stars.population_data[pop_set].get_map_plotter()
             # count multiplicity of each aperture in aperture->pixel mapping
             # bin_mult.shape=(n_aperture,)
@@ -804,11 +881,9 @@ class Analysis:
             if (n_bundles + 1) % 5 > 0:
                 fig_rows += 1
             fig = plt.figure(figsize=(30, 30 / fig_cols * fig_rows * 0.6))
-            fig.subplots_adjust(wspace=0.5,
-                                left=1/30,
-                                bottom=0.05,
-                                top=0.99,
-                                right=29/30)
+            fig.subplots_adjust(
+                wspace=0.5, left=1 / 30, bottom=0.05, top=0.99, right=29 / 30
+            )
             for i, colname in enumerate(map_table.colnames):
                 ax = plt.subplot(fig_rows, fig_cols, i + 1)
                 # divide aperture flux by number of pixels in aperture
@@ -817,43 +892,46 @@ class Analysis:
                 flux[flux > 0] = flux[flux > 0] / max(flux)
                 flux[flux == 0] = np.nan  # deal with zero fluxes for log10
                 flux = np.log10(flux, where=flux is not np.nan)
-                map_plotter(flux,
-                            vmin=min(flux),
-                            vmax=max(flux),
-                            label='surface brightness (log)',
-                            colorbar=True,
-                            cmap=cmr.get_sub_cmap('twilight_shifted',
-                                                  0.05,
-                                                  0.6))
-                ax.set_title(f'{colname}')
-                ax.set_xlabel('x [arcsec]')
-                ax.set_ylabel('y [arcsec]')
-            f_name = f'bundle_sb_maps_{"kin" if kin else "pop"}_{kinpop_name}'
-            f_name = self.config.settings.io_settings['plot_directory'] \
-                     + f_name \
-                     + figtype
+                map_plotter(
+                    flux,
+                    vmin=min(flux),
+                    vmax=max(flux),
+                    label="surface brightness (log)",
+                    colorbar=True,
+                    cmap=cmr.get_sub_cmap("twilight_shifted", 0.05, 0.6),
+                )
+                ax.set_title(f"{colname}")
+                ax.set_xlabel("x [arcsec]")
+                ax.set_ylabel("y [arcsec]")
+            f_name = f"bundle_sb_maps_{'kin' if kin else 'pop'}_{kinpop_name}"
+            f_name = (
+                self.config.settings.io_settings["plot_directory"] + f_name + figtype
+            )
             fig.savefig(f_name)
-            self.logger.info(f'Orbit bundle maps written to {f_name}.')
+            self.logger.info(f"Orbit bundle maps written to {f_name}.")
         # Write the flux table to disk or return it
-        if flux_as == 'table':
+        if flux_as == "table":
             return (map_table, fig) if create_figure else map_table
-        f_name = f'{model.directory}orbit_bundle_flux_{kinpop_name}.ecsv'
-        map_table.write(f_name, format='ascii.ecsv', overwrite=True)
-        self.logger.info('Flux for orbit bundles binned for ' +
-                         ('kinematics ' if kin else 'populations ') +
-                         f'{kinpop_name} written to {f_name}.')
-        if flux_as == 'file':
+        f_name = f"{model.directory}orbit_bundle_flux_{kinpop_name}.ecsv"
+        map_table.write(f_name, format="ascii.ecsv", overwrite=True)
+        self.logger.info(
+            "Flux for orbit bundles binned for "
+            + ("kinematics " if kin else "populations ")
+            + f"{kinpop_name} written to {f_name}."
+        )
+        if flux_as == "file":
             return (f_name, fig) if create_figure else f_name
-        return (map_table,f_name,fig) if create_figure else (map_table,f_name)
+        return (map_table, f_name, fig) if create_figure else (map_table, f_name)
 
-
-    def get_gh_model_kinematic_maps(self,
-                                    model=None,
-                                    kin_set=None,
-                                    v_sigma_option='fit',
-                                    kinematics_as='table',
-                                    weights=None,
-                                    orblib=None):
+    def get_gh_model_kinematic_maps(
+        self,
+        model=None,
+        kin_set=None,
+        v_sigma_option="fit",
+        kinematics_as="table",
+        weights=None,
+        orblib=None,
+    ):
         """
         Generates an astropy table that holds the
         model's data for creating Gauss-Hermite kinematic maps:
@@ -907,79 +985,95 @@ class Analysis:
             model = self.model
         if kin_set is None:
             kin_set = self.kin_set
-        if v_sigma_option not in ['moments', 'fit']:
+        if v_sigma_option not in ["moments", "fit"]:
             txt = f"{v_sigma_option=} but must be either 'fit' or 'moments'."
             self.logger.error(txt)
             raise ValueError(txt)
-        if kinematics_as not in ['table', 'file', 'both']:
-            txt = f"{kinematics_as=} but must be either 'table', 'file', or " \
-                   "'both'."
+        if kinematics_as not in ["table", "file", "both"]:
+            txt = f"{kinematics_as=} but must be either 'table', 'file', or 'both'."
             self.logger.error(txt)
             raise ValueError(txt)
         stars = self.config.system.get_unique_triaxial_visible_component()
         kin_name = stars.kinematic_data[kin_set].name
-        self.logger.info('Getting projected masses and losvds for kinematics '
-                         f'{kin_name} and model {model.directory}.')
+        self.logger.info(
+            "Getting projected masses and losvds for kinematics "
+            f"{kin_name} and model {model.directory}."
+        )
         if orblib is None:
             orblib = model.get_orblib()
         if weights is None:
             _ = model.get_weights(orblib)
             weights = model.weights
         # get losvd_histograms and projected masses if necessary:
-        if not (hasattr(orblib, 'vel_histograms')
-                and hasattr(orblib, 'projected_masses')):
+        if not (
+            hasattr(orblib, "vel_histograms") and hasattr(orblib, "projected_masses")
+        ):
             orblib.read_vel_histograms()
         # get all orbits' losvds; orbits_losvd.shape = n_orb,n_vbin,n_aperture
-        orbits_losvd = orblib.vel_histograms[kin_set].y[:,:,]
+        orbits_losvd = orblib.vel_histograms[kin_set].y[
+            :,
+            :,
+        ]
         # weighted sum of orbits_losvd; model_losvd.shape = 1,n_vbin,n_aperture
         model_losvd = np.dot(orbits_losvd.T, weights).T[np.newaxis]
-        #model_losvd /= np.sum(model_losvd, 0) # normalisation not necessary
-        model_proj_masses = np.dot(orblib.projected_masses[kin_set].T,
-                                   weights) # .shape = n_aperture
+        # model_losvd /= np.sum(model_losvd, 0) # normalisation not necessary
+        model_proj_masses = np.dot(
+            orblib.projected_masses[kin_set].T, weights
+        )  # .shape = n_aperture
         # calculate v_mean and v_sigma values from the losvd histograms
-        model_losvd_hist = \
-            dyn.kinematics.Histogram(xedg=orblib.vel_histograms[kin_set].xedg,
-                                     y=model_losvd)
-        if v_sigma_option == 'moments':
-            v_mean, v_sigma = (np.squeeze(x) for x in
-                               model_losvd_hist.get_sigma(get_mean=True))
-            v_sig_text = 'losvd moments'
-        elif v_sigma_option == 'fit':
+        # xedg can arrive as a tuple (some streamed-read paths store edges
+        # that way); Histogram needs array arithmetic on it
+        model_losvd_hist = dyn.kinematics.Histogram(
+            xedg=np.asarray(orblib.vel_histograms[kin_set].xedg), y=model_losvd
+        )
+        if v_sigma_option == "moments":
+            v_mean, v_sigma = (
+                np.squeeze(x) for x in model_losvd_hist.get_sigma(get_mean=True)
+            )
+            v_sig_text = "losvd moments"
+        elif v_sigma_option == "fit":
             v_mean, v_sigma = model_losvd_hist.get_mean_sigma_gaussfit()
             v_mean = np.squeeze(v_mean)
             v_sigma = np.squeeze(v_sigma)
-            v_sig_text = 'fitted Gaussians'
+            v_sig_text = "fitted Gaussians"
         else:
             pass
-        self.logger.debug(f'Calculated v_mean and v_sigma from {v_sig_text} '
-                          f'for {len(v_mean)} apertures.')
-        gh_table = astropy.table.Table([model_proj_masses, v_mean, v_sigma],
-                                       names = ['flux', 'v', 'sigma'],
-                                       meta={'v_sigma_option': v_sigma_option,
-                                             'kin_set': kin_name})
+        self.logger.debug(
+            f"Calculated v_mean and v_sigma from {v_sig_text} "
+            f"for {len(v_mean)} apertures."
+        )
+        gh_table = astropy.table.Table(
+            [model_proj_masses, v_mean, v_sigma],
+            names=["flux", "v", "sigma"],
+            meta={"v_sigma_option": v_sigma_option, "kin_set": kin_name},
+        )
         weight_solver_settings = self.config.settings.weight_solver_settings
-        n_gh = weight_solver_settings['number_GH']
+        n_gh = weight_solver_settings["number_GH"]
         if n_gh > 2:
             # calculate the model's gh expansion coefficients
             gh = dyn.kinematics.GaussHermite()
             gh.data = gh_table
             model_gh_coefficients = gh.transform_orblib_to_observables(
-                            losvd_histograms=model_losvd_hist,
-                            weight_solver_settings=weight_solver_settings)
+                losvd_histograms=model_losvd_hist,
+                weight_solver_settings=weight_solver_settings,
+            )
             # unscale by projected masses (see weight solver)
-            model_gh_coefficients = \
-                (np.squeeze(model_gh_coefficients).T / model_proj_masses).T
+            model_gh_coefficients = (
+                np.squeeze(model_gh_coefficients).T / model_proj_masses
+            ).T
             # add the gh coefficients to the astropy table
-            col_names = [f'h{i}' for i in range(3,n_gh+1)]
-            tab_data = list(model_gh_coefficients[:,2:].T)
+            col_names = [f"h{i}" for i in range(3, n_gh + 1)]
+            tab_data = list(model_gh_coefficients[:, 2:].T)
             gh_table.add_columns(tab_data, names=col_names)
-        if kinematics_as == 'table':
+        if kinematics_as == "table":
             return gh_table
-        f_name = f'{model.directory}model_gh_kins_' + \
-                 f'{kin_name}_{v_sigma_option}.ecsv'
-        gh_table.write(f_name, format='ascii.ecsv', overwrite=True)
-        self.logger.info(f'Model gh kinematics {kin_name}, {n_gh=} '
-                         f'written to {f_name}.')
-        if kinematics_as == 'file':
+        f_name = (
+            f"{model.directory}model_gh_kins_" + f"{kin_name}_{v_sigma_option}.ecsv"
+        )
+        gh_table.write(f_name, format="ascii.ecsv", overwrite=True)
+        self.logger.info(
+            f"Model gh kinematics {kin_name}, {n_gh=} written to {f_name}."
+        )
+        if kinematics_as == "file":
             return f_name
         return (gh_table, f_name)
