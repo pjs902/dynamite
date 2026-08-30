@@ -217,7 +217,25 @@ def merge_files(chunk_files, out_file, kind, n_orbits=None):
     return out_file
 
 
-def merge_orbclass(datfil, fileroot, chunk_tags):
+def _count_orbclass_entries(path):
+    """Whitespace-separated value count of an orbclass file.
+
+    Counted line by line, so memory is bounded by the longest line rather
+    than the file (26 MB at p=45000). Counting VALUES rather than bytes or
+    lines keeps this independent of the Fortran's field widths and line
+    wrapping - only the number of quantities per orbit is contractual.
+    """
+    with open(path, 'rb') as f:
+        return sum(len(line.split()) for line in f)
+
+
+#: values written per orbit bundle per dithered orbit: the five quantities
+#: integrator_moments emits (see analysis.Decomposition's reader, which
+#: indexes orbclass[0..4]).
+ORBCLASS_VALUES_PER_ORBIT = 5
+
+
+def merge_orbclass(datfil, fileroot, chunk_tags, n_orbits=None, dithering=None):
     """Concatenate one orbit family's ``orbclass.out`` chunks.
 
     Unlike the two binary streams this one is text and has no header: the line
@@ -234,6 +252,12 @@ def merge_orbclass(datfil, fileroot, chunk_tags):
         ``'orblib'`` or ``'orblibbox'``
     chunk_tags : list of string
         per-chunk file name suffixes, in ascending orbit order
+    n_orbits : int, optional
+        orbit starting points in the library (``nE*nI2*nI3``). Given with
+        ``dithering``, the merged file is checked for
+        ``5 * dithering**3 * n_orbits`` values before it is installed.
+    dithering : int, optional
+        see ``n_orbits``.
 
     Returns
     -------
@@ -244,6 +268,15 @@ def merge_orbclass(datfil, fileroot, chunk_tags):
     ------
     FileNotFoundError
         if any chunk file is missing, naming the first one.
+    ValueError
+        if the merged file does not hold the expected number of values,
+        which means at least one chunk was truncated - an integrator killed
+        mid-write leaves a SHORT chunk, not a missing one, so the existence
+        check above passes and the short merge would otherwise be installed
+        atomically under the final name and look perfectly valid. Nothing
+        downstream reads this file until orbit classification runs, so
+        without this check the corruption surfaces weeks later, long after
+        the library has been used for weight solves.
 
     """
     parts = [os.path.join(datfil, f'{fileroot}{tag}.dat_orbclass.out')
@@ -259,6 +292,19 @@ def merge_orbclass(datfil, fileroot, chunk_tags):
         for p in parts:
             with open(p, 'rb') as f:
                 shutil.copyfileobj(f, out)
+    if n_orbits is not None and dithering is not None:
+        expected = ORBCLASS_VALUES_PER_ORBIT * int(dithering) ** 3 * int(n_orbits)
+        found = _count_orbclass_entries(tmp)
+        if found != expected:
+            os.remove(tmp)   # never install a short file under the real name
+            raise ValueError(
+                f'{out_file}: merged orbit class file holds {found} values '
+                f'but {expected} were expected '
+                f'(5 x dithering^3={dithering ** 3} x n_orbits={n_orbits}) - '
+                'at least one chunk is truncated, which happens when an '
+                'integrator is killed mid-write. The chunks have been kept; '
+                're-run the integration for this library.'
+            )
     os.replace(tmp, out_file)
     return out_file
 
@@ -298,7 +344,7 @@ def remove_chunks(datfil, fileroot, chunk_tags,
 
 
 def merge_chunks(datfil, fileroot, chunk_tags, n_orbits,
-                 kinds=('qgrid', 'losvd_hist'), out_tag=''):
+                 kinds=('qgrid', 'losvd_hist'), out_tag='', dithering=None):
     """Merge one orbit family's chunk files, and delete the chunks.
 
     Parameters
@@ -344,6 +390,7 @@ def merge_chunks(datfil, fileroot, chunk_tags, n_orbits,
             kind, n_orbits))
     # not returned with the others: this one is text, is not compressed, and is
     # already at its final name, so the caller must not post-process it
-    merge_orbclass(datfil, fileroot, chunk_tags)
+    merge_orbclass(datfil, fileroot, chunk_tags,
+                   n_orbits=n_orbits, dithering=dithering)
     remove_chunks(datfil, fileroot, chunk_tags, kinds)
     return merged

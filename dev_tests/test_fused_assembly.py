@@ -21,9 +21,10 @@ import logging
 import types
 
 import numpy as np
+import pytest
 
 from dynamite import kinematics as dyn_kin
-from dynamite.weight_solvers import NNLS
+from dynamite.weight_solvers import NNLS, NormalEquationAccumulator
 
 N_ORBS = 7
 
@@ -72,6 +73,7 @@ def _make_fake_nnls(dtype):
     fake.adelie_tol = 1e-10
     fake.adelie_gap_tol = 1e-10
     fake.adelie_alm_iters = 5
+    fake.adelie_bvls_max_iters = int(2e5)  # production default
     fake.stream_reads = False
     fake.CRcut = False
     fake.settings = {}
@@ -106,6 +108,7 @@ def _make_fake_nnls(dtype):
         "construct_nnls_matrix_and_rhs",
         "construct_adelie_matrix_and_rhs",
         "_prepare_kinematic_block",
+        "_econ_divide_block",
         "apply_CR_cut",
         "solve_adelie_alm",
     ):
@@ -135,6 +138,7 @@ def _make_fake_orblib():
     return orblib
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
 def test_bitwise(dtype):
     mu = 1e7
     sqrt_mu = np.sqrt(mu)
@@ -154,6 +158,7 @@ def test_bitwise(dtype):
     assert prob.b0 == float(b_ref[0])
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
 def test_alm_end_to_end(dtype):
     """The full new pipeline on synthetic data: fused problem -> ALM ->
     surrogate chi2_vector / KKT, compared against the A-based forms."""
@@ -304,6 +309,7 @@ def test_streamed_reads_orchestration():
     assert np.array_equal(part.projected_masses[0], full.projected_masses[0])
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
 def test_fused_constructor_streaming(dtype):
     """The fused constructor with stream_reads=True must produce bitwise the
     same AdelieProblem as with stream_reads=False on identical data."""
@@ -338,3 +344,59 @@ if __name__ == "__main__":
     test_fused_constructor_streaming(np.float32)
     print("fused constructor streaming OK")
     print("test_fused_assembly OK")
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_gram_chunk_rows_agree(dtype):
+    """Chunking the accumulator feed must not change the answer.
+
+    ``gram_chunk_rows`` bounds the per-set block so a 316125-row kinematic
+    set does not materialize a 106 GiB float64 temporary. The rank-k update
+    is incremental, so splitting a set across several ``acc.add`` calls
+    changes only the order the partial sums are added in -- never the
+    arithmetic. This pins that: the whole-set path (``0``) and a chunk size
+    small enough to split BOTH fake sets must agree to round-off.
+
+    Distinct from ``test_gram_blockwise.py::test_different_block_sizes_agree``,
+    which exercises the accumulator on its own; this one goes through the
+    real constructor, including the per-chunk econ divide, whose row offsets
+    are the part a chunking bug would get wrong.
+    """
+    ref = None
+    for chunk in (0, 1, 3, 7):
+        fake = _make_fake_nnls(dtype)
+        fake.gram_chunk_rows = chunk
+        gp = NNLS.construct_gram_and_rhs_blockwise(fake, _make_fake_orblib())
+        if ref is None:
+            ref = gp
+            continue
+        # float32 input still accumulates in float64; the only difference
+        # between chunkings is summation order
+        assert np.abs(gp.P - ref.P).max() / np.abs(ref.P).max() < 1e-12
+        assert np.abs(gp.q - ref.q).max() / np.abs(ref.q).max() < 1e-12
+        assert np.abs(gp.v - ref.v).max() / np.abs(ref.v).max() < 1e-12
+        assert abs(gp.b_sq_rest - ref.b_sq_rest) <= 1e-12 * abs(ref.b_sq_rest)
+
+
+def test_gram_chunking_bounds_the_block(monkeypatch):
+    """The chunked path must actually hand the accumulator SMALL blocks.
+
+    test_gram_chunk_rows_agree would still pass if chunking silently did
+    nothing, since one whole-set block trivially agrees with itself. This
+    records every block the accumulator is given and asserts the row count
+    is capped -- the property the whole change exists to deliver.
+    """
+    seen = []
+    real_add = NormalEquationAccumulator.add
+
+    def spy(self, A_block, b_block):
+        seen.append(A_block.shape[0])
+        return real_add(self, A_block, b_block)
+
+    monkeypatch.setattr(NormalEquationAccumulator, "add", spy)
+    fake = _make_fake_nnls(np.float64)
+    fake.gram_chunk_rows = 3
+    NNLS.construct_gram_and_rhs_blockwise(fake, _make_fake_orblib())
+    kin_rows = [n for n in seen if n > 0]
+    assert max(kin_rows) <= 5, f"blocks not bounded by chunking: {seen}"
+    assert any(n == 3 for n in seen), f"no full-size chunk seen: {seen}"

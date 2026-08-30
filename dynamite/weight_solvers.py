@@ -1,6 +1,8 @@
 import os
 import copy
+import json
 import time
+import contextlib
 import numpy as np
 from astropy import table
 from astropy.io import ascii
@@ -11,10 +13,14 @@ from scipy import optimize
 
 try:
     import cvxopt
-    from scipy.linalg.lapack import dpotrf, dpotrs
 except ModuleNotFoundError:
     pass
 
+# scipy, not cvxopt: AdmmNonNegSolver needs these and is otherwise
+# cvxopt-free, so importing them under the cvxopt guard would make
+# nnls_solver='admm' die with NameError on a machine without cvxopt -
+# swallowed by solve()'s except Exception into silent nan weights.
+from scipy.linalg.lapack import dpotrf, dpotrs
 from scipy.linalg.blas import dsyrk, dtrmv
 
 try:
@@ -87,6 +93,43 @@ class GramProblem(NamedTuple):
     b0: float  # rhs[0] = total_mass/total_mass_error
 
 
+#: Multiple of the working epsilon used as the per-row round-off floor for
+#: the KKT diagnostics. The textbook backward-error bound on a computed
+#: residual row is ~n*eps*(|A_i|.|w| + |b_i|); n*eps would be far too
+#: permissive at n = 371212, so a fixed modest multiple is used instead - it
+#: only has to separate "identically zero to working precision" from "small
+#: but real", which are many orders apart in practice.
+_KKT_NOISE_EPS_FACTOR = 32.0
+
+
+def _residual_is_all_noise(resid, row_scale, eps):
+    """True when EVERY residual entry sits at its own round-off floor.
+
+    The exact-fit case that the KKT ratio has to guard is 0/0: both the
+    violation and the Cauchy-Schwarz denominator vanish. Testing the
+    residual for exact zeros only catches it when the arithmetic happens to
+    land on 0.0 - an exactly-fitting solution whose r0 rounds to -1.1e-16
+    slips through and the ratio of two noise quantities is reported as a
+    real number (0.285 in dev_tests/test_surrogate_chi2_kkt.py).
+
+    Comparing ||resid|| against ||b|| instead does NOT work here: the
+    total-mass row carries A[0, :] = 1e8, so ||b|| is ~1e8 and any genuine
+    residual below ~1e-4 would be mistaken for an exact fit. The floor has
+    to be per row, against the magnitudes that formed THAT row.
+
+    Parameters
+    ----------
+    resid : array (n_rows,)
+    row_scale : array (n_rows,)
+        Per-row magnitude scale, ``|A_i| . |w| + |b_i|`` (or an upper bound).
+    eps : float
+        Epsilon of the precision the residual was computed in - float32 when
+        the matrix is float32, whose round-off is ~1e-7 relative, not 1e-16.
+    """
+    floor = _KKT_NOISE_EPS_FACTOR * eps * np.asarray(row_scale, dtype=np.float64)
+    return bool(np.all(np.abs(np.asarray(resid, dtype=np.float64)) <= floor))
+
+
 def _apply_diagonal_ridge(P, lam):
     """``P += lam * mean(diag(P))`` IN PLACE - Vasiliev Eq. 7's diagonal
     regularisation, dimensionless in lam so one value transfers across p.
@@ -102,6 +145,119 @@ def _apply_diagonal_ridge(P, lam):
     scale = float(np.trace(P)) / p
     P.flat[:: p + 1] += lam * scale
     return lam * scale
+
+
+class GramProfiler:
+    """Opt-in per-phase wall/RSS profiler for the blockwise Gram build.
+
+    Enabled by setting ``DYNAMITE_GRAM_PROFILE`` to a writable path, where a
+    JSON report is written when the build finishes. When the variable is
+    unset every call costs one ``if`` on a ``None``, so this can live in the
+    hot path permanently instead of being patched in and out for each
+    measurement -- which is what makes successive optimizations comparable
+    to each other rather than to a differently-instrumented baseline.
+
+    Phases nest by name only (``"set3/kin_block"``); no stack is kept, so a
+    phase that raises simply records the time up to the exception.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.phases = []          # ordered: (name, seconds, rss_delta_gib)
+        self.t_start = time.perf_counter()
+
+    @staticmethod
+    def rss_gib(field="VmRSS"):
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith(field):
+                    return int(line.split()[1]) / 1024**2
+        return float("nan")
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        r0 = self.rss_gib()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.phases.append(
+                {
+                    "name": name,
+                    "seconds": time.perf_counter() - t0,
+                    "rss_start_gib": r0,
+                    "rss_end_gib": self.rss_gib(),
+                    "hwm_gib": self.rss_gib("VmHWM"),
+                }
+            )
+            # flush after every phase: at ~40 minutes per build, a run that
+            # dies at set 3 must still report what sets 0-2 cost
+            self._flush()
+
+    def note(self, _phase_name, **fields):
+        """Record a non-timed fact (a block shape, a dtype) in sequence.
+
+        The parameter is underscore-prefixed so a recorded field may itself
+        be called ``name`` -- a kinematic set's name is exactly the sort of
+        thing worth recording, and the obvious spelling silently collided.
+        """
+        self.phases.append(dict(name=_phase_name, **fields))
+
+    def _flush(self):
+        try:
+            with open(self.path, "w") as fh:
+                json.dump(
+                    {
+                        "complete": False,
+                        "total_seconds": time.perf_counter() - self.t_start,
+                        "peak_rss_gib": self.rss_gib("VmHWM"),
+                        "phases": self.phases,
+                    },
+                    fh,
+                    indent=2,
+                )
+        except OSError:
+            pass  # profiling must never be what breaks a production build
+
+    def write(self, logger=None):
+        total = time.perf_counter() - self.t_start
+        report = {
+            "complete": True,
+            "total_seconds": total,
+            "peak_rss_gib": self.rss_gib("VmHWM"),
+            "phases": self.phases,
+        }
+        with open(self.path, "w") as fh:
+            json.dump(report, fh, indent=2)
+        if logger is not None:
+            timed = [p for p in self.phases if "seconds" in p]
+            timed.sort(key=lambda p: -p["seconds"])
+            logger.info(
+                "gram profile: total=%.1fs peak=%.1fGiB; slowest: %s",
+                total,
+                report["peak_rss_gib"],
+                ", ".join(
+                    f"{p['name']}={p['seconds']:.1f}s" for p in timed[:6]
+                ),
+            )
+        return report
+
+
+def _make_gram_profiler():
+    """Return a :class:`GramProfiler` if ``DYNAMITE_GRAM_PROFILE`` names an
+    output path, else ``None``."""
+    path = os.environ.get("DYNAMITE_GRAM_PROFILE")
+    return GramProfiler(os.path.abspath(path)) if path else None
+
+
+@contextlib.contextmanager
+def _maybe_phase(prof, name):
+    """``prof.phase(name)`` when profiling, a free no-op when not."""
+    if prof is None:
+        yield
+    else:
+        with prof.phase(name):
+            yield
 
 
 class NormalEquationAccumulator:
@@ -132,30 +288,39 @@ class NormalEquationAccumulator:
     recover chi2 from the Gram form without a second pass over ``A``.
     """
 
-    def __init__(self, n_orbs, dtype=np.float64):
+    # column block width for the finalize() mirror; bounds the transpose
+    # temporary to n_orbs * _MIRROR_BLOCK elements
+    _MIRROR_BLOCK = 4096
+
+    def __init__(self, n_orbs, dtype=np.float64, profiler=None):
         self.n_orbs = n_orbs
         self.dtype = dtype
+        # set by construct_gram_and_rhs_blockwise so the dsyrk and the
+        # cross-term matvec can be timed apart from block construction
+        self.profiler = profiler
+        self.tag = ""
         # symmetric: only the upper triangle is filled until finalize()
         self.G = np.zeros((n_orbs, n_orbs), dtype=dtype, order="F")
         self.v = np.zeros(n_orbs, dtype=np.float64)
         self.b_sq_sum = 0.0
         self.b_max = 0.0
-        self.n_rows = 0
 
     def add(self, A_block, b_block):
         """``A_block``: ``(rows, n_orbs)``, already divided by its own econ
         rows. ``b_block``: ``(rows,)``, likewise."""
         A_block = np.asarray(A_block, dtype=self.dtype)
         assert A_block.shape[1] == self.n_orbs, A_block.shape
+        prof = self.profiler
         # dsyrk does the rank-k update in place: no (n_orbs, n_orbs) temporary
-        self.G = dsyrk(
-            1.0, A_block, beta=1.0, c=self.G, trans=1, lower=0, overwrite_c=1
-        )
+        with _maybe_phase(prof, f"{self.tag}dsyrk"):
+            self.G = dsyrk(
+                1.0, A_block, beta=1.0, c=self.G, trans=1, lower=0, overwrite_c=1
+            )
         b_block = np.asarray(b_block, dtype=np.float64)
-        self.v += A_block.T @ b_block
+        with _maybe_phase(prof, f"{self.tag}cross_matvec"):
+            self.v += A_block.T @ b_block
         self.b_sq_sum += float(np.dot(b_block, b_block))
         self.b_max = max(self.b_max, float(np.abs(b_block).max(initial=0.0)))
-        self.n_rows += A_block.shape[0]
 
     def finalize(self):
         """Return ``(P, q, col_norm, b_max)`` with unit-L2 column scaling.
@@ -164,12 +329,24 @@ class NormalEquationAccumulator:
         upper triangle is filled by ``dsyrk``); ``self.G``/``self.v``/
         ``self.b_sq_sum`` remain available afterwards for a raw-scale chi2.
         """
-        iu = np.triu_indices(self.n_orbs)
-        self.G[(iu[1], iu[0])] = self.G[iu]  # mirror to full symmetric
-        col = np.sqrt(np.abs(np.diag(self.G)).copy())
+        # Mirror in blocks: np.triu_indices(n) would allocate n(n+1)/2 int64
+        # pairs (16 GB at n_orbs=45000, on top of the 16 GB G) just to name
+        # the entries. The block transpose copies the same values with a
+        # bounded temporary.
+        for i0 in range(0, self.n_orbs, self._MIRROR_BLOCK):
+            i1 = min(i0 + self._MIRROR_BLOCK, self.n_orbs)
+            self.G[i0:i1, :i0] = self.G[:i0, i0:i1].T
+            blk = self.G[i0:i1, i0:i1]
+            iu = np.triu_indices(i1 - i0)
+            blk[(iu[1], iu[0])] = blk[iu]
+        col = np.abs(np.diag(self.G))
+        col = np.sqrt(col, out=col)
         col[col == 0] = 1.0  # null orbits: leave alone
         b_max = self.b_max if self.b_max > 0 else 1.0
-        P = self.G / np.outer(col, col)
+        # Two broadcast divides, not G / np.outer(col, col): the outer
+        # product would be a second full (n_orbs, n_orbs) temporary.
+        P = self.G / col[:, None]
+        P /= col[None, :]
         q = -self.v / (col * b_max)
         return P, q, col, b_max
 
@@ -210,6 +387,49 @@ def _scale_columns(X, b_rest, dtype):
     X /= col_norm
     y = np.concatenate([[0.0], b_rest]).astype(dtype)
     return col_norm, y
+
+
+def _matvec_f64(M, v, transpose=False, block=8192, absolute=False):
+    """``M @ v`` (or ``M.T @ v``) accumulated in float64 without promoting M.
+
+    NumPy would upcast the WHOLE of a float32 ``M`` to run a mixed-dtype
+    gemv against a float64 ``v`` — a second, doubled copy of the matrix
+    (~62 GiB for omega Cen's augmented X), on the one path whose purpose is
+    never materializing a matrix that size. Promoting one row block at a
+    time does the same float64 arithmetic with a bounded temporary.
+
+    Kept exact for the float64 case by short-circuiting to a plain gemv.
+
+    ``absolute=True`` computes ``|M| @ v`` instead, taking the absolute value
+    of each promoted block rather than of M as a whole - for the same reason:
+    ``np.abs(M)`` would be another full-size array. Used for the per-row
+    round-off floor in the KKT diagnostics.
+    """
+    v = np.asarray(v, dtype=np.float64)
+    if M.dtype == np.float64 and not absolute:
+        return (M.T @ v) if transpose else (M @ v)
+    n_rows = M.shape[0]
+    if transpose:
+        out = np.zeros(M.shape[1], dtype=np.float64)
+        for i0 in range(0, n_rows, block):
+            i1 = min(i0 + block, n_rows)
+            blk = M[i0:i1, :].astype(np.float64)
+            if absolute:
+                np.abs(blk, out=blk)
+            out += blk.T @ v[i0:i1]
+            # release before the next astype allocates: a live `blk` would
+            # otherwise keep two promoted blocks resident at once
+            del blk
+        return out
+    out = np.empty(n_rows, dtype=np.float64)
+    for i0 in range(0, n_rows, block):
+        i1 = min(i0 + block, n_rows)
+        blk = M[i0:i1, :].astype(np.float64)
+        if absolute:
+            np.abs(blk, out=blk)
+        out[i0:i1] = blk @ v
+        del blk  # see the transpose branch above
+    return out
 
 
 def chi2_vector_from_residuals(resid_full, row0_sq):
@@ -1005,11 +1225,6 @@ class NNLS(WeightSolver):
         # G+P+C to C. Default off: numerics are identical to rounding, but
         # the input P is consumed and the caller must not reuse it.
         self.admm_free_p = bool(self.settings.get("admm_free_p", False))
-        if self.admm_free_p and not self.gram_blockwise:
-            self.logger.warning(
-                "admm_free_p=True has no effect without gram_blockwise=True; "
-                "the materialized-A path needs A after the solve anyway."
-            )
         # gram_blockwise (nnls_solver="cvxopt" or "admm" only): accumulate
         # P = A_rest^T A_rest / outer(col,col) and q one row block at a time
         # via NormalEquationAccumulator, instead of materializing A_rest
@@ -1022,7 +1237,11 @@ class NNLS(WeightSolver):
         # see dev_tests/test_gram_blockwise.py - so turning this on must
         # never change a reference result beyond rounding.
         self.gram_blockwise = bool(self.settings.get("gram_blockwise", False))
-        assert self.gram_blockwise in (True, False)
+        if self.admm_free_p and not self.gram_blockwise:
+            self.logger.warning(
+                "admm_free_p=True has no effect without gram_blockwise=True; "
+                "the materialized-A path needs A after the solve anyway."
+            )
         if self.gram_blockwise and nnls_solver not in ("cvxopt", "admm"):
             self.logger.warning(
                 f"gram_blockwise=True has no effect for nnls_solver="
@@ -1051,14 +1270,13 @@ class NNLS(WeightSolver):
         # iterate, x200 iterates: five workers sat in ALM iterate 0 for 31.5 h
         # and finished 0 of 90 models, with flat RSS and nothing in the logs.
         _eps = np.finfo(self.nnls_dtype).eps
-        _tol_default = 1.0e-10 if self.nnls_dtype is np.float64 else 1.0e-6
         # gap_tol likewise cannot beat the accuracy of the inner solve that
-        # produces the weights it measures. Kept at the historical 1e-10 for
-        # float64 so results do not shift; at float32 that is below eps and
-        # therefore dead code, so it tracks the dtype instead.
-        _gap_default = 1.0e-10 if self.nnls_dtype is np.float64 else 1.0e-6
+        # produces the weights it measures, so it takes the same default:
+        # the historical 1e-10 for float64 so results do not shift, and at
+        # float32 a value above eps rather than one that can never be met.
+        _tol_default = 1.0e-10 if self.nnls_dtype is np.float64 else 1.0e-6
         self.adelie_tol = float(self.settings.get("adelie_tol", _tol_default))
-        self.adelie_gap_tol = float(self.settings.get("adelie_gap_tol", _gap_default))
+        self.adelie_gap_tol = float(self.settings.get("adelie_gap_tol", _tol_default))
         for _name, _val in (
             ("adelie_tol", self.adelie_tol),
             ("adelie_gap_tol", self.adelie_gap_tol),
@@ -1075,6 +1293,24 @@ class NNLS(WeightSolver):
         # constructor. Pure memory setting: results are bit-identical either
         # way (validated by dev_tests/_real_fused_check.py).
         self.stream_reads = bool(self.settings.get("stream_orblib_reads", False))
+        # gram_chunk_rows (gram_blockwise only): how many constraint ROWS of
+        # one kinematic set are materialized at a time before being folded
+        # into the accumulator. The rank-k update is incremental, so this
+        # changes only summation order, never the arithmetic -- see
+        # dev_tests/test_gram_blockwise.py::test_different_block_sizes_agree.
+        #
+        # It exists because a whole-set block is unbounded: omega Cen's
+        # hst_pm set is 316125 rows, a 106 GiB float64 block, which is what
+        # drives a measured 229 GiB peak against a P of only 16 GiB. At the
+        # 8192-row default the block is 2.9 GiB regardless of set size.
+        # 0 disables chunking (whole set at once, the pre-existing
+        # behaviour). This is a MEMORY control, not a speed one: measurement
+        # puts the block build at under 3% of construction.
+        self.gram_chunk_rows = int(self.settings.get("gram_chunk_rows", 8192))
+        if self.gram_chunk_rows < 0:
+            raise ValueError(
+                f"gram_chunk_rows must be >= 0, got {self.gram_chunk_rows}"
+            )
         self.get_observed_mass_constraints()
 
     def get_observed_mass_constraints(self):
@@ -1370,33 +1606,15 @@ class NNLS(WeightSolver):
         rhs = np.zeros_like(con)
         np.divide(con, econ, out=rhs, where=econ != 0)  # con = econ = 0 ok
         econ_body = econ[1:]
-        # Only zero-error rows can offend, and normally there are none. Restrict
-        # to those rows instead of building a (n_rows-1, n_orbs) bool mask: at
-        # production scale that mask is ~16 GiB, and the `&` allocates a second
-        # one before the first is freed - ~31 GiB transient at the exact moment
-        # assembly is already at its RSS peak. The stock constructor above gets
-        # this for free by masking rows first; keep the fused path equivalent.
-        bad = np.nonzero(econ_body == 0)[0]
-        if bad.size:
-            blk = X[1:, :][bad]  # (n_bad, n_orbs), n_bad is normally 0
-            nz_rows, nz_cols = np.nonzero(blk)
-            if nz_rows.size:
-                rr = bad[nz_rows]
-                txt = (
-                    f"Weight solving problem in {self.direc_with_ml}: "
-                    "zero errors for nonzero matrix coefficients at "
-                    f"[constraint no, orbit no] = {(rr + 1, nz_cols)}! Matrix "
-                    f"value(s) there ({blk[nz_rows, nz_cols]}) will be "
-                    "considered zero."
-                )
-                self.logger.warning(txt)
-                X[1 + rr, nz_cols] = 0
-        # divide rows by their errors: the same elementwise op as the stock
-        # transposed-view divide, restricted to rows 1.. (row 0 of A becomes
-        # row0_vec below, divided elementwise by econ[0] exactly as stock's
-        # broadcast divide did to it).
-        body = X[1:, :].T  # view (n_orbs, n_rows-1)
-        np.divide(body, econ_body, out=body, where=econ_body != 0)
+        # Zero-error guard + divide rows by their errors, on rows 1.. only
+        # (row 0 of A becomes row0_vec below, divided elementwise by econ[0]
+        # exactly as stock's broadcast divide did to it). X[1:, :] is a
+        # basic-slice view, so the helper's in-place writes land in X.
+        # _econ_divide_block restricts the guard to the zero-error rows
+        # rather than building a (n_rows-1, n_orbs) bool mask, which at
+        # production scale would be ~16 GiB with a second ~16 GiB transient,
+        # at the exact moment assembly is already at its RSS peak.
+        self._econ_divide_block(X[1:, :], econ_body, row_offset=1)
         col_norm, y = _scale_columns(X, rhs[1:], dtype)
         row0_vec = np.full(n_orbs, 1.0, dtype=dtype) / econ[0]
         return AdelieProblem(
@@ -1504,18 +1722,22 @@ class NNLS(WeightSolver):
         Returns a :class:`GramProblem`.
         """
         dtype = self.nnls_dtype
+        prof = _make_gram_profiler()
         stars = self.system.get_unique_triaxial_visible_component()
-        obs_values = [
-            kins.get_observed_values_and_uncertainties(self.settings)
-            for kins in stars.kinematic_data
-        ]
+        with _maybe_phase(prof, "obs_values"):
+            obs_values = [
+                kins.get_observed_values_and_uncertainties(self.settings)
+                for kins in stars.kinematic_data
+            ]
         n_rows = self.n_mass_constraints + sum(np.size(v) for v, _ in obs_values)
         con = np.zeros(n_rows, dtype=np.float64)
         econ = np.zeros(n_rows, dtype=np.float64)
 
         if self.stream_reads:
-            orblib.read_vel_histograms(kin_sets=[0], skip_density=False)
-            _downcast_orblib(orblib, self.nnls_dtype)
+            with _maybe_phase(prof, "set0/read_vel_histograms"):
+                orblib.read_vel_histograms(kin_sets=[0], skip_density=False)
+            with _maybe_phase(prof, "set0/downcast"):
+                _downcast_orblib(orblib, self.nnls_dtype)
         n_orbs = orblib.n_orbs
 
         con[0] = self.total_mass
@@ -1537,16 +1759,19 @@ class NNLS(WeightSolver):
         # rows too, so it must run after the loop fills them in - moved to
         # just before the accumulator is finalized, below.
 
-        acc = NormalEquationAccumulator(n_orbs, dtype=np.float64)
+        acc = NormalEquationAccumulator(n_orbs, dtype=np.float64, profiler=prof)
         n_mass_rest = self.n_intrinsic + self.n_apertures
         A_mass = np.empty((n_mass_rest, n_orbs), dtype=np.float64, order="C")
 
         # intrinsic masses -> mass rows [0, n_intrinsic)
         econ_intrinsic = econ[idx]
-        orb_int = np.reshape(orblib.intrinsic_masses, (n_orbs, -1)).T.astype(
-            np.float64, copy=True
-        )  # (n_intrinsic, n_orbs)
-        self._econ_divide_block(orb_int, econ_intrinsic, row_offset=1)
+        acc.tag = "intrinsic/"
+        with _maybe_phase(prof, "intrinsic/block_astype"):
+            orb_int = np.reshape(orblib.intrinsic_masses, (n_orbs, -1)).T.astype(
+                np.float64, copy=True
+            )  # (n_intrinsic, n_orbs)
+        with _maybe_phase(prof, "intrinsic/econ_divide"):
+            self._econ_divide_block(orb_int, econ_intrinsic, row_offset=1)
         A_mass[0 : self.n_intrinsic, :] = orb_int
         con_intrinsic = con[idx]
         b_intrinsic = np.zeros(self.n_intrinsic, dtype=np.float64)
@@ -1562,9 +1787,12 @@ class NNLS(WeightSolver):
         idx_ap_start = 0
         idx_row = self.n_mass_constraints
         for si, kins in enumerate(stars.kinematic_data):
+            acc.tag = f"set{si}/"
             if self.stream_reads and si > 0:
-                orblib.read_vel_histograms(kin_sets=[si], skip_density=True)
-                _downcast_orblib(orblib, self.nnls_dtype)
+                with _maybe_phase(prof, f"set{si}/read_vel_histograms"):
+                    orblib.read_vel_histograms(kin_sets=[si], skip_density=True)
+                with _maybe_phase(prof, f"set{si}/downcast"):
+                    _downcast_orblib(orblib, self.nnls_dtype)
             orb_veldist = orblib.vel_histograms[si]
             assert orb_veldist is not None, f"no histogram for kinematic set {si}"
             n_ap = kins.n_spatial_bins
@@ -1574,11 +1802,13 @@ class NNLS(WeightSolver):
                 f"no projected masses for kinematic set {si}"
             )
 
-            prj_block = prj_parts_i.T.astype(np.float64, copy=True)  # (n_ap, n_orbs)
+            with _maybe_phase(prof, f"set{si}/prj_block_astype"):
+                prj_block = prj_parts_i.T.astype(np.float64, copy=True)  # (n_ap, n_orbs)
             row0_prj = 1 + self.n_intrinsic + idx_ap_start
             econ_prj_i = econ[row0_prj : row0_prj + n_ap]
             con_prj_i = con[row0_prj : row0_prj + n_ap]
-            self._econ_divide_block(prj_block, econ_prj_i, row_offset=row0_prj)
+            with _maybe_phase(prof, f"set{si}/prj_econ_divide"):
+                self._econ_divide_block(prj_block, econ_prj_i, row_offset=row0_prj)
             mass_lo = self.n_intrinsic + idx_ap_start
             A_mass[mass_lo : mass_lo + n_ap, :] = prj_block
             b_prj_i = np.zeros(n_ap, dtype=np.float64)
@@ -1586,9 +1816,10 @@ class NNLS(WeightSolver):
             acc.add(prj_block, b_prj_i)
             del prj_block
 
-            obs_kins, obs_kins_err, orb_kins = self._prepare_kinematic_block(
-                kins, orb_veldist, obs_values[si], prj_mass_i
-            )
+            with _maybe_phase(prof, f"set{si}/prepare_kinematic_block"):
+                obs_kins, obs_kins_err, orb_kins = self._prepare_kinematic_block(
+                    kins, orb_veldist, obs_values[si], prj_mass_i
+                )
             n_orb_constraints = orb_kins.size // n_orbs
             idx_row_end = idx_row + obs_kins.size
             assert n_orb_constraints == obs_kins.size, (
@@ -1604,14 +1835,44 @@ class NNLS(WeightSolver):
             # orb_kins.reshape(n_orbs, -1).T. Unlike the fused constructor,
             # this does NOT need to be a view into anything - the block is
             # fed to the accumulator and discarded, never written back.
-            kin_block = orb_kins.reshape(n_orbs, -1).T.astype(np.float64, copy=True)
+            if prof is not None:
+                prof.note(
+                    f"set{si}/shape",
+                    kind=type(kins).__name__,
+                    kin_name=str(kins.name),
+                    rows=int(orb_kins.size // n_orbs),
+                    n_orbs=int(n_orbs),
+                    orb_kins_dtype=str(orb_kins.dtype),
+                    orb_kins_gib=float(orb_kins.nbytes / 1024**3),
+                    block_gib=float(orb_kins.size * 8 / 1024**3),
+                )
             econ_kin_i = econ[idx_row:idx_row_end]
             con_kin_i = con[idx_row:idx_row_end]
-            self._econ_divide_block(kin_block, econ_kin_i, row_offset=idx_row)
             b_kin_i = np.zeros(obs_kins.size, dtype=np.float64)
             np.divide(con_kin_i, econ_kin_i, out=b_kin_i, where=econ_kin_i != 0)
-            acc.add(kin_block, b_kin_i)
-            del kin_block, orb_kins
+            # Feed the set to the accumulator in row chunks rather than as
+            # one block. The whole-set block is unbounded -- 106 GiB for
+            # omega Cen's hst_pm -- while the rank-k update is incremental,
+            # so chunking changes only summation order. Each chunk is made
+            # F-contiguous explicitly: dsyrk with trans=1 wants column-major
+            # and silently allocates a full copy of anything else, which
+            # would reintroduce exactly the temporary being avoided.
+            src = orb_kins.reshape(n_orbs, -1)  # (n_orbs, rows), C-contiguous
+            n_set_rows = src.shape[1]
+            step = self.gram_chunk_rows or n_set_rows
+            for r0 in range(0, n_set_rows, step):
+                r1 = min(r0 + step, n_set_rows)
+                with _maybe_phase(prof, f"set{si}/kin_block_astype"):
+                    kin_block = np.array(
+                        src[:, r0:r1].T, dtype=np.float64, order="F"
+                    )
+                with _maybe_phase(prof, f"set{si}/kin_econ_divide"):
+                    self._econ_divide_block(
+                        kin_block, econ_kin_i[r0:r1], row_offset=idx_row + r0
+                    )
+                acc.add(kin_block, b_kin_i[r0:r1])
+                del kin_block
+            del src, orb_kins
 
             idx_row = idx_row_end
             idx_ap_start += n_ap
@@ -1642,7 +1903,11 @@ class NNLS(WeightSolver):
             where=econ[idx_prj] != 0,
         )
 
-        P, q, col_norm, b_max = acc.finalize()
+        acc.tag = ""
+        with _maybe_phase(prof, "finalize"):
+            P, q, col_norm, b_max = acc.finalize()
+        if prof is not None:
+            prof.write(logger=self.logger)
         return GramProblem(
             P=P,
             q=q,
@@ -1819,6 +2084,11 @@ class NNLS(WeightSolver):
         # Cauchy-Schwarz denominator: |g_j| <= ||A_.j|| ||r||, so this is in
         # [0, 1]. An exactly-fitting solution has ||r|| -> 0 and the ratio is
         # then 0/0; guard it and report 0, which is the correct verdict.
+        # Exact fit -> 0/0. See _residual_is_all_noise for why this is a
+        # per-row floor and not a test against zero or against ||b||.
+        row_scale = _matvec_f64(A, np.abs(weights), absolute=True) + np.abs(b)
+        if _residual_is_all_noise(resid, row_scale, np.finfo(A.dtype).eps):
+            return 0.0, raw
         scale = np.linalg.norm(A, axis=0) * np.linalg.norm(resid)
         if not np.any(scale > 0):
             return 0.0, raw
@@ -1874,7 +2144,7 @@ class NNLS(WeightSolver):
         r_rest = np.asarray(resid_full, dtype=np.float64).ravel()[1:]
         resid = np.concatenate(([r0], r_rest))
         grad = row0_vec.astype(np.float64) * r0 + col_norm.astype(np.float64) * (
-            X_scaled[1:, :].T @ r_rest
+            _matvec_f64(X_scaled[1:, :], r_rest, transpose=True)
         )
         viol = np.where(weights > 0, np.abs(grad), np.maximum(-grad, 0.0))
         raw = float(np.max(viol))
@@ -1886,6 +2156,25 @@ class NNLS(WeightSolver):
             col_norm.astype(np.float64) ** 2 - mu + row0_vec.astype(np.float64) ** 2,
             0.0,
         )
+        # Same per-row exact-fit guard as kkt_violation, expressed through
+        # the augmented matrix: A[1:, j] = col_norm[j] * X_scaled[1:, j], so
+        # |A_i| . |w| is |X_scaled[1:]| against col_norm * |w| (blockwise, so
+        # |X| is never materialized). b is not passed here, but
+        # |b_i| = |A_i w - r_i| <= |A_i| . |w| + |r_i|, which bounds the
+        # missing term without it. Row 0 uses row0_vec and b0 directly.
+        abs_w = np.abs(np.asarray(weights, dtype=np.float64))
+        aw_rest = _matvec_f64(
+            X_scaled[1:, :], col_norm.astype(np.float64) * abs_w, absolute=True
+        )
+        row_scale = np.empty(resid.size, dtype=np.float64)
+        row_scale[0] = float(np.abs(row0_vec).astype(np.float64) @ abs_w) + abs(
+            float(b0)
+        )
+        row_scale[1:] = 2.0 * aw_rest + np.abs(r_rest)
+        if _residual_is_all_noise(
+            resid, row_scale, np.finfo(X_scaled.dtype).eps
+        ):
+            return 0.0, raw
         scale = np.sqrt(col_sq) * np.linalg.norm(resid)
         if not np.any(scale > 0):
             return 0.0, raw
@@ -2102,8 +2391,8 @@ class NNLS(WeightSolver):
         # difference vs a gemv over A), row 0 via row0_vec. Serves both the
         # surrogate KKT below and solve()'s final chi2_vector.
         r0 = float(problem.row0_vec @ best_w) - problem.b0
-        r_rest = y[1:].astype(np.float64) - X[1:, :] @ (
-            col_norm.astype(np.float64) * best_w
+        r_rest = y[1:].astype(np.float64) - _matvec_f64(
+            X[1:, :], col_norm.astype(np.float64) * best_w
         )
         resid_full = np.concatenate(([r0], r_rest))
         kkt, kkt_raw = self.kkt_violation_augmented(
@@ -2248,40 +2537,44 @@ class NNLS(WeightSolver):
                 # cvxopt returns 'optimal' on a badly wrong answer).
                 # cvxopt takes equality constraints natively, so state
                 # sum(w) = total_mass exactly and drop the row.
-                if self.gram_blockwise:
-                    # P, q accumulated one row block at a time - A never
-                    # exists. See construct_gram_and_rhs_blockwise's
-                    # docstring for the ordering trap this must get right.
-                    gram_problem = self.construct_gram_and_rhs_blockwise(orblib)
-                    P, q = gram_problem.P, gram_problem.q
-                    col_norm, b_max = gram_problem.col_norm, gram_problem.b_max
-                else:
-                    A, b = self.construct_nnls_matrix_and_rhs(orblib)
-                    A_rest, b_rest = A[1:], b[1:]
-                    # Unit-L2 column scaling (marginally better conditioned
-                    # than the max-abs scaling the scipy path uses, and it
-                    # matches the adelie path's _scale_columns). Null orbits
-                    # give a zero norm; leave those columns unscaled rather
-                    # than dividing by zero.
-                    col_norm = np.linalg.norm(A_rest, axis=0)
-                    col_norm[col_norm == 0] = 1.0
-                    b_max = np.max(np.abs(b_rest))
-                    if b_max == 0:
-                        b_max = 1.0
-                    A_normalized = A_rest / col_norm
-                    b_normalized = b_rest / b_max
-                    P = np.dot(A_normalized.T, A_normalized)
-                    q = -1.0 * np.dot(A_normalized.T, b_normalized)
-                # Vasiliev Eq. 7 diagonal ridge on the normalised P (no-op at
-                # ridge_lambda=0). chi2 is still reported on the UNREGULARISED
-                # problem - the raw-G quadratic form below never sees it.
-                self._ridge_shift = _apply_diagonal_ridge(P, self.ridge_lambda)
-                if self._ridge_shift > 0:
-                    self.logger.info(
-                        f"ridge: lambda={self.ridge_lambda:g}, absolute shift "
-                        f"{self._ridge_shift:.6e} added to diag(P)"
-                    )
                 try:
+                    # inside the try: assembling the matrix and forming P are
+                    # the two biggest allocations in the whole run (~16 GB each
+                    # at p=45000), so a MemoryError here must mark THIS model
+                    # nan like any other solver failure, not abort the grid.
+                    if self.gram_blockwise:
+                        # P, q accumulated one row block at a time - A never
+                        # exists. See construct_gram_and_rhs_blockwise's
+                        # docstring for the ordering trap this must get right.
+                        gram_problem = self.construct_gram_and_rhs_blockwise(orblib)
+                        P, q = gram_problem.P, gram_problem.q
+                        col_norm, b_max = gram_problem.col_norm, gram_problem.b_max
+                    else:
+                        A, b = self.construct_nnls_matrix_and_rhs(orblib)
+                        A_rest, b_rest = A[1:], b[1:]
+                        # Unit-L2 column scaling (marginally better conditioned
+                        # than the max-abs scaling the scipy path uses, and it
+                        # matches the adelie path's _scale_columns). Null orbits
+                        # give a zero norm; leave those columns unscaled rather
+                        # than dividing by zero.
+                        col_norm = np.linalg.norm(A_rest, axis=0)
+                        col_norm[col_norm == 0] = 1.0
+                        b_max = np.max(np.abs(b_rest))
+                        if b_max == 0:
+                            b_max = 1.0
+                        A_normalized = A_rest / col_norm
+                        b_normalized = b_rest / b_max
+                        P = np.dot(A_normalized.T, A_normalized)
+                        q = -1.0 * np.dot(A_normalized.T, b_normalized)
+                    # Vasiliev Eq. 7 diagonal ridge on the normalised P (no-op at
+                    # ridge_lambda=0). chi2 is still reported on the UNREGULARISED
+                    # problem - the raw-G quadratic form below never sees it.
+                    self._ridge_shift = _apply_diagonal_ridge(P, self.ridge_lambda)
+                    if self._ridge_shift > 0:
+                        self.logger.info(
+                            f"ridge: lambda={self.ridge_lambda:g}, absolute shift "
+                            f"{self._ridge_shift:.6e} added to diag(P)"
+                        )
                     # w = x * b_max / col_norm, so the mass constraint
                     # sum(w) = total_mass becomes (b_max/col_norm) . x = total_mass
                     solver = CvxoptNonNegSolver(
@@ -2329,31 +2622,34 @@ class NNLS(WeightSolver):
                 # Same equality-drop scaling as the cvxopt path above (row 0
                 # is the 1e8 total-mass row; see the comment there).
                 free_p = self.admm_free_p and self.gram_blockwise
-                gram_problem = None
-                if self.gram_blockwise:
-                    gram_problem = self.construct_gram_and_rhs_blockwise(orblib)
-                    P, q = gram_problem.P, gram_problem.q
-                    col_norm, b_max = gram_problem.col_norm, gram_problem.b_max
-                else:
-                    A, b = self.construct_nnls_matrix_and_rhs(orblib)
-                    A_rest, b_rest = A[1:], b[1:]
-                    col_norm = np.linalg.norm(A_rest, axis=0)
-                    col_norm[col_norm == 0] = 1.0
-                    b_max = np.max(np.abs(b_rest))
-                    if b_max == 0:
-                        b_max = 1.0
-                    A_normalized = A_rest / col_norm
-                    b_normalized = b_rest / b_max
-                    P = np.dot(A_normalized.T, A_normalized)
-                    q = -1.0 * np.dot(A_normalized.T, b_normalized)
-                # same ridge as the cvxopt branch above; no-op at 0.0
-                self._ridge_shift = _apply_diagonal_ridge(P, self.ridge_lambda)
-                if self._ridge_shift > 0:
-                    self.logger.info(
-                        f"ridge: lambda={self.ridge_lambda:g}, absolute shift "
-                        f"{self._ridge_shift:.6e} added to diag(P)"
-                    )
                 try:
+                    # inside the try for the same reason as the cvxopt branch:
+                    # a MemoryError while assembling A or forming P must nan
+                    # this model, not abort the grid.
+                    gram_problem = None
+                    if self.gram_blockwise:
+                        gram_problem = self.construct_gram_and_rhs_blockwise(orblib)
+                        P, q = gram_problem.P, gram_problem.q
+                        col_norm, b_max = gram_problem.col_norm, gram_problem.b_max
+                    else:
+                        A, b = self.construct_nnls_matrix_and_rhs(orblib)
+                        A_rest, b_rest = A[1:], b[1:]
+                        col_norm = np.linalg.norm(A_rest, axis=0)
+                        col_norm[col_norm == 0] = 1.0
+                        b_max = np.max(np.abs(b_rest))
+                        if b_max == 0:
+                            b_max = 1.0
+                        A_normalized = A_rest / col_norm
+                        b_normalized = b_rest / b_max
+                        P = np.dot(A_normalized.T, A_normalized)
+                        q = -1.0 * np.dot(A_normalized.T, b_normalized)
+                    # same ridge as the cvxopt branch above; no-op at 0.0
+                    self._ridge_shift = _apply_diagonal_ridge(P, self.ridge_lambda)
+                    if self._ridge_shift > 0:
+                        self.logger.info(
+                            f"ridge: lambda={self.ridge_lambda:g}, absolute shift "
+                            f"{self._ridge_shift:.6e} added to diag(P)"
+                        )
                     solver = AdmmNonNegSolver(
                         P,
                         q,
@@ -2368,15 +2664,13 @@ class NNLS(WeightSolver):
                     # With factor_in_place, C IS the old P buffer: every
                     # other reference to P must die NOW or nothing is freed.
                     if free_p:
-                        # keep only what chi2 needs (all O(p) or tiny)
-                        gp_chi2 = dict(
-                            q=q,
-                            b_sq_rest=gram_problem.b_sq_rest,
-                            A_mass=gram_problem.A_mass,
-                            b_mass=gram_problem.b_mass,
-                            row0_vec=gram_problem.row0_vec,
-                            b0=gram_problem.b0,
-                        )
+                        # keep only what chi2 needs (all O(p) or tiny), then
+                        # drop the NamedTuple so P has no live reference left
+                        gp_b_sq_rest = gram_problem.b_sq_rest
+                        gp_A_mass = gram_problem.A_mass
+                        gp_b_mass = gram_problem.b_mass
+                        gp_row0_vec = gram_problem.row0_vec
+                        gp_b0 = gram_problem.b0
                         del gram_problem, P
                     x_normalized = solver.beta
                     weights = x_normalized * b_max / col_norm
@@ -2435,21 +2729,26 @@ class NNLS(WeightSolver):
                     # raw-G branch below. Equivalence with that branch is
                     # algebraic, not approximate; pinned in
                     # dev_tests/test_admm_free_p.py.
-                    row0_resid = float(gp_chi2["row0_vec"] @ weights) - gp_chi2["b0"]
+                    row0_resid = float(gp_row0_vec @ weights) - gp_b0
                     # extra_shift = the ridge the caller pre-added to P, so
                     # the identity recovers the UNREGULARISED quadratic form
                     g_pp = solver.gram_quadratic_form(
                         x_normalized, extra_shift=self._ridge_shift
                     )
                     chi2_rest = (
-                        b_max**2 * (g_pp + 2.0 * float(x_normalized @ gp_chi2["q"]))
-                        + gp_chi2["b_sq_rest"]
+                        b_max**2 * (g_pp + 2.0 * float(x_normalized @ q))
+                        + gp_b_sq_rest
                     )
-                    mass_resid = gp_chi2["A_mass"] @ weights - gp_chi2["b_mass"]
+                    mass_resid = gp_A_mass @ weights - gp_b_mass
                     chi2_mass = float(np.dot(mass_resid, mass_resid))
                     chi2_kin = chi2_rest - chi2_mass
                     chi2_tot = row0_resid * row0_resid + chi2_rest
-                    del gp_chi2, mass_resid
+                    # solver.chol_factor IS the old P buffer (~16 GB at
+                    # production). It is dead from here on, and chi2_kinmap
+                    # below may read a fresh orbit library (~165 GiB), so drop
+                    # it rather than letting the two peaks stack - the adelie
+                    # branch drops `problem` for exactly this reason.
+                    del mass_resid, solver
                 elif self.nnls_solver in ("cvxopt", "admm") and self.gram_blockwise:
                     # chi2 from the Gram form, no pass over A: chi2_rest =
                     # w'Gw - 2 w'v + ||b_rest||^2 (mass + kinematic rows
@@ -2472,7 +2771,12 @@ class NNLS(WeightSolver):
                     chi2_mass = float(np.dot(mass_resid, mass_resid))
                     chi2_kin = chi2_rest - chi2_mass
                     chi2_tot = row0_resid * row0_resid + chi2_rest
-                    del gram_problem, Gw, mass_resid
+                    # P (~16 GB) and the solver's own copy of it (cvxopt's
+                    # column-major matrix, or ADMM's Cholesky factor - another
+                    # ~16 GB) are both dead here, while chi2_kinmap below may
+                    # read a fresh orbit library (~165 GiB at production).
+                    # Drop them so the peaks do not stack.
+                    del gram_problem, Gw, mass_resid, P, solver
                 else:
                     chi2_vector = (np.dot(A, weights) - b) ** 2.0
                     chi2_tot = np.sum(chi2_vector)
@@ -2838,7 +3142,12 @@ class AdmmNonNegSolver:
     elapsed : float
         wall time of factorization + iteration, in seconds
     beta : array (p,)
-        solution (the z-iterate, which carries the exact zeros)
+        solution: the z-iterate (which carries the exact zeros), rescaled by
+        a positive scalar onto the equality hyperplane so that both
+        constraints hold exactly at the returned point (see solve loop)
+    eq_residual : float
+        |eq_coeff @ beta - eq_rhs| at the returned iterate; ~0 by
+        construction, kept as a check
 
     """
 
@@ -2871,15 +3180,36 @@ class AdmmNonNegSolver:
             # the Cholesky factor C *is* the old P's memory. Saves one full
             # p x p copy (~16 GB at omega Cen) and leaves only C resident
             # for the iterations.
-            if not (P_np.flags["F_CONTIGUOUS"] or P_np.flags["C_CONTIGUOUS"]):
-                raise ValueError("factor_in_place requires a contiguous P")
             if P_np.dtype != np.float64:
                 raise ValueError("factor_in_place requires a float64 P")
+            # dpotrf(overwrite_a=1) can only write in place into an
+            # F-contiguous buffer; handed a C-ordered array it silently
+            # makes the very p x p copy this flag exists to avoid (16 GB at
+            # p=45000), leaving P's diagonal mutated while the factor lives
+            # somewhere else. P is symmetric, so a C-ordered P is already
+            # F-ordered data under the opposite triangle - reinterpret it
+            # rather than copying, and refuse anything genuinely
+            # non-contiguous.
+            if not P_np.flags["F_CONTIGUOUS"]:
+                if P_np.flags["C_CONTIGUOUS"]:
+                    # same buffer, transposed view: symmetric so the values
+                    # are unchanged, and the view IS F-contiguous
+                    P_np = P_np.T
+                else:
+                    raise ValueError("factor_in_place requires a contiguous P")
         else:
             P_np = np.array(P_np, order="F", copy=True)  # the ONE extra p x p
         P_np.flat[:: p + 1] += self.rho
+        _p_buffer = P_np  # only to verify the in-place promise below
         C, info = dpotrf(P_np, lower=1, clean=0, overwrite_a=1)
-        del P_np
+        if factor_in_place and not np.shares_memory(C, _p_buffer):
+            # the saving did not happen; say so rather than silently using
+            # 2x the memory the caller budgeted for
+            (logger or logging.getLogger(f"{__name__}.AdmmNonNegSolver")).warning(
+                "factor_in_place=True but LAPACK still copied P; the "
+                "expected memory saving did NOT occur."
+            )
+        del P_np, _p_buffer
         if info:
             raise ArithmeticError(f"P + rho*I not PD (info={info})")
         # dpotrf(clean=0) leaves the UNUSED triangle of C as garbage: nothing
@@ -2914,6 +3244,25 @@ class AdmmNonNegSolver:
         self.r_dual = r_dual
         self.success = bool(r_pri < tol and r_dual < tol)
         self.status = "optimal" if self.success else "unknown"
+        # Which iterate to hand back. z carries the exact zeros but only w
+        # satisfies the equality: they agree only in the limit r_pri -> 0,
+        # and this solver is documented not to reach its default tolerance
+        # at ridge_lambda=0. Returning z unrepaired charges the residual
+        # mass violation to chi2 through 1/econ[0] (1e8 at production),
+        # SQUARED - measured 5.2e12 against a true chi2 of 0.11 at
+        # r_pri=3.1e-4, which would wreck the chi2 that model.py ranks on.
+        # Rescaling z by a positive scalar lands it exactly on the equality
+        # hyperplane while preserving z >= 0 and its exact zeros.
+        eq_before = float(a_np @ z)
+        if eq_before > 0.0:
+            z = z * (m / eq_before)
+        else:
+            log_ = logger or logging.getLogger(f"{__name__}.AdmmNonNegSolver")
+            log_.warning(
+                f"ADMM: cannot rescale onto the mass equality (a@z="
+                f"{eq_before:.3e} <= 0); returning the unrepaired iterate."
+            )
+        self.eq_residual = abs(float(a_np @ z) - m)
         self.beta = z
         log = logger or logging.getLogger(f"{__name__}.AdmmNonNegSolver")
         log.info(

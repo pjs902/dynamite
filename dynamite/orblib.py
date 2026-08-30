@@ -869,7 +869,8 @@ class LegacyOrbitLibrary(OrbitLibrary):
             # halfway through.
             out_tag = f".p{os.getpid()}"
             merged = orblib_chunks.merge_chunks(
-                "datfil", fileroot, tags, n_orbits, kinds=kinds, out_tag=out_tag
+                "datfil", fileroot, tags, n_orbits, kinds=kinds,
+                out_tag=out_tag, dithering=self.settings["dithering"],
             )
             # bzip2 is single-digit MB/s and the node is idle by now:
             # launch all of them, wait once below.
