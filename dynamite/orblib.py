@@ -324,21 +324,36 @@ class LegacyOrbitLibrary(OrbitLibrary):
         """
         lock_path = self.mod_dir + "datfil/building.lock"
         os.makedirs(self.mod_dir + "datfil", exist_ok=True)
-        for _ in range(2):  # one retry, after clearing a stale lock
+        # Write the pid into a per-process temp file first, then os.link()
+        # it into place: the link either succeeds atomically with the pid
+        # already in it, or fails with FileExistsError, so a concurrent
+        # reader can never observe a lock file that exists but is still
+        # empty (the previous two-syscall create-then-write left exactly
+        # that window, during which _orblib_lock_is_stale() reads an empty
+        # file and treats it as stale -- letting a second process steal the
+        # claim and build the same orbit library concurrently).
+        tmp_path = f"{lock_path}.{os.getpid()}.tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                f.write(str(os.getpid()))
+            for _ in range(2):  # one retry, after clearing a stale lock
+                try:
+                    os.link(tmp_path, lock_path)
+                    return True
+                except FileExistsError:
+                    if self._orblib_lock_is_stale(lock_path):
+                        try:
+                            os.remove(lock_path)
+                        except FileNotFoundError:
+                            pass
+                        continue
+                    return False
+            return False
+        finally:
             try:
-                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                return True
-            except FileExistsError:
-                if self._orblib_lock_is_stale(lock_path):
-                    try:
-                        os.remove(lock_path)
-                    except FileNotFoundError:
-                        pass
-                    continue
-                return False
-        return False
+                os.remove(tmp_path)
+            except FileNotFoundError:
+                pass
 
     def release_orblib_build_claim(self):
         """Release this process' claim on building the orbit library."""
@@ -726,9 +741,37 @@ class LegacyOrbitLibrary(OrbitLibrary):
         # when integrating in chunks, each process needs its own input file
         # naming its own orbit range and its own output files
         if self.n_chunks > 1 and self.can_chunk_orbits():
-            for start, number, tag in self.orbit_chunk_bounds(self.n_chunks):
+            bounds = self.orbit_chunk_bounds(self.n_chunks)
+            for start, number, tag in bounds:
                 write_orblib_dot_in(box=False, start=start, number=number, tag=tag)
                 write_orblib_dot_in(box=True, start=start, number=number, tag=tag)
+            # get_orbit_library_chunked runs a bash script that reads these
+            # files by name right after this returns -- verify they actually
+            # landed (one retry for a transient write/NFS hiccup) rather than
+            # silently handing that script references to files that don't
+            # exist, which otherwise surfaces as a cryptic bash "No such
+            # file" failure and, upstream, an all-NaN chi2 iteration.
+            expected = [
+                f"{path}{fileroot}{tag}.in"
+                for fileroot in ("orblib", "orblibbox")
+                for _, _, tag in bounds
+            ]
+            missing = [f for f in expected if not os.path.isfile(f)]
+            if missing:
+                self.logger.warning(
+                    f"{self.mod_dir}: {len(missing)} chunked orblib .in "
+                    "file(s) missing right after writing them, retrying "
+                    f"once: {missing}"
+                )
+                for start, number, tag in bounds:
+                    write_orblib_dot_in(box=False, start=start, number=number, tag=tag)
+                    write_orblib_dot_in(box=True, start=start, number=number, tag=tag)
+                missing = [f for f in expected if not os.path.isfile(f)]
+                if missing:
+                    raise RuntimeError(
+                        f"{self.mod_dir}: chunked orblib .in file(s) still "
+                        f"missing after a retry: {missing}"
+                    )
         if self.LegacyWeightSolver:
             # --------------------------------------------
             # write triaxmass.in (LegacyWeightSolver only)

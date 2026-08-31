@@ -6,6 +6,47 @@ import numpy as np
 from astropy.table import Table
 from dynamite import parameter_space as parspace
 
+
+def nanargmin_or_raise(chi2_column, which_chi2):
+    """``np.nanargmin`` with a clear error instead of a bare ValueError.
+
+    An iteration where every model failed (e.g. every orbit library in it
+    hit a build error) leaves ``chi2_column`` entirely NaN. Bare
+    ``np.nanargmin`` raises ``ValueError: All-NaN slice encountered`` there,
+    which crashes the whole parameter search with no indication of why —
+    the real problem is upstream, in whatever made every model in the
+    iteration fail.
+
+    Parameters
+    ----------
+    chi2_column : array-like
+        the chi2 (or kinchi2) column of the current models table.
+    which_chi2 : str
+        name of the chi2 column, used only for the error message.
+
+    Returns
+    -------
+    int
+        index of the minimum value.
+
+    Raises
+    ------
+    RuntimeError
+        if every value is NaN.
+
+    """
+    chi2_column = np.asarray(chi2_column)
+    if np.all(np.isnan(chi2_column)):
+        raise RuntimeError(
+            f"Cannot pick a new center model: all {len(chi2_column)} "
+            f"model(s) in the current table have NaN {which_chi2}. Every "
+            "model in the last iteration failed (orbit library build or "
+            "weight solve) -- check the model/orbit-library logs for the "
+            "actual failure before re-running."
+        )
+    return np.nanargmin(chi2_column)
+
+
 # ---------------------------------------------------------------------------
 # Bayesian Optimization: training-data extraction pipeline
 # (used by BayesOptGenerator)
@@ -984,7 +1025,9 @@ class GridWalk(ParameterGenerator):
                 center_idx = 0
             else:
                 # center criterion: min(chi2)
-                center_idx = np.nanargmin(self.current_models.table[self.chi2])
+                center_idx = nanargmin_or_raise(
+                    self.current_models.table[self.chi2], self.chi2
+                )
             n_par = self.par_space.n_par
             center = list(self.current_models.table[center_idx])[:n_par]
             raw_center = self.par_space.get_raw_value_from_param_value(center)
@@ -2057,7 +2100,9 @@ class FullGrid(ParameterGenerator):
                 center_idx = 0
             else:
                 # center criterion: min(chi2)
-                center_idx = np.nanargmin(self.current_models.table[self.chi2])
+                center_idx = nanargmin_or_raise(
+                    self.current_models.table[self.chi2], self.chi2
+                )
             n_par = self.par_space.n_par
             center = list(self.current_models.table[center_idx])[:n_par]
             raw_center = self.par_space.get_raw_value_from_param_value(center)
