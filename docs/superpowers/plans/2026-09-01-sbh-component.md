@@ -110,11 +110,15 @@ def test_rho0_from_mass_round_trips():
     m_target, a = 1.79e5, 3.06
     for al, b, g in CASES:
         rho0 = SBH.rho0_from_mass(m_target, a, al, b, g)
-        # r large enough that M(<r) has converged for this beta
-        m_inf = float(SBH.mass_enclosed(a * 1e8, 0.0, 0.0,
+        # M(<r) approaches M_tot as (1-t)**q with q = (beta-3)/alpha, which
+        # is only 0.5 for e.g. (1.0, 3.5, 1.75) -- so even at r = a*1e12 the
+        # truncated integral is ~1e-6 short. The point of this test is that
+        # the normalisation constant is right, not that a truncated integral
+        # converges; Task 7's Fortran agreement test is the tighter net.
+        m_inf = float(SBH.mass_enclosed(a * 1e12, 0.0, 0.0,
                                         (rho0, a, al, b, g)))
         rel = abs(m_inf / m_target - 1.0)
-        assert rel < 1e-6, \
+        assert rel < 1e-3, \
             f'rho0 round trip (al,b,g)=({al},{b},{g}): rel err {rel:.2e}'
     print('  rho0_from_mass_round_trips OK')
 
@@ -400,7 +404,7 @@ def test_acceleration_equals_minus_grad_potential():
 
 def test_acceleration_points_inward():
     """Gravity must attract: the radial acceleration is negative."""
-    par = {'m': 1.79e5, 'a_km': 3.06, 'alpha': 3.91,
+    par = {'m': 1.79e5, 'a_pc': 3.06, 'alpha': 3.91,
            'beta': 4.50, 'gamma': 2.24}
     for r in np.geomspace(1e-2, 1e2, 10):
         ax, ay, az = SBH.acceleration(r, 0.0, 0.0, par)
@@ -496,7 +500,10 @@ Append these methods to `StellarBlackHoles`:
         z = np.asarray(z, dtype=float)
         r = np.sqrt(x**2 + y**2 + z**2)
 
-        a_pc = par['a_pc'] if 'a_pc' in par else par['a_km']
+        # 'a_pc' only -- deliberately NO a_km fallback. Mixing the two
+        # silently scales the profile by ~3e13. The km-unit path is the
+        # legacy file, and get_dh_legacy_strings converts there separately.
+        a_pc = par['a_pc']
         rho0 = StellarBlackHoles.rho0_from_mass(
             par['m'], a_pc, par['alpha'], par['beta'], par['gamma'])
         pars = (rho0, a_pc, par['alpha'], par['beta'], par['gamma'])
@@ -1195,7 +1202,64 @@ At the end of `dm_accel`, after its `end select`:
         end if
 ```
 
-- [ ] **Step 5: Rebuild and commit**
+- [ ] **Step 5: Expose sBH-only wrappers for the agreement test**
+
+Task 7's probe cannot call `dm_setup`/`dm_potent`/`dm_accel`, because those
+call into `triaxpotent`, which needs a stellar MGE the probe does not have.
+Add three thin public wrappers that run *only* the sBH block. They must call
+the same `sbh_menc`/`sbh_betai` helpers as the real code paths, otherwise
+the agreement test verifies nothing.
+
+Add to the module's public list:
+
+```fortran
+    ! sBH-only entry points, for the standalone agreement probe. These
+    ! duplicate the sBH blocks of dm_setup/dm_potent/dm_accel but MUST call
+    ! the same sbh_menc/sbh_betai helpers, so they cannot drift.
+    public:: dm_setup_sbh_only, dm_potent_sbh_only, dm_accel_sbh_only
+```
+
+and in `contains`:
+
+```fortran
+    subroutine dm_setup_sbh_only()
+        sbh_present = (sbh_profile_type == 6)
+        if (.not. sbh_present) stop 'dm_setup_sbh_only: no sBH block'
+        if (n_sbhparam /= 5) stop 'wrong number of sBH parameters'
+        sbh_rho0 = sbhparam(1)
+        sbh_a = sbhparam(2)
+        sbh_al = sbhparam(3)
+        sbh_be = sbhparam(4)
+        sbh_ga = sbhparam(5)
+    end subroutine dm_setup_sbh_only
+
+    subroutine dm_potent_sbh_only(x, y, z, pot)
+        real(kind=dp), intent(in) :: x, y, z
+        real(kind=dp), intent(out) :: pot
+        real(kind=dp) :: d, xi, tail
+
+        d = sqrt(x*x + y*y + z*z)
+        xi = (d/sbh_a)**sbh_al/(1.0_dp + (d/sbh_a)**sbh_al)
+        tail = 4.0_dp*pi_d*sbh_a*sbh_a*sbh_rho0/sbh_al &
+               *sbh_betai((sbh_be - 2.0_dp)/sbh_al, &
+                          (2.0_dp - sbh_ga)/sbh_al, 1.0_dp - xi)
+        pot = grav_const_km*(sbh_menc(d)/d + tail)
+    end subroutine dm_potent_sbh_only
+
+    subroutine dm_accel_sbh_only(x, y, z, vx, vy, vz)
+        real(kind=dp), intent(in) :: x, y, z
+        real(kind=dp), intent(out) :: vx, vy, vz
+        real(kind=dp) :: d, acceleration_r
+
+        d = sqrt(x*x + y*y + z*z)
+        acceleration_r = -grav_const_km*sbh_menc(d)/(d*d)
+        vx = x/d*acceleration_r
+        vy = y/d*acceleration_r
+        vz = z/d*acceleration_r
+    end subroutine dm_accel_sbh_only
+```
+
+- [ ] **Step 6: Rebuild and commit**
 
 Run:
 ```bash
@@ -1274,12 +1338,9 @@ program sbh_probe
 end program sbh_probe
 ```
 
-**Note for the implementer:** `dm_setup`, `dm_potent` and `dm_accel` call
-`tp_setup`/`tp_potent`/`tp_accel`, which need a stellar MGE that this probe
-does not have. Expose thin `*_sbh_only` wrappers in `dmpotent.f90` that run
-only the sBH block, and make them `public`. They are three or four lines
-each and reuse `sbh_menc`/`sbh_betai`, so they cannot drift from the real
-code paths as long as they call the same helpers.
+**Note for the implementer:** the `*_sbh_only` wrappers this probe calls are
+created in **Task 6, Step 5** — they already exist by the time you get here.
+Do not add them to `dmpotent.f90` again.
 
 - [ ] **Step 2: Add the Makefile target**
 
@@ -1686,8 +1747,8 @@ mass gap) have no tasks, as intended.
 - Task 4 Step 3 and Task 8 Step 4 require reading the surrounding
   `orblib.py` code to get exact variable names; the plan says so rather
   than inventing them.
-- Task 7's `*_sbh_only` wrappers are described but not written out, because
-  the right shape depends on how `tp_setup` fails without an MGE. This is
-  the least specified step in the plan.
+- Task 7 s wrappers: RESOLVED in the pre-flight scan, now written out in
+  Task 6 Step 5.
+
 - Task 9 Step 1's YAML schema must be copied from the neighbouring halo
   component; the sketch may not match current key names.
