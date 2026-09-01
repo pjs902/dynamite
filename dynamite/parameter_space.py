@@ -147,25 +147,33 @@ def fit_gp(X_norm, y):
 
     Returns
     -------
-    model : botorch GP model (SingleTaskGP or SingleTaskVariationalGP)
+    model : botorch SingleTaskGP
         fitted on -chi2 (BoTorch maximizes, so training targets are
         negated chi2).
     """
     import torch
-    from botorch.models import SingleTaskGP, SingleTaskVariationalGP
+    from botorch.models import SingleTaskGP
     from botorch.fit import fit_gpytorch_mll
-    from gpytorch.mlls import ExactMarginalLogLikelihood, VariationalELBO
+    from gpytorch.mlls import ExactMarginalLogLikelihood
 
     X_t = torch.tensor(X_norm, dtype=torch.double)
     Y_t = -torch.tensor(y, dtype=torch.double).unsqueeze(-1)
 
-    n_train = X_t.shape[0]
-    if n_train > 300:
-        model = SingleTaskVariationalGP(X_t, Y_t).to(torch.double)
-        mll = VariationalELBO(model.likelihood, model.model, num_data=n_train)
-    else:
-        model = SingleTaskGP(X_t, Y_t).to(torch.double)
-        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+    # ponytail: always an exact GP. This used to switch to
+    # SingleTaskVariationalGP above n_train=300, which was wrong twice over:
+    # BoTorch applies no Standardize on that branch, so the SVGP was fit by
+    # ELBO against raw chi2 targets of magnitude ~3e5 and simply failed to
+    # learn (posterior mean flat at the data mean, all variance dumped into
+    # the likelihood noise -- a recovered noise floor of 26187 against an
+    # injected sigma of 50). Nothing raised; the number just came back
+    # plausible-looking and uncalibrated. And the switch bought nothing: an
+    # exact fit is 0.6 s at n=1000 and 3.8 s at n=2000, against ~18 h of
+    # orblib per model, so n will not reach where sparse inference pays.
+    # If a run ever does get slow here (exact cost is O(n^3)), reinstate a
+    # sparse branch only with an explicit outcome transform AND a test that
+    # recovers a known injected noise level across the switch.
+    model = SingleTaskGP(X_t, Y_t).to(torch.double)
+    mll = ExactMarginalLogLikelihood(model.likelihood, model)
     fit_gpytorch_mll(mll)
     return model
 
@@ -195,7 +203,7 @@ def fit_gp_from_table(table, parspace, which_chi2="kinchi2", logger=None):
 
     Returns
     -------
-    model : botorch GP model (SingleTaskGP or SingleTaskVariationalGP)
+    model : botorch SingleTaskGP
         fitted on -chi2 (BoTorch maximizes, so training targets are
         negated chi2).
     X_norm, y : np.ndarray
