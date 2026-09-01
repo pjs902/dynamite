@@ -129,15 +129,61 @@ Constraints, and where they come from:
 - `gamma < 2` is **not** imposed. Phi(0) genuinely diverges for gamma >= 2,
   but see below: that radius is never evaluated.
 
-## Potential
+## Potential — closed form, no tabulation
 
-`Phi(r) = -G [ M(<r)/r + 4 pi Int_r^inf r' rho dr' ]`. The outer term's
-integrand goes as r^(1-gamma) and so diverges as r -> 0 for gamma >= 2. This
-is real physics, not a formula defect (the hypergeometric convergence
-condition c-a-b>0 reduces exactly to gamma < 2).
+`Phi(r) = -G [ M(<r)/r + T(r) ]`, `T(r) = 4 pi Int_r^inf r' rho dr'`.
 
-It does not require restricting gamma, because of how DYNAMITE evaluates
-potentials:
+With `p = (beta-2)/alpha`, `q = (2-gamma)/alpha`, `t = x^alpha/(1+x^alpha)`:
+
+```
+T(r) = (4 pi a^2 rho0 / alpha) * B(1-t; p, q)
+```
+
+`p > 0` always (beta > 3 > 2), but **`q <= 0` whenever gamma >= 2**, and the
+LIMEPY fit sits at gamma = 2.24. `T` genuinely diverges as r -> 0 for
+gamma >= 2 — real physics, not a formula defect: the hypergeometric
+convergence condition c-a-b>0 reduces exactly to gamma < 2.
+
+This does **not** require restricting gamma or tabulating anything. Two
+facts settle it:
+
+1. **Phi is only defined up to an additive constant**, so the divergent
+   constant can simply be dropped. Verified: the constant-free difference
+   `T(r1) - T(r2)` matches mpmath quadrature to **1e-16 .. 1e-50** for every
+   test case including all gamma >= 2. And the divergence is mild in
+   magnitude — the antiderivative reaches only ~ -350 at r/a = 1e-8 for
+   gamma = 2.24.
+
+2. **The incomplete beta extends to q <= 0 by downward recurrence** from a
+   positive-q evaluation:
+
+   ```
+   B(x;p,q) = [ (p+q) * B(x;p,q+1) - x^p * (1-x)^q ] / q
+   ```
+
+   Start at `q+n` with `q+n > 0` (`n = ceil(1-q)+1`, which is 3 for every
+   parameter set of interest), evaluate with the existing `zh_betai` in its
+   well-tested positive-parameter regime, then step down n times.
+
+   Verified against mpmath over r/a = 1e-6 .. 1e4: **worst relative error
+   3.3e-14** across all cases.
+
+**Do not call `zh_betai` directly with q <= 0.** It has a `b <= 0` branch
+that forces the continued fraction, but a faithful Python transcription of
+`sub/specfunc_beta.f90` tested against mpmath returns **`inf` for every
+q < 0 case** — Numerical Recipes' `betacf` does not converge for negative b.
+This is measured, not assumed, and it is the reason the recurrence exists.
+
+Guard `gamma = 2` exactly (`q = 0`, division by zero in the recurrence and
+`2-gamma = 0` in the antiderivative): reject it in `validate_parset`, or
+nudge by an epsilon. The physical content is a log limit; the parameter is
+continuous and the sampler has no reason to land exactly there.
+
+This is ~8 lines of Fortran and is exact, versus ~20 lines of grid setup
+plus interpolation for a tabulated Phi, which is why the tabulation was
+dropped.
+
+### Why the acceleration needs none of this
 
 - The orbit integrators call `ip_accel`/`ip_potent` (`interpolpotent.f90`),
   never `dm_accel`/`dm_potent` directly.
@@ -145,16 +191,14 @@ potentials:
   log-r/theta/phi grid, calling `dm_accel` to fill it, and caches it to
   disk. Its inner radius is bounded by
   `rmin2 = min((10^rlogmin * 0.01)^2, (min(sigobs_km)/10)^2)`, so r=0 is
-  never reached.
+  never reached. `ip_testaccuracy` hard-stops on a bad grid, so failures
+  are loud.
 - `ip_potent` is **not** interpolated — it passes straight through to
-  `dm_potent`, so `dm_potent` must still be correct and cheap.
+  `dm_potent`, which is why `dm_potent` must be correct and cheap.
 
-**Decision:** tabulate Phi once in `dm_setup` by cumulative integration of
-the analytic `G*M(<r)/r^2` over a log-r grid spanning the interpolation
-grid's range, and interpolate in `dm_potent`. ~20 lines, contained, never
-touches the acceleration path, and the arbitrary additive constant is
-irrelevant to the dynamics. `ip_testaccuracy` already hard-stops on a
-misbehaving grid, so failures are loud.
+Both beta-function parameters for `M(<r)` — `(3-gamma)/alpha` and
+`(beta-3)/alpha` — are strictly positive, so the acceleration path uses
+`zh_betai` unmodified.
 
 ## Components
 
@@ -236,8 +280,13 @@ cases 1, 2, 3 and 5 are not refactored and cannot regress.
   for gamma > 2. It is unreachable today because `GeneralisedNFW.validate_parset`
   requires `gam <= 1`. Left untouched deliberately: it is not an active bug,
   and editing a working upstream-shared path widens the merge surface for no
-  current benefit. Recorded here so the next person to relax that bound
-  knows.
+  current benefit.
+
+  Recorded here because it is now **measured rather than suspected**: a
+  faithful Python transcription of `zh_betai` returns `inf` for every
+  negative-second-argument case tested. Anyone relaxing `gam` past 2 would
+  get `inf` potentials, not merely reduced accuracy. The fix, if ever
+  wanted, is the same downward recurrence this component uses.
 - More than two dark components.
 - Triaxial or flattened sBH (both external models are spherical codes).
 - Resolving the 17x total-mass disagreement.
@@ -262,6 +311,7 @@ cases 1, 2, 3 and 5 are not refactored and cannot regress.
 Fitting and verification scripts to be committed under `dev_notes/`:
 `target_phaseflow.py`, `target_gcfit.py`, `fit_joint.py`,
 `fit_alternatives.py`, `check_closed_form.py`, `check_potential.py`,
+`try_closed_potential.py`, `try_recurrence.py`, `try_zh_betai.py`,
 `plot_bestfit.py`.
 
 Reference values from the joint (rho + M) fits:
