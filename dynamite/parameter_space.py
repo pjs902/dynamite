@@ -116,6 +116,139 @@ def raw_to_par_values(raw_values_row, free_params):
     return par_vals
 
 
+def clip_training_to_bounds(X_norm, free_param_names, lo_raw=None, hi_raw=None, logger=None):
+    """Clip normalized training rows into [0,1]; warn per axis.
+
+    Historical rows from a warm-start may lie outside the current lo/hi;
+    clipped rows keep the GP anchored at the boundary instead of
+    extrapolating. Shared by BayesOptGenerator and post-hoc GP refits
+    (e.g. dynamite_analysis's GP corner plot) so both clip identically.
+    """
+    X_norm = np.asarray(X_norm, dtype=float)
+    n_lo = np.sum(X_norm < 0.0, axis=0)
+    n_hi = np.sum(X_norm > 1.0, axis=0)
+    if logger is not None:
+        for j, name in enumerate(free_param_names):
+            if n_lo[j] or n_hi[j]:
+                bounds = f"[{lo_raw[j]}, {hi_raw[j]}]" if lo_raw is not None else "[0, 1]"
+                logger.warning(
+                    f"{int(n_lo[j]) + int(n_hi[j])} warm-start training "
+                    f"rows outside {bounds} for {name}; clipping to the bounds"
+                )
+    return np.clip(X_norm, 0.0, 1.0)
+
+
+def fit_gp(X_norm, y):
+    """Fit a GP surrogate to (X_norm, y) -- normalized inputs, raw chi2.
+
+    Shared BoTorch fit procedure used by both BayesOptGenerator's live
+    acquisition step and post-hoc GP refits from a saved all_models.ecsv
+    (e.g. dynamite_analysis's GP corner plot).
+
+    Returns
+    -------
+    model : botorch GP model (SingleTaskGP or SingleTaskVariationalGP)
+        fitted on -chi2 (BoTorch maximizes, so training targets are
+        negated chi2).
+    """
+    import torch
+    from botorch.models import SingleTaskGP, SingleTaskVariationalGP
+    from botorch.fit import fit_gpytorch_mll
+    from gpytorch.mlls import ExactMarginalLogLikelihood, VariationalELBO
+
+    X_t = torch.tensor(X_norm, dtype=torch.double)
+    Y_t = -torch.tensor(y, dtype=torch.double).unsqueeze(-1)
+
+    n_train = X_t.shape[0]
+    if n_train > 300:
+        model = SingleTaskVariationalGP(X_t, Y_t).to(torch.double)
+        mll = VariationalELBO(model.likelihood, model.model, num_data=n_train)
+    else:
+        model = SingleTaskGP(X_t, Y_t).to(torch.double)
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+    fit_gpytorch_mll(mll)
+    return model
+
+
+def fit_gp_from_table(table, parspace, which_chi2="kinchi2", logger=None):
+    """Fit a GP surrogate to chi2(parameters) from an AllModels.table.
+
+    Factored out of ``BayesOptGenerator._gp_acquisition_batch`` so it can
+    be reused by post-hoc plotting/analysis (e.g. dynamite_analysis's GP
+    corner plot) without re-running the search: any finished (or
+    in-progress) BayesOpt run's all_models.ecsv is enough to refit an
+    equivalent GP, since the model class/fit procedure is deterministic
+    given the training data (mod BoTorch's internal hyperparameter-fit
+    randomness).
+
+    Parameters
+    ----------
+    table : astropy.table.Table
+        an AllModels.table (or any table with the same columns).
+    parspace : ParameterSpace
+        the parameter space the table's models were drawn from.
+    which_chi2 : str
+        name of the chi2 column to fit against.
+    logger : logging.Logger, optional
+        if given, out-of-[0,1] training rows are warned about (see
+        clip_training_to_bounds).
+
+    Returns
+    -------
+    model : botorch GP model (SingleTaskGP or SingleTaskVariationalGP)
+        fitted on -chi2 (BoTorch maximizes, so training targets are
+        negated chi2).
+    X_norm, y : np.ndarray
+        the training data the GP was fit on (normalized inputs, raw chi2).
+    free_param_names : list[str]
+    lo_raw, hi_raw : np.ndarray
+        bounds in raw_value space, for denormalizing grid points later.
+    """
+    X_norm, y, free_param_names, lo_raw, hi_raw = extract_gp_training_data(
+        table, parspace, which_chi2=which_chi2
+    )
+    X_norm = clip_training_to_bounds(X_norm, free_param_names, lo_raw=lo_raw, hi_raw=hi_raw, logger=logger)
+    model = fit_gp(X_norm, y)
+    return model, X_norm, y, free_param_names, lo_raw, hi_raw
+
+
+def gp_posterior_mean_at(model, X_unit):
+    """Posterior mean of a fitted GP at unit-cube points.
+
+    Parameters
+    ----------
+    model : botorch GP model (as returned by fit_gp_from_table)
+    X_unit : np.ndarray (n, n_free) in [0, 1]
+
+    Returns
+    -------
+    np.ndarray (n,) -- posterior mean in the model's training units
+    (i.e. -chi2, since fit_gp_from_table negates chi2 for BoTorch).
+    """
+    import torch
+
+    X_t = torch.tensor(np.atleast_2d(X_unit), dtype=torch.double)
+    with torch.no_grad():
+        posterior = model.posterior(X_t)
+        return posterior.mean.numpy().ravel()
+
+
+def gp_posterior_mean_and_std_at(model, X_unit):
+    """Posterior mean and std of a fitted GP at unit-cube points.
+
+    Same units as gp_posterior_mean_at (i.e. -chi2). Returns (mean, std),
+    each np.ndarray (n,).
+    """
+    import torch
+
+    X_t = torch.tensor(np.atleast_2d(X_unit), dtype=torch.double)
+    with torch.no_grad():
+        posterior = model.posterior(X_t)
+        mean = posterior.mean.numpy().ravel()
+        std = posterior.variance.clamp_min(0.0).sqrt().numpy().ravel()
+    return mean, std
+
+
 def get_qobs_from_system(system):
     """Return qobs of the TriaxialVisibleComponent, or None if absent.
 
@@ -1266,25 +1399,10 @@ class BayesOptGenerator(ParameterGenerator):
         self._axial_queue = self._build_axial_queue() if self.warmup_mode == "initial_guess" else []
         self._initial_guess_explicit = bool(self._initial_guess_phys)
         self._axial_rebuilt = False
-
-    def _clip_training_to_bounds(self, X_norm):
-        """Clip normalized training rows into [0,1]; warn per axis.
-
-        Historical rows from a warm-start may lie outside the current
-        lo/hi; clipped rows keep the GP anchored at the boundary instead
-        of extrapolating.
-        """
-        X_norm = np.asarray(X_norm, dtype=float)
-        n_lo = np.sum(X_norm < 0.0, axis=0)
-        n_hi = np.sum(X_norm > 1.0, axis=0)
-        for j, name in enumerate(self.free_param_names):
-            if n_lo[j] or n_hi[j]:
-                self.logger.warning(
-                    f"{int(n_lo[j]) + int(n_hi[j])} warm-start training "
-                    f"rows outside [{self.lo_free[j]}, {self.hi_free[j]}] "
-                    f"for {name}; clipping to the bounds"
-                )
-        return np.clip(X_norm, 0.0, 1.0)
+        # See check_specific_stopping_criteria: guards against the inherited
+        # min_delta_chi2 backstop firing before this generator has ever
+        # proposed a model.
+        self._checked_once = False
 
     def _best_known_unit(self, table):
         """Normalized coords of the valid row with the lowest chi2."""
@@ -1306,6 +1424,16 @@ class BayesOptGenerator(ParameterGenerator):
         Total: 1 + 2*n_free points. All clipped to [0, 1].
         `center` defaults to the normalized initial_guess; callers may pass
         an explicit center (e.g. the best historical model for warm-start).
+
+        TODO(2026-09-01, higher-dimensional runs): this queue's length is
+        1 + 2*n_free -- 7 at this system's current 3 free params, but 21 at
+        a hypothetical ~10. Combined with the warm-start redundancy noted
+        in specific_generate_method (axial points landing at/near a prior
+        grid-based generator's own already-sampled neighbourhood), a much
+        larger axial sweep before GP acquisition even starts becomes a much
+        larger relative cost at higher D. Worth deciding whether to
+        skip/shrink this specifically as n_free grows, not just when
+        warm-starting.
         """
         if center is None:
             center = self._initial_guess_to_unit()
@@ -1641,6 +1769,20 @@ class BayesOptGenerator(ParameterGenerator):
                 if n_valid > 0:
                     center = self._best_known_unit(table)
                     if center is not None:
+                        # TODO(2026-09-01): when warm-starting onto a table an
+                        # earlier GridWalk already ran to convergence, this
+                        # axial sweep largely re-probes territory GridWalk's
+                        # own grid_walk() has already sampled around its best
+                        # point (observed directly on the NGC5139 viewing_grid
+                        # run: the axial batch's neighbors landed at or near
+                        # existing GridWalk rows, and the "center" candidate
+                        # itself is frequently an exact duplicate). Worth
+                        # exploring whether initial_guess warm-starts should
+                        # skip straight to GP acquisition when the incoming
+                        # table already has adequate local coverage around
+                        # the best point (e.g. from a prior grid-based
+                        # generator), rather than always spending a batch on
+                        # axial probes designed for a cold start.
                         self.logger.info("warm-start: axial warm-up centered on the best historical model")
                         self._axial_queue = self._build_axial_queue(center=center)
             if self._axial_queue:
@@ -1780,30 +1922,17 @@ class BayesOptGenerator(ParameterGenerator):
     def _gp_acquisition_batch(self):
         """Fit a GP and maximize qLogEI to produce a batch of models."""
         import torch
-        from botorch.models import SingleTaskGP, SingleTaskVariationalGP
-        from botorch.fit import fit_gpytorch_mll
         from botorch.acquisition import qLogExpectedImprovement
         from botorch.optim import optimize_acqf
-        from gpytorch.mlls import ExactMarginalLogLikelihood, VariationalELBO
 
         table = self.current_models.table
-        X_norm, y, names, lo_raw, hi_raw = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
-        X_norm = self._clip_training_to_bounds(X_norm)
+        model, X_norm, y, names, lo_raw, hi_raw = fit_gp_from_table(
+            table, self.par_space, which_chi2=self.chi2, logger=self.logger
+        )
 
         assert names == self.free_param_names, f"param order mismatch: {names} vs {self.free_param_names}"
 
-        X_t = torch.tensor(X_norm, dtype=torch.double)
-        chi2_t = torch.tensor(y, dtype=torch.double).unsqueeze(-1)
-        Y_t = -chi2_t  # BoTorch maximizes; negate chi2
-
-        n_train = X_t.shape[0]
-        if n_train > 300:
-            model = SingleTaskVariationalGP(X_t, Y_t).to(torch.double)
-            mll = VariationalELBO(model.likelihood, model.model, num_data=n_train)
-        else:
-            model = SingleTaskGP(X_t, Y_t).to(torch.double)
-            mll = ExactMarginalLogLikelihood(model.likelihood, model)
-        fit_gpytorch_mll(mll)
+        Y_t = -torch.tensor(y, dtype=torch.double).unsqueeze(-1)  # BoTorch maximizes; negate chi2
         self._gp_model = model
 
         d = len(self.free_par_idx)
@@ -1823,6 +1952,14 @@ class BayesOptGenerator(ParameterGenerator):
         )
 
         nonlinear, linear = self._make_triaxiality_constraints()
+        # TODO(2026-09-01, higher-dimensional runs): num_restarts=10,
+        # raw_samples=128 are hardcoded and were sized for a handful of free
+        # params (this system currently has 3). BoTorch's own guidance is to
+        # scale raw_samples up substantially with dimensionality -- the
+        # acquisition surface itself picks up more local optima as D grows,
+        # so a fixed sample budget that reliably finds the qLogEI optimum at
+        # 3D is not guaranteed to at ~10D. Re-check (and likely raise) both
+        # before trusting a higher-dimensional run's proposals.
         opt_kwargs = dict(acq_function=acqf, bounds=bounds, q=self.batch_size, num_restarts=10, raw_samples=128)
         if nonlinear is not None:
             opt_kwargs["nonlinear_inequality_constraints"] = nonlinear
@@ -1930,7 +2067,28 @@ class BayesOptGenerator(ParameterGenerator):
 
     def _tr_bounds(self):
         """Unit-space acquisition box: trust region if active+triggered,
-        else None (full box)."""
+        else None (full box).
+
+        TODO(2026-09-01, higher-dimensional runs): this trust region is
+        ISOTROPIC -- one side length applied identically to every free
+        dimension. That is TuRBO-lite's deliberate simplification versus
+        full TuRBO (Eriksson et al. 2019), which rescales the box per axis
+        using the GP's ARD length scales, so a fast-varying dimension gets
+        a tight box while a slow-varying one gets a wide box. At 3 free
+        params (this system's viewing_grid) the simplification is fine; if
+        this ever runs with ~10 free params (some discussed for a future
+        NGC5139 grid), an isotropic box is very likely wrong for at least
+        some dimensions by construction, since not all 10 will have
+        comparable sensitivity. Revisit ARD-based per-axis scaling before
+        trusting trust_region: true at that dimensionality.
+
+        Also: `tr_trigger_frac=0.1` in `_knn_radius` below was tuned/
+        eyeballed at low D. Nearest-neighbour distances in a unit cube
+        concentrate as dimension count grows (a standard curse-of-
+        dimensionality effect), so this same threshold may trigger at the
+        wrong time (too early or never) at higher D -- re-validate, don't
+        assume it transfers.
+        """
         if not self.trust_region:
             return None
         table = self.current_models.table
@@ -1989,11 +2147,26 @@ class BayesOptGenerator(ParameterGenerator):
     def check_specific_stopping_criteria(self):
         """BayesOpt convergence signals plus the inherited chi2 backstop.
 
-        Calls super() first (the chi2-plateau backstop). Then, if a GP has
-        been fitted, checks (1) max posterior variance over a 256-point Sobol
-        grid and (2) the last qLogEI batch value.
+        Calls super() first (the chi2-plateau backstop) -- EXCEPT on this
+        generator's very first check. The backstop compares the table's
+        last two recorded iterations' chi2 with no regard for which
+        generator produced them: warm-starting BayesOptGenerator onto a
+        table an EARLIER generator (e.g. GridWalk) already judged converged
+        makes super() see that same "no improvement" history immediately,
+        stopping this generator before it ever proposes a single model.
+        Skipping it once guarantees at least one real GP-driven batch; every
+        check after that uses the real backstop, now judging this
+        generator's OWN iterations.
+
+        After the (possibly skipped) backstop: if a GP has been fitted,
+        checks (1) max posterior variance over a 256-point Sobol grid and
+        (2) the last qLogEI batch value.
         """
-        super().check_specific_stopping_criteria()
+        if not self._checked_once:
+            self._checked_once = True
+            self.status["min_delta_chi2_reached"] = False
+        else:
+            super().check_specific_stopping_criteria()
 
         if self._gp_model is None:
             return

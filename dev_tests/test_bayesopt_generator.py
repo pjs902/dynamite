@@ -996,7 +996,7 @@ def test_warmstart_clip_and_log():
     gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=_bo_settings())
     X = np.array([[0.5], [1.5], [-0.2]])  # two out of bounds
     records = _capture_logs(gen)
-    out = gen._clip_training_to_bounds(X)
+    out = ps.clip_training_to_bounds(X, gen.free_param_names, lo_raw=gen.lo_free, hi_raw=gen.hi_free, logger=gen.logger)
     np.testing.assert_allclose(out, [[0.5], [1.0], [0.0]])
     assert any("outside" in r for r in records), records
     print("  test_warmstart_clip_and_log PASSED")
