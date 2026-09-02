@@ -100,12 +100,42 @@ def test_incomplete_beta_integer_q_raises():
     print('  incomplete_beta_integer_q_raises OK')
 
 
+def test_acceleration_equals_minus_grad_potential():
+    """a_r must equal -dPhi/dr, which ties potential() and acceleration()."""
+    rho0, a = 1.0e5, 1.5
+    G = dyn.constants.GRAV_CONST_KM / dyn.constants.PARSEC_KM
+    for al, b, g in CASES:
+        pars = (rho0, a, al, b, g)
+        for r in np.geomspace(1e-2, 1e2, 8):
+            h = r * 1e-6
+            phi_p = float(SBH.potential(r + h, 0.0, 0.0, pars))
+            phi_m = float(SBH.potential(r - h, 0.0, 0.0, pars))
+            num = -(phi_p - phi_m) / (2 * h)
+            ana = -G * float(SBH.mass_enclosed(r, 0.0, 0.0, pars)) / r ** 2
+            rel = abs(ana / num - 1.0)
+            assert rel < 1e-5, \
+                f'accel vs -dPhi/dr (al,b,g)=({al},{b},{g}) r={r}: {rel:.2e}'
+    print('  acceleration_equals_minus_grad_potential OK')
+
+
+def test_acceleration_points_inward():
+    """Gravity must attract: the radial acceleration is negative."""
+    par = {'m': 1.79e5, 'a_pc': 3.06, 'alpha': 3.91,
+           'beta': 4.50, 'gamma': 2.24}
+    for r in np.geomspace(1e-2, 1e2, 10):
+        ax, ay, az = SBH.acceleration(r, 0.0, 0.0, par)
+        assert float(ax) < 0.0, f'acceleration not inward at r={r}: {ax}'
+    print('  acceleration_points_inward OK')
+
+
 TESTS = [
     test_density_matches_formula,
     test_mass_enclosed_matches_quadrature,
     test_rho0_from_mass_round_trips,
     test_incomplete_beta_negative_q,
     test_incomplete_beta_integer_q_raises,
+    test_acceleration_equals_minus_grad_potential,
+    test_acceleration_points_inward,
 ]
 
 if __name__ == '__main__':

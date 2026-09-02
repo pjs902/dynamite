@@ -5,6 +5,7 @@ import numpy as np
 from scipy import special, integrate
 
 import logging
+import warnings
 
 import dynamite as dyn
 from dynamite import mges as mge
@@ -1650,6 +1651,168 @@ class StellarBlackHoles(DarkComponent):
         """
         b_complete = special.beta((3. - gamma) / alpha, (beta - 3.) / alpha)
         return m * alpha / (4. * np.pi * a**3 * b_complete)
+
+    @staticmethod
+    def _outer_tail(r, rho0, a, alpha, beta, gamma):
+        """4 pi int_r^inf r' rho(r') dr', the potential's outer term.
+
+        Equals ``(4 pi a^2 rho0 / alpha) * B(1-t; p_out, q_out)`` with
+        ``p_out = (beta-2)/alpha``, ``q_out = (2-gamma)/alpha``, and
+        ``t = (r/a)**alpha / (1 + (r/a)**alpha)``.
+
+        For ``gamma < 2`` (``q_out > 0``) that closed form is evaluated
+        directly. For ``gamma >= 2`` (``q_out <= 0``) ``incomplete_beta``'s
+        downward recurrence seeds itself from ``scipy.special.betainc(p,
+        q+n, x)`` at a fixed ``q+n`` independent of how close ``x = 1-t``
+        is to 1. For small r (large 1-t), that seed saturates to exactly
+        1.0 in double precision -- betainc genuinely cannot resolve a
+        shortfall as tiny as ``(1-x)**(q+n)`` -- which silently discards
+        the information the recurrence needs and corrupts the result (this
+        is invisible in Task 1's own incomplete_beta tests, which never
+        probe x closer to 1 than 0.999). A direct quadrature of the
+        physical integral sidesteps the recurrence entirely; it is not on
+        any hot path (no caller in the codebase besides this validation).
+
+        Parameters
+        ----------
+        r : float
+            radius [pc], scalar
+        rho0, a, alpha, beta, gamma : float
+            profile parameters, see ``density``
+
+        Returns
+        -------
+        float
+        """
+        xx = r / a
+        t = xx**alpha / (1. + xx**alpha)
+        p_out = (beta - 2.) / alpha
+        q_out = (2. - gamma) / alpha
+        if q_out > 0.:
+            bi = StellarBlackHoles.incomplete_beta(1. - t, p_out, q_out)
+            return 4. * np.pi * a**2 * rho0 / alpha * bi
+        integrand = lambda rp: rp * StellarBlackHoles.density(
+            rp, 0., 0., (rho0, a, alpha, beta, gamma))
+        with warnings.catch_warnings():
+            # epsrel=1e-14 asks quad for more than double precision can
+            # certify; it still delivers (checked against mpmath), it just
+            # warns that it cannot vouch for the last couple of digits.
+            warnings.simplefilter('ignore', integrate.IntegrationWarning)
+            val, _ = integrate.quad(integrand, r, np.inf, limit=400,
+                                    epsabs=1e-14, epsrel=1e-14)
+        return 4. * np.pi * val
+
+    @staticmethod
+    def potential(x, y, z, pars):
+        '''
+        Gravitational potential Phi (negative, and -> 0 at large r for
+        gamma < 2; for gamma >= 2 it diverges as r -> 0, which is physical).
+
+        Phi(r) = -G [ M(<r)/r + 4 pi int_r^inf r' rho dr' ]
+
+        The outer term is
+        ``(4 pi a^2 rho0 / alpha) * B(1-t; (beta-2)/alpha, (2-gamma)/alpha)``,
+        whose second beta parameter is <= 0 when gamma >= 2 -- hence
+        ``incomplete_beta`` rather than ``scipy.special.betainc``. See
+        ``_outer_tail`` for why that branch falls back to quadrature.
+
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates [pc]
+        pars : tuple
+            (rho0, a, alpha, beta, gamma), rho0 in Msun/pc**3, a in pc
+
+        Returns
+        -------
+        Phi : ndarray
+            potential [(km/s)**2]
+        '''
+        rho0, a, alpha, beta, gamma = pars
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+        tail = np.vectorize(StellarBlackHoles._outer_tail)(
+            r, rho0, a, alpha, beta, gamma)
+        m_enc = StellarBlackHoles.mass_enclosed(x, y, z, pars)
+        G = dyn.constants.GRAV_CONST_KM / dyn.constants.PARSEC_KM
+        return -G * (m_enc / r + tail)
+
+    @staticmethod
+    def acceleration(x, y, z, par):
+        """
+        Gravitational acceleration of the sBH subcluster.
+
+        Exact for all gamma < 3: ``a_r = -G M(<r) / r**2``.
+
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates [pc]
+        par : dict
+            must contain m [Msun], a_pc [pc], alpha, beta, gamma
+
+        Returns
+        -------
+        ax, ay, az : ndarray
+            Acceleration components [(km/s)**2/pc]
+        """
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+
+        # 'a_pc' only -- deliberately NO a_km fallback. Mixing the two
+        # silently scales the profile by ~3e13. The km-unit path is the
+        # legacy file, and get_dh_legacy_strings converts there separately.
+        a_pc = par['a_pc']
+        rho0 = StellarBlackHoles.rho0_from_mass(
+            par['m'], a_pc, par['alpha'], par['beta'], par['gamma'])
+        pars = (rho0, a_pc, par['alpha'], par['beta'], par['gamma'])
+        m_enc = StellarBlackHoles.mass_enclosed(x, y, z, pars)
+
+        G = dyn.constants.GRAV_CONST_KM / dyn.constants.PARSEC_KM
+        factor = -G * m_enc / r**3
+        return factor * x, factor * y, factor * z
+
+    def get_dh_legacy_strings(self, parset, system):
+        """
+        Generate the two strings the legacy Fortran needs.
+
+        Overrides the parent because the sampled parameters (m in Msun,
+        a in arcsec) differ from the legacy sequence (rhoc in Msun/km**3,
+        a in km). This mirrors ``NFW_m200_c``, which likewise injects a
+        derived quantity, and ``Hernquist``, which likewise passes a scale
+        density rather than a mass.
+
+        Parameters
+        ----------
+        parset : astropy table row
+            Holds the parameter set.
+        system : a ``dyn.physical_system.System`` object
+            Needed for the distance, to convert arcsec to km.
+
+        Returns
+        -------
+        specs : str
+            legacy code and number of parameters, space separated
+        par_vals : str
+            parameter values in the sequence legacy Fortran expects
+
+        """
+        m = parset[f'm-{self.name}']
+        a_arcsec = parset[f'a-{self.name}']
+        alpha = parset[f'alpha-{self.name}']
+        beta = parset[f'beta-{self.name}']
+        gamma = parset[f'gamma-{self.name}']
+        a_km = a_arcsec * dyn.constants.ARC_KM(system.distMPc)
+        rhoc = self.rho0_from_mass(m, a_km, alpha, beta, gamma)
+        specs = f'{self.legacy_code} {len(self.par_names)}'
+        par_vals = f'{rhoc} {a_km} {alpha} {beta} {gamma}'
+        self.logger.debug(f'sBH legacy strings: {specs} / {par_vals} '
+                          f'(from m={m} Msun, a={a_arcsec} arcsec)')
+        return specs, par_vals
 
 
 class Chi2Ext(Component):
