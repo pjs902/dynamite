@@ -250,6 +250,9 @@ orbitstart : $(ORBLIBNMOBJ) orbitstart_f.o orbitstart.f90
 orbitstart_bar : $(ORBLIBNMOBJ) orbitstart_f.o orbitstart_bar.f90
 	$(link) orbitstart_bar  $(ORBLIBNMOBJ) orbitstart_f.o orbitstart_bar.f90
 
+sbh_probe : $(ORBLIBNMOBJ) orbitstart_f.o sbh_probe.f90
+	$(link) sbh_probe  $(ORBLIBNMOBJ) orbitstart_f.o sbh_probe.f90
+
 ##############################################################
 #
 # triaxnnls_CRcut

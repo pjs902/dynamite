@@ -32,6 +32,7 @@ legacy_fortran/*.mod
 legacy_fortran/*.o
 legacy_fortran/orbitstart
 legacy_fortran/orbitstart_bar
+legacy_fortran/sbh_probe
 legacy_fortran/orblib_bar
 legacy_fortran/orblib_new_mirror
 legacy_fortran/triaxmass
