@@ -5,7 +5,6 @@ import numpy as np
 from scipy import special, integrate
 
 import logging
-import warnings
 
 import dynamite as dyn
 from dynamite import mges as mge
@@ -1656,22 +1655,15 @@ class StellarBlackHoles(DarkComponent):
     def _outer_tail(r, rho0, a, alpha, beta, gamma):
         """4 pi int_r^inf r' rho(r') dr', the potential's outer term.
 
-        Equals ``(4 pi a^2 rho0 / alpha) * B(1-t; p_out, q_out)`` with
-        ``p_out = (beta-2)/alpha``, ``q_out = (2-gamma)/alpha``, and
-        ``t = (r/a)**alpha / (1 + (r/a)**alpha)``.
+        In terms of ``y = (r/a)**alpha`` the integral is
 
-        For ``gamma < 2`` (``q_out > 0``) that closed form is evaluated
-        directly. For ``gamma >= 2`` (``q_out <= 0``) ``incomplete_beta``'s
-        downward recurrence seeds itself from ``scipy.special.betainc(p,
-        q+n, x)`` at a fixed ``q+n`` independent of how close ``x = 1-t``
-        is to 1. For small r (large 1-t), that seed saturates to exactly
-        1.0 in double precision -- betainc genuinely cannot resolve a
-        shortfall as tiny as ``(1-x)**(q+n)`` -- which silently discards
-        the information the recurrence needs and corrupts the result (this
-        is invisible in Task 1's own incomplete_beta tests, which never
-        probe x closer to 1 than 0.999). A direct quadrature of the
-        physical integral sidesteps the recurrence entirely; it is not on
-        any hot path (no caller in the codebase besides this validation).
+            (4 pi a^2 rho0 / alpha) * I(y),
+            I(y) = int_y^inf s**(q-1) * (1+s)**-(p+q) ds
+
+        with ``p = (beta-2)/alpha > 0`` and ``q = (2-gamma)/alpha``, which
+        is <= 0 for the fitted gamma > 2 profiles. ``I`` is delegated to
+        ``_outer_tail_integral``; see there for why this is parametrised
+        by ``y`` and not by ``x = 1/(1+y)``.
 
         Parameters
         ----------
@@ -1684,23 +1676,215 @@ class StellarBlackHoles(DarkComponent):
         -------
         float
         """
-        xx = r / a
-        t = xx**alpha / (1. + xx**alpha)
+        y = (r / a) ** alpha
         p_out = (beta - 2.) / alpha
         q_out = (2. - gamma) / alpha
-        if q_out > 0.:
-            bi = StellarBlackHoles.incomplete_beta(1. - t, p_out, q_out)
-            return 4. * np.pi * a**2 * rho0 / alpha * bi
-        integrand = lambda rp: rp * StellarBlackHoles.density(
-            rp, 0., 0., (rho0, a, alpha, beta, gamma))
-        with warnings.catch_warnings():
-            # epsrel=1e-14 asks quad for more than double precision can
-            # certify; it still delivers (checked against mpmath), it just
-            # warns that it cannot vouch for the last couple of digits.
-            warnings.simplefilter('ignore', integrate.IntegrationWarning)
-            val, _ = integrate.quad(integrand, r, np.inf, limit=400,
-                                    epsabs=1e-14, epsrel=1e-14)
-        return 4. * np.pi * val
+        val = StellarBlackHoles._outer_tail_integral(y, p_out, q_out)
+        return 4. * np.pi * a**2 * rho0 / alpha * val
+
+    # Tolerance and hard cap shared by the two series below. Both converge
+    # geometrically, so the tolerance is what stops them and the cap only
+    # ever fires on a caller outside the documented domain -- where it
+    # raises rather than returning a silently truncated sum. It has to be
+    # generous: the x-series' ratio is ``x = 1/(1+y_c)`` and the split
+    # ``y_c`` shrinks like 1/(p+q) (see ``_outer_tail_integral``), so the
+    # term count goes like 37*(p+q). Randomly sampling the whole legal
+    # (alpha, beta, gamma) box with p, |q| <= 200 peaked at 1346 terms.
+    _SERIES_TOL = 1e-16
+    _SERIES_MAXIT = 100000
+
+    @staticmethod
+    def _expm1_over_z(z):
+        """``(exp(z)-1)/z``, accurate as z -> 0, where it tends to 1.
+
+        Fortran has no ``expm1`` intrinsic, so the Task 6 port needs the
+        three-term Maclaurin branch below for small ``|z|`` and a plain
+        ``(exp(z)-1)/z`` otherwise.
+        """
+        if abs(z) < 1e-5:
+            return 1. + z * (0.5 + z * (1. / 6. + z / 24.))
+        return np.expm1(z) / z
+
+    @staticmethod
+    def _beta_series_small_x(x, p, q):
+        """``B(x; p, q)`` by the series about x = 0; needs 0 <= x < 1.
+
+        Expanding ``(1-u)**(q-1)`` binomially inside
+        ``int_0^x u**(p-1) (1-u)**(q-1) du`` and integrating term by term::
+
+            B(x;p,q) = x**p * Sum_{k>=0} e_k x**k / (p+k),
+            e_0 = 1,  e_k = e_{k-1} * (k-q) / k
+
+        ``e_k`` is the generalised binomial coefficient ``C(q-1,k)(-1)**k``,
+        built by a recurrence so that non-integer ``q`` -- the normal case,
+        ``q = (2-gamma)/alpha`` -- costs nothing extra. ``p > 0`` is
+        guaranteed by ``beta > 3``, so ``p+k`` never vanishes and no sign of
+        ``q`` is special: unlike ``incomplete_beta``'s downward recurrence
+        this is well defined for integer ``q <= 0`` too.
+
+        Terms fall off like ``x**k``, so the term count goes like
+        ``37/(1-x)``. Conditioning: for ``q <= 0`` every ``e_k`` is
+        positive, so the sum has no cancellation at all; for ``q > 0``,
+        ``Sum_k |e_k| x**k`` stays bounded only while ``x`` is not too
+        close to 1, which is why the ``q > 0`` callers below keep their
+        argument small rather than letting ``x -> 1``.
+
+        Parameters
+        ----------
+        x : float
+            upper limit, 0 <= x < 1
+        p : float
+            first parameter, must be > 0
+        q : float
+            second parameter, any sign
+
+        Returns
+        -------
+        float
+        """
+        if x <= 0.:
+            return 0.
+        total = 1. / p
+        coef = 1.
+        for k in range(1, StellarBlackHoles._SERIES_MAXIT):
+            coef *= (k - q) / k
+            term = coef * x ** k / (p + k)
+            total += term
+            # |e_k| grows while k < |q|, so only test once the ratio
+            # (k-q)/k * x is safely below 1; then the remaining tail is
+            # bounded by |term| * x / (1-x)
+            if k > abs(q) and abs(term) * x <= (1. - x) \
+                    * StellarBlackHoles._SERIES_TOL * abs(total):
+                break
+        else:
+            raise RuntimeError(
+                f'_beta_series_small_x: no convergence in '
+                f'{StellarBlackHoles._SERIES_MAXIT} terms at x={x}, '
+                f'p={p}, q={q}; x is too close to 1 for this series.')
+        return x ** p * total
+
+    @staticmethod
+    def _outer_tail_integral(y, p, q):
+        """``int_y^inf s**(q-1) (1+s)**-(p+q) ds``, for y > 0 and p > 0.
+
+        This is the potential's outer term in the natural variable
+        ``y = (r/a)**alpha``. Writing it instead as ``B(x; p, q)`` with
+        ``x = 1/(1+y)`` is algebraically equivalent but numerically fatal
+        for small ``r``: the information lives in ``1-x = y/(1+y)``, and
+        once ``y`` drops below ~1e-16 a double ``x`` rounds to exactly 1,
+        where the integral is not even finite for ``q <= 0``. Keeping
+        ``y`` as the argument keeps the small quantity small rather than
+        hiding it in the last bits of a number near 1.
+
+        For ``q > 1`` the integral is comfortably finite at ``y = 0`` and
+        is taken as ``B(p,q)`` minus an explicit shortfall; see the code.
+        Everything below is the ``q <= 1`` path, which covers both the
+        genuinely divergent ``q <= 0`` (gamma >= 2) and the near-divergent
+        small positive ``q``. Two regimes, crossing over at ``y = y_c``:
+
+        * ``y >= y_c``: ``x = 1/(1+y) <= 1/(1+y_c)``, away from the
+          singular endpoint, so ``_beta_series_small_x(x, p, q)`` is used
+          directly (the substitution ``u = 1/(1+s)`` turns the integral
+          into exactly ``B(x;p,q)``).
+        * ``y < y_c``: split at ``s = y_c``. The upper piece is the
+          constant ``B(1/(1+y_c); p, q)``, again by the same series. On
+          the lower piece ``s <= y_c``, so expanding ``(1+s)**-(p+q)``
+          binomially converges like ``y_c**k``::
+
+              int_y^y_c = Sum_k d_k [ y_c**(q+k) - y**(q+k) ] / (q+k),
+              d_0 = 1,  d_k = -d_{k-1} * (p+q+k-1) / k
+
+          The ``k = 0`` term is ``~ -y**q/q``, the divergent part for
+          ``q < 0``, and it is evaluated directly from ``y`` rather than
+          reconstructed from a cancellation -- which is the whole point.
+
+        ``y_c = min(1/2, 1/(p+q))``. The bound on ``p+q = (beta-gamma)/
+        alpha`` is what makes the second series unconditionally stable:
+        ``Sum_k |d_k| y_c**k = (1-y_c)**-(p+q)``, which for
+        ``y_c = 1/(p+q)`` tends to ``e`` while the sum itself tends to
+        ``1/e`` -- under one digit of cancellation for any exponents. A
+        fixed ``y_c = 1/2`` looks tempting (~90 terms) but blows up: at
+        ``(alpha,beta,gamma) = (0.2,12,2.9)``, ``p+q = 45.5`` and the
+        partial sums would peak far above the answer. The
+        price of the adaptive split is that the *first* series then runs
+        at ratio ``1 - 1/(p+q)`` and needs ~``37*(p+q)`` terms; that is
+        cheap arithmetic and this is not a hot path.
+
+        ``[ y_c**e - y**e ] / e`` with ``e = q+k`` is itself a
+        cancellation when ``|e*L|``, ``L = ln(y/y_c)``, is small (``e``
+        near zero, i.e. ``q`` near a non-positive integer). It is
+        rewritten there as ``-y_c**e * L * (exp(e*L)-1)/(e*L)``, whose
+        last factor is regular at 0. That also makes ``e == 0`` exactly
+        give the correct ``-y_c**e * L`` limit instead of dividing by 0,
+        so integer ``q <= 0`` (e.g. alpha=0.5, gamma=2.5) is handled --
+        which the ``incomplete_beta`` recurrence cannot do.
+
+        Parameters
+        ----------
+        y : float
+            lower limit, > 0
+        p : float
+            must be > 0
+        q : float
+            any sign
+
+        Returns
+        -------
+        float
+        """
+        if y <= 0.:
+            raise ValueError(f'_outer_tail_integral: y={y} must be > 0.')
+        if q > 1.:
+            # Comfortably finite at y = 0: the shortfall from the limit
+            # B(p,q) goes like y**q / q. Reach it by subtracting that
+            # shortfall from the complete beta, taking the complement
+            # exactly as y/(1+y) rather than through 1 - 1/(1+y).
+            #
+            # The threshold is 1, not 0. For 0 < q <= 1 this route loses
+            # digits twice over: B(p,q) and the shortfall both blow up
+            # like 1/q as q -> 0 (i.e. gamma -> 2) and cancel, and for
+            # small q the shortfall is a large fraction of the answer
+            # anyway -- 18% at y = 3e-7, q = 0.12. The series route below
+            # has no such problem: its e_k are all positive whenever
+            # q <= 1, so it sums without any cancellation at all.
+            w = y / (1. + y)
+            if w <= min(0.5, 1. / p):
+                return special.beta(p, q) \
+                    - StellarBlackHoles._beta_series_small_x(w, q, p)
+            # w is bounded away from 0, so 1-x carries full precision and
+            # the ordinary betainc (Fortran: zh_betai) is well conditioned
+            return StellarBlackHoles.incomplete_beta(1. / (1. + y), p, q)
+        c = p + q
+        y_c = min(0.5, 1. / c)
+        if y >= y_c:
+            return StellarBlackHoles._beta_series_small_x(1. / (1. + y), p, q)
+        log_ratio = np.log(y / y_c)
+        total = StellarBlackHoles._beta_series_small_x(1. / (1. + y_c), p, q)
+        coef = 1.
+        for k in range(0, StellarBlackHoles._SERIES_MAXIT):
+            if k > 0:
+                coef *= -(c + k - 1.) / k
+            e = q + k
+            z = e * log_ratio
+            yc_e = y_c ** e
+            if abs(z) < 1.:
+                # regular form: no cancellation, and safe at e == 0
+                term = -coef * yc_e * log_ratio \
+                    * StellarBlackHoles._expm1_over_z(z)
+            else:
+                term = coef * (yc_e - y ** e) / e
+            total += term
+            # successive |d_k| grow while k < c, so only start testing
+            # once the ratio (c+k)/(k+1) * y_c is safely below 1
+            if k > c and abs(term) * y_c <= (1. - y_c) \
+                    * StellarBlackHoles._SERIES_TOL * abs(total):
+                break
+        else:
+            raise RuntimeError(
+                f'_outer_tail_integral: no convergence in '
+                f'{StellarBlackHoles._SERIES_MAXIT} terms at y={y}, '
+                f'p={p}, q={q}.')
+        return total
 
     @staticmethod
     def potential(x, y, z, pars):
@@ -1712,9 +1896,10 @@ class StellarBlackHoles(DarkComponent):
 
         The outer term is
         ``(4 pi a^2 rho0 / alpha) * B(1-t; (beta-2)/alpha, (2-gamma)/alpha)``,
-        whose second beta parameter is <= 0 when gamma >= 2 -- hence
-        ``incomplete_beta`` rather than ``scipy.special.betainc``. See
-        ``_outer_tail`` for why that branch falls back to quadrature.
+        whose second beta parameter is <= 0 when gamma >= 2. It is
+        evaluated by ``_outer_tail`` in the variable ``y = (r/a)**alpha``
+        rather than in ``x = 1-t``, which loses all precision as r -> 0;
+        see ``_outer_tail_integral``.
 
         Parameters
         ----------

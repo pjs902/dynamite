@@ -100,6 +100,136 @@ def test_incomplete_beta_integer_q_raises():
     print('  incomplete_beta_integer_q_raises OK')
 
 
+def _beta_reference(x, p, q):
+    """High-precision B(x;p,q), independent of the implementation.
+
+    mpmath at 60 digits if importable, else a tight quad of the defining
+    integral split at the endpoint singularities.
+    """
+    try:
+        import mpmath
+    except ImportError:
+        mpmath = None
+    if mpmath is not None:
+        with mpmath.workdps(60):
+            v = mpmath.betainc(mpmath.mpf(p), mpmath.mpf(q),
+                               0, mpmath.mpf(x))
+        return float(v)
+    f = lambda u: u ** (p - 1) * (1 - u) ** (q - 1)
+    val, _ = quad(f, 0.0, x, limit=800, epsabs=1e-15, epsrel=1e-15,
+                  points=None)
+    return val
+
+
+def test_incomplete_beta_near_one():
+    """B(x;p,q) with q<=0 must stay accurate as x -> 1 (1-x down to 1e-12).
+
+    The fixed-seed downward recurrence saturates here: betainc(p,q+n,x)
+    returns exactly 1.0 once (1-x)**(q+n) underflows the mantissa, which
+    silently destroys the information the recurrence steps down from.
+    """
+    worst = 0.0
+    for p, q in [(0.64, -0.061), (1.0, -0.09), (0.31, -0.45),
+                 (0.75, -0.125), (2.5, -0.9), (0.639, -0.0614)]:
+        for t in np.geomspace(1e-1, 1e-12, 12):
+            x = 1.0 - t
+            got = SBH.incomplete_beta(x, p, q)
+            want = _beta_reference(x, p, q)
+            rel = abs(got / want - 1.0)
+            worst = max(worst, rel)
+            assert rel < 1e-12, \
+                f'incomplete_beta p={p} q={q} 1-x={t:.1e}: rel err {rel:.2e}'
+    print(f'  incomplete_beta_near_one OK (worst rel err {worst:.2e})')
+
+
+def test_outer_tail_integral_accuracy():
+    """int_y^inf s^(q-1)(1+s)^-(p+q) ds to 1e-12 over the whole y range.
+
+    This is where the old code actually lost its digits: the caller
+    formed ``x = 1 - y/(1+y)``, so for small r the complement fell off
+    the end of the mantissa and x became exactly 1.0 -- a point where the
+    integral is not even finite for q <= 0. Parametrising by y instead
+    keeps the small quantity small. y spans (r/a)^alpha over the whole
+    physical range, ~1e-16 to 1e12.
+    """
+    mpmath = _require_mpmath()
+    worst, worst_at = 0.0, None
+    cases = list(CASES) + [
+        (0.5, 4.0, 2.5),         # q = -1 exactly (integer): no recurrence
+        (0.2, 12.0, 2.9),        # p+q = 45.5, gamma near the gamma<3 wall
+        (1.0, 6.0, 2.0 - 2e-6),  # q -> 0+, the closest validate_parset allows
+        (1.0, 6.0, 2.0 + 2e-6),  # q -> 0-, ditto from the other side
+        (3.5, 10.0, 1.993),      # small positive q = 0.002
+    ]
+    for al, b, g in cases:
+        p, q = (b - 2) / al, (2 - g) / al
+        for y in np.geomspace(1e12, 1e-16, 60):
+            with mpmath.workdps(60):
+                want = mpmath.betainc(mpmath.mpf(p), mpmath.mpf(q), 0,
+                                      mpmath.mpf(1) / (1 + mpmath.mpf(y)))
+            if abs(want) < 1e-290 or abs(want) > 1e290:
+                continue          # outside the double-precision range
+            got = SBH._outer_tail_integral(y, p, q)
+            rel = float(abs(mpmath.mpf(got) / want - 1))
+            if rel > worst:
+                worst, worst_at = rel, (al, b, g, y)
+            assert rel < 1e-12, \
+                f'tail (al,b,g)=({al},{b},{g}) y={y:.2e}: rel err {rel:.2e}'
+    print(f'  outer_tail_integral_accuracy OK '
+          f'(worst {worst:.2e} at {worst_at})')
+
+
+def _require_mpmath():
+    """mpmath, or skip-by-raising if it is not installed."""
+    try:
+        import mpmath
+    except ImportError:                                   # pragma: no cover
+        raise AssertionError('mpmath needed for the accuracy gate')
+    return mpmath
+
+
+def test_potential_outer_tail_is_closed_form():
+    """The outer tail must be the closed form, with no quadrature fallback.
+
+    Guards the regression the quad workaround was papering over: the
+    fitted LIMEPY case has gamma > 2, so q_out = (2-gamma)/alpha <= 0 is
+    the production path, and Task 6 reimplements it in Fortran where
+    scipy.integrate does not exist.
+    """
+    import dynamite.physical_system as ps
+
+    calls = []
+    real_quad = ps.integrate.quad
+
+    def _spy(*a, **kw):
+        calls.append(a)
+        return real_quad(*a, **kw)
+
+    rho0, a = 1.0e5, 1.5
+    al, b, g = 3.91, 4.50, 2.24          # q_out = (2-g)/al < 0
+    pars = (rho0, a, al, b, g)
+    ps.integrate.quad = _spy
+    try:
+        phi = [float(SBH.potential(r, 0.0, 0.0, pars))
+               for r in np.geomspace(1e-3, 1e2, 6)]
+    finally:
+        ps.integrate.quad = real_quad
+    assert not calls, \
+        f'potential() still calls scipy.integrate.quad ({len(calls)} times)'
+    assert all(np.isfinite(phi)) and all(v < 0.0 for v in phi), \
+        f'potential() not finite and negative: {phi}'
+
+    # and the closed form must agree with a direct high-precision tail
+    for r in [1e-3, 1e-2, 0.3, 5.0]:
+        got = SBH._outer_tail(r, rho0, a, al, b, g)
+        want, _ = quad(lambda u: (4 * np.pi * np.exp(u) ** 2
+                                  * _rho_scalar(np.exp(u), rho0, a, al, b, g)),
+                       np.log(r), np.log(r) + 60, limit=800)
+        rel = abs(got / want - 1.0)
+        assert rel < 1e-9, f'outer tail r={r}: rel err {rel:.2e}'
+    print('  potential_outer_tail_is_closed_form OK')
+
+
 def test_acceleration_equals_minus_grad_potential():
     """a_r must equal -dPhi/dr, which ties potential() and acceleration()."""
     rho0, a = 1.0e5, 1.5
@@ -134,6 +264,9 @@ TESTS = [
     test_rho0_from_mass_round_trips,
     test_incomplete_beta_negative_q,
     test_incomplete_beta_integer_q_raises,
+    test_incomplete_beta_near_one,
+    test_outer_tail_integral_accuracy,
+    test_potential_outer_tail_is_closed_form,
     test_acceleration_equals_minus_grad_potential,
     test_acceleration_points_inward,
 ]
