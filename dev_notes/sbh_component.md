@@ -105,9 +105,13 @@ restricting gamma or tabulating anything:
    magnitude (the antiderivative reaches only ~ -350 at r/a = 1e-8 for
    gamma = 2.24).
 2. The incomplete beta is extended to q <= 0 by two power series written
-   for this component in `legacy_fortran/dmpotent.f90` and mirrored in
-   `dynamite/physical_system.py:StellarBlackHoles`. The shipped Fortran
-   helpers are `sbh_beta_series` (the q <= 0 route, used only inside
+   for this component in `legacy_fortran/dmpotent.f90`; the Python side
+   (`dynamite/physical_system.py:StellarBlackHoles.incomplete_beta`) reaches
+   the same q <= 0 region by a different route, a contiguous downward
+   recurrence — the two are independent implementations, not a port of each
+   other, which is what makes the Fortran-vs-Python agreement test a real
+   cross-check. The shipped Fortran helpers are `sbh_beta_series` (the q <= 0
+   route, used only inside
    `sbh_outer_tail_integral`), `sbh_binc` (the regular q > 0 incomplete
    beta) and `sbh_betacf`, a *private, double-precision* Numerical-Recipes
    continued fraction. Verified against mpmath over r/a = 1e-6 .. 1e4 to

@@ -1577,8 +1577,11 @@ class StellarBlackHoles(DarkComponent):
 
             B(x;p,q) = [ (p+q) * B(x;p,q+1) - x**p * (1-x)**q ] / q
 
-        This is the same recurrence the Fortran uses, and is why
-        ``zh_betai`` is never called with a non-positive second argument.
+        The Fortran side (``dmpotent.f90``) reaches the same q <= 0 region by
+        a different, independent route (power series + a private continued
+        fraction) rather than this recurrence; both avoid ever calling the
+        shared ``zh_betai`` with a non-positive second argument, since its
+        continued fraction ``zh_betacf`` is single precision.
 
         Parameters
         ----------
