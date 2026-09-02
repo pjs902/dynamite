@@ -51,9 +51,42 @@ def test_two_halos_still_rejected():
     raise AssertionError('two halos were accepted')
 
 
+def test_sbh_legacy_strings():
+    """The legacy strings must carry code 6, 5 params, and derived rhoc."""
+    import numpy as np
+    from dynamite import constants
+
+    c = _mk(physys.StellarBlackHoles, 'sbh')
+    c.legacy_code = 6
+    c.par_names = ['rhoc', 'a', 'alpha', 'beta', 'gamma']
+    import logging
+    c.logger = logging.getLogger('test')
+
+    class _Sys:
+        distMPc = 0.00543          # omega Cen, 5.43 kpc
+
+    parset = {'m-sbh': 1.79e5, 'a-sbh': 100.0, 'alpha-sbh': 3.91,
+              'beta-sbh': 4.50, 'gamma-sbh': 2.24}
+    specs, vals = c.get_dh_legacy_strings(parset, _Sys())
+    assert specs == '6 5', f'specs was {specs!r}'
+    parts = [float(v) for v in vals.split()]
+    assert len(parts) == 5, f'expected 5 values, got {parts}'
+    rhoc, a_km, al, b, g = parts
+    assert (al, b, g) == (3.91, 4.50, 2.24), f'shape params wrong: {parts}'
+    # a_km must be the arcsec value times the arcsec->km factor
+    want_a = 100.0 * constants.ARC_KM(0.00543)
+    assert abs(a_km / want_a - 1) < 1e-12, f'a_km {a_km} != {want_a}'
+    # and rhoc must reproduce the requested total mass
+    m_back = float(physys.StellarBlackHoles.mass_enclosed(
+        a_km * 1e8, 0.0, 0.0, (rhoc, a_km, al, b, g)))
+    assert abs(m_back / 1.79e5 - 1) < 1e-6, f'mass round trip: {m_back}'
+    print('  sbh_legacy_strings OK')
+
+
 TESTS = [test_helpers_split_halo_and_sbh,
          test_helpers_return_none_when_absent,
-         test_two_halos_still_rejected]
+         test_two_halos_still_rejected,
+         test_sbh_legacy_strings]
 
 if __name__ == '__main__':
     failed = 0

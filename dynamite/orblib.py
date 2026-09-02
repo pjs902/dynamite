@@ -456,15 +456,9 @@ class LegacyOrbitLibrary(OrbitLibrary):
             p = self.parset[f"p-{stars.name}"]
             u = self.parset[f"u-{stars.name}"]
             theta, psi, phi = stars.triax_pqu2tpp(p, q, u)
-        # get dark halo
-        dh = self.system.get_all_dark_non_plummer_components()
-        if len(dh) > 1:
-            txt = f"Zero or one non-plummer dark component should be  present, not {len(dh)}."
-            self.logger.error(txt)
-            raise ValueError(txt)
-        if len(dh) > 0:
-            dh = dh[0]  # extract the one and only dm component
-
+        # slot 1: the dark halo (raises if more than one is present)
+        dh = self.system.get_halo_component()
+        if dh is not None:
             if isinstance(dh, physys.NFW_m200_c):
                 # fix c via m200_c relation, for legacy Fortran it is still NFW
                 dm_specs, dm_par_vals = dh.get_dh_legacy_strings(
@@ -475,6 +469,20 @@ class LegacyOrbitLibrary(OrbitLibrary):
         else:
             dm_specs = "0 0"
             dm_par_vals = ""
+
+        # slot 2: the sBH component, written at the END of the file so that
+        # existing single-halo parameters_pot.in files parse unchanged (the
+        # Fortran reads it under iostat and hits EOF when it is absent).
+        # StellarBlackHolesMGE contributes Gaussians to mge_pot instead and
+        # so has no legacy block.
+        sbh = self.system.get_sbh_component()
+        if isinstance(sbh, physys.StellarBlackHoles):
+            sbh_specs, sbh_par_vals = sbh.get_dh_legacy_strings(
+                self.parset, self.system
+            )
+            sbh_block = f"{sbh_specs}\n{sbh_par_vals}\n"
+        else:
+            sbh_block = ""
 
         # header
         len_mge_pot = len(stars.mge_pot.data)
@@ -530,6 +538,9 @@ class LegacyOrbitLibrary(OrbitLibrary):
             comments="",
             fmt=["%10.2f", "%10.5f", "%10.5f", "%10.2f"],
         )
+        if sbh_block:
+            with open(path + "parameters_pot.in", "a") as f_sbh:
+                f_sbh.write(sbh_block)
         # parameters_lum.in
         np.savetxt(
             path + "parameters_lum.in",
