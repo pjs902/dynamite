@@ -1655,18 +1655,44 @@ class StellarBlackHoles(DarkComponent):
         Menc : float or ndarray
             mass within r, = 4 pi a^3 rho0 / alpha * B(t; (3-g)/al, (b-3)/al)
             with t = (r/a)^alpha / (1 + (r/a)^alpha)
+
+        Notes
+        -----
+        Carried in ``yy = (r/a)**alpha``, for the same reason
+        ``_outer_tail_integral`` is: ``t`` alone does not determine
+        ``B(t;p,q)`` to double precision once ``t -> 1``. At ``r/a = 1e4``
+        with the fitted exponents the true ``1-t`` is 2.29087e-16 but the
+        nearest double below 1 puts it at 2.220446e-16 -- a 3% error in the
+        small quantity, and since ``B = B(p,q) - c*(1-t)**q + ...`` that
+        surfaces as a 4.4e-9 error in the mass. Handing ``betainc`` the
+        complement ``u = 1/(1+yy)`` as its own argument, rather than letting
+        it recover ``1-t`` from ``t``, keeps the small quantity small.
+        Verified against mpmath at 50 digits: <= 3e-16 over
+        ``r/a = 1e-6..1e4``, against 4.4e-9 before.
+
         '''
         rho0, a, alpha, beta, gamma = pars
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
         z = np.asarray(z, dtype=float)
         r = np.sqrt(x**2 + y**2 + z**2)
-        xx = r / a
-        t = xx**alpha / (1. + xx**alpha)
+        yy = (r / a)**alpha
+        u = 1. / (1. + yy)          # = 1-t, exactly, never by subtraction
+        t = yy * u                  # = yy/(1+yy)
         p = (3. - gamma) / alpha
         q = (beta - 3.) / alpha
         # both p and q are > 0 given gamma < 3 and beta > 3
-        bi = special.betainc(p, q, t) * special.beta(p, q)
+        b_pq = special.beta(p, q)
+        # Whichever of t, u is the small one is the one that carries the
+        # information, so evaluate on that side and reflect if needed:
+        # B(t;p,q) = B(p,q) - B(u;q,p). yy > 1 is exactly t > 1/2.
+        outer = yy > 1.
+        # the dummy 0.5 keeps the untaken branch finite (yy = inf makes t nan)
+        t_in = np.where(outer, 0.5, t)
+        u_in = np.where(outer, u, 0.5)
+        bi = np.where(outer,
+                      b_pq * (1. - special.betainc(q, p, u_in)),
+                      b_pq * special.betainc(p, q, t_in))
         return 4. * np.pi * a**3 * rho0 / alpha * bi
 
     @staticmethod

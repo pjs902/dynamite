@@ -63,27 +63,37 @@ contains
     ! -----------------------------------------------------------------
 
     ! (exp(z)-1)/z, accurate as z -> 0 where it tends to 1. Fortran has no
-    ! expm1 intrinsic; the Python reference has np.expm1, so to match it we
-    ! need one too. Maclaurin for very small |z|, and Kahan's identity
-    ! (exp(z)-1)/z = (u-1)/log(u), u = exp(z), otherwise: the rounding
-    ! errors of u-1 and log(u) are correlated and cancel, which a plain
-    ! (exp(z)-1)/z does not do (it loses ~eps/|z|, i.e. 5e-12 at z = 4e-5).
+    ! expm1 intrinsic and the Python reference has np.expm1, so we need one.
+    !
+    ! A plain (exp(z)-1)/z loses ~eps/|z| to cancellation: 5e-12 at
+    ! z = 4e-5, measured as a 5.76e-13 error in the potential at
+    ! (alpha,beta,gamma) = (3,4,1.99999). So small |z| needs its own branch.
+    !
+    ! That branch is the Maclaurin series sum_n z**n/(n+1)!, taken to
+    ! convergence, NOT Kahan's (exp(z)-1)/z = (u-1)/log(u). Kahan is more
+    ! elegant and is correct under IEEE arithmetic, but it relies on the
+    ! rounding errors of u-1 and log(u) cancelling, and -ffast-math -- which
+    ! this makefile passes -- assumes log(exp(z)) == z and folds the identity
+    ! away. Measured: Kahan gives 7.35e-16 at -O2 and 5.76e-13 under the
+    ! production flags, i.e. no better than the naive form it replaced. The
+    ! series has no cancellation to protect and so cannot be optimised away.
+    ! For |z| >= 1/2 the direct form is fine (|exp(z)-1| >= 0.39).
     function sbh_expm1_over_z(z) result(val)
         real(kind=dp), intent(in) :: z
-        real(kind=dp) :: val, u
+        real(kind=dp) :: val, term
+        integer(kind=i4b) :: n
 
-        if (abs(z) .lt. 1.0e-5_dp) then
-            val = 1.0_dp + z*(0.5_dp + z*(1.0_dp/6.0_dp + z/24.0_dp))
+        if (abs(z) .ge. 0.5_dp) then
+            val = (exp(z) - 1.0_dp)/z
             return
         end if
-        u = exp(z)
-        if (u .eq. 1.0_dp) then
-            val = 1.0_dp
-        else if (u - 1.0_dp .eq. -1.0_dp) then
-            val = -1.0_dp/z
-        else
-            val = (u - 1.0_dp)/log(u)
-        end if
+        term = 1.0_dp
+        val = 1.0_dp
+        do n = 1, 40
+            term = term*z/real(n + 1, dp)
+            val = val + term
+            if (abs(term) .le. 1.0e-18_dp*abs(val)) exit
+        end do
     end function sbh_expm1_over_z
 
     ! Complete beta B(p,q), p,q > 0. log_gamma is an F2008 intrinsic and
@@ -318,6 +328,12 @@ contains
 
     ! Common validation/assignment for the sBH slot.
     subroutine sbh_assign()
+        ! sbhparam is unallocated whenever the block was absent from the
+        ! input file, and a caller that sets sbh_profile_type by hand (the
+        ! Task 7 probe) can reach here without allocating it. Diagnose that
+        ! rather than reading out of bounds.
+        if (.not. allocated(sbhparam)) stop 'sBH parameters not allocated'
+        if (size(sbhparam) .lt. 5) stop 'sBH parameter array too small'
         if (n_sbhparam .ne. 5) stop 'wrong number of sBH parameters'
         sbh_rho0 = sbhparam(1)   ! Msun/km^3
         sbh_a = sbhparam(2)      ! km
