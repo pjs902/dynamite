@@ -109,6 +109,25 @@ Selected by `generator_type` in `parameter_space_settings`:
 - `SpecificModels` — run a user-specified list of parameter sets
 - `BayesOptGenerator` — GP-driven Bayesian Optimization via BoTorch (bayesopt branch)
 
+### sBH component (`sBH` branch)
+
+`StellarBlackHoles` — spherical Zhao alpha-beta-gamma subcluster of
+stellar-mass black holes, `legacy_code = 6`. Config parameters: `m`
+[Msun], `a` [arcsec], `alpha`, `beta`, `gamma`. Requires `beta > 3`,
+`gamma < 3`, `gamma != 2`. Coexists with a DM halo (two dark slots; the
+sBH block is appended at the end of `parameters_pot.in`).
+
+`StellarBlackHolesMGE` — a fixed externally-supplied profile whose
+Gaussians concatenate into the potential MGE; no Fortran involved.
+
+Design: `docs/superpowers/specs/2026-09-01-sbh-component-design.md`.
+Fits and provenance: `dev_notes/sbh_profile_fits/`.
+Tests: `dev_tests/test_sbh_profile.py`, `test_sbh_config.py`,
+`test_sbh_fortran.py` (needs `make sbh_probe`).
+
+**Trap:** never call `zh_betai` with a non-positive second argument — it
+returns `inf`. Use the downward recurrence (`sbh_betai` in `dmpotent.f90`).
+
 ### BayesOptGenerator (`bayesopt` branch)
 
 Located in `parameter_space.py:~1132`. Requires `botorch`, `gpytorch`, `torch`.
