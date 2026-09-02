@@ -287,6 +287,8 @@ class Configuration(object):
                     elif isinstance(c, physys.Chi2Ext):
                         keys_ok.extend(['ext_module', 'ext_class',
                                        'ext_class_args', 'ext_chi2'])
+                    if isinstance(c, physys.StellarBlackHolesMGE):
+                        keys_ok.append('mge_pot')
                     if any(k not in keys_ok for k in data_comp):
                         text = f'Component {c.name} has unknown config ' \
                             'entries: ' \

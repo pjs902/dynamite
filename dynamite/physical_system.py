@@ -2070,18 +2070,43 @@ class StellarBlackHoles(DarkComponent):
 
 
 class StellarBlackHolesMGE(DarkComponent):
-    """A fixed, externally-supplied sBH profile represented as an MGE.
+    """A fixed, externally-supplied sBH profile, as an MGE
 
-    Filled in by Task 8. Carries an ``mge_pot`` whose Gaussians are
-    concatenated into the potential MGE, so it needs no legacy code and no
-    Fortran changes.
+    Represents an sBH subcluster whose shape comes from an external model
+    (LIMEPY, PhaseFlow, or a collaborator's fit) rather than being fitted.
+    Its Gaussians are concatenated into the potential MGE, exactly as
+    ``BarDiskComponent``'s ``disk_pot`` is, so this component needs no
+    legacy code and no Fortran changes at all.
+
+    Note the structural limit: a sum of Gaussians is flat at the origin, so
+    an MGE cannot represent a central cusp below its smallest sigma. Use it
+    for a cored profile, or for a cusp only over a bounded radial range.
+
+    Parameters
+    ----------
+    mge_pot : a ``dyn.mges.MGE`` object
+        the (projected) surface-mass density of the sBH subcluster
+
     """
+    # deliberately no legacy_code: this component contributes Gaussians,
+    # not a dm block, and orblib.py keys on isinstance(..., StellarBlackHoles)
     par_names = []
 
     def __init__(self, mge_pot=None, **kwds):
         self.mge_pot = mge_pot
         super().__init__(symmetry='spherical', **kwds)
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+
+    def validate(self):
+        if not isinstance(self.mge_pot, mge.MGE):
+            text = f'{self.__class__.__name__}.mge_pot must be an mges.MGE ' \
+                   'object'
+            self.logger.error(text)
+            raise ValueError(text)
+
+    def validate_parset(self, par):
+        # the profile is fixed; there is nothing to sample
+        return True
 
 
 class Chi2Ext(Component):

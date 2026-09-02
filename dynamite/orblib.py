@@ -527,6 +527,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
             header_string_lum = str(len_mge_lum)
             mge_pot = stars.mge_pot
             mge_lum = stars.mge_lum
+        if isinstance(sbh, physys.StellarBlackHolesMGE):
+            mge_pot = mge_pot + sbh.mge_pot
+            len_mge_pot = len(mge_pot.data)
+            header_string_pot = str(len_mge_pot)
         text += f"{self.system.H * 1e-6}"
 
         # parameters_pot.in

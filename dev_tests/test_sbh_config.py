@@ -247,13 +247,27 @@ def test_pot_in_sbh_no_halo_slot1_is_00():
     print('  pot_in_sbh_no_halo_slot1_is_00 OK')
 
 
+def test_mge_sbh_is_not_a_legacy_block():
+    """The MGE variant must contribute Gaussians, never a dm block."""
+    s = physys.System()
+    s.cmp_list = [_mk(physys.Plummer, 'bh'),
+                  _mk(physys.StellarBlackHolesMGE, 'sbh')]
+    sbh = s.get_sbh_component()
+    assert isinstance(sbh, physys.StellarBlackHolesMGE)
+    # it must NOT advertise a legacy code, or orblib would write a block
+    assert not hasattr(sbh, 'legacy_code'), \
+        'StellarBlackHolesMGE must not define legacy_code'
+    print('  mge_sbh_is_not_a_legacy_block OK')
+
+
 TESTS = [test_helpers_split_halo_and_sbh,
          test_helpers_return_none_when_absent,
          test_two_halos_still_rejected,
          test_sbh_legacy_strings,
          test_pot_in_no_sbh_is_byte_identical,
          test_pot_in_halo_and_sbh_trailing_block,
-         test_pot_in_sbh_no_halo_slot1_is_00]
+         test_pot_in_sbh_no_halo_slot1_is_00,
+         test_mge_sbh_is_not_a_legacy_block]
 
 if __name__ == '__main__':
     failed = 0
