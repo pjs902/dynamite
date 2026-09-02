@@ -104,40 +104,75 @@ restricting gamma or tabulating anything:
    cases including all gamma >= 2, and the divergence is mild in
    magnitude (the antiderivative reaches only ~ -350 at r/a = 1e-8 for
    gamma = 2.24).
-2. The incomplete beta is extended to q <= 0 by a downward recurrence from
-   a positive-q evaluation (start at q+n with n = ceil(1-q)+1, evaluate
-   with the existing well-tested `zh_betai` there, step down n times).
-   Verified against mpmath over r/a = 1e-6 .. 1e4 to worst relative error
-   3.3e-14.
+2. The incomplete beta is extended to q <= 0 by two power series written
+   for this component in `legacy_fortran/dmpotent.f90` and mirrored in
+   `dynamite/physical_system.py:StellarBlackHoles`. The shipped Fortran
+   helpers are `sbh_beta_series` (the q <= 0 route, used only inside
+   `sbh_outer_tail_integral`), `sbh_binc` (the regular q > 0 incomplete
+   beta) and `sbh_betacf`, a *private, double-precision* Numerical-Recipes
+   continued fraction. Verified against mpmath over r/a = 1e-6 .. 1e4 to
+   worst relative error ~1e-14, and against the Python side to 1e-13.
 
 `gamma = 2` exactly is rejected in `validate_parset` (division by zero in
-the recurrence, and `2-gamma = 0` in the antiderivative) — the physical
-content there is a log limit, and the parameter is continuous with no
-reason to land exactly on it.
+the beta recurrence, and `2-gamma = 0` in the antiderivative) — in fact a
+band of |gamma - 2| <= 1e-6 is rejected. The physical content there is a
+log limit, and the parameter is continuous with no reason to land on it.
 
-## Trap: `zh_betai` returns `inf` for a non-positive second argument
+## Numerical traps
 
-Do not call `zh_betai` directly with a non-positive second argument. It
-has a `b <= 0` branch that forces Numerical Recipes' continued-fraction
-evaluation (`betacf`), and a faithful Python transcription of
-`sub/specfunc_beta.f90`, tested against mpmath, returns `inf` for every
-q <= 0 case tried — `betacf` simply does not converge for negative b. This
-is measured, not assumed, and is the entire reason the downward recurrence
-above exists (`sbh_betai` in `dmpotent.f90`). The acceleration path never
-hits this: both beta-function parameters for `M(<r)` —
-`(3-gamma)/alpha` and `(beta-3)/alpha` — are strictly positive given the
-enforced constraints `gamma < 3` and `beta > 3`, so `zh_betai` is used
-there unmodified.
+**The sBH Fortran must never call `zh_betai`.** The shared
+`sub/specfunc_beta.f90` continued fraction `zh_betacf` carries
+`EPS = 3e-7` — single precision — which would have capped the
+Fortran-vs-Python agreement at ~1e-7 instead of the achieved 1e-13. That
+is why `dmpotent.f90` carries its own private `sbh_betacf` in double.
 
-This same measured behaviour is also recorded as a latent, deliberately
-untouched issue in the pre-existing gNFW path (`dm_potent` case 5, legacy
-code 5): it calls `zh_betai(1.0, 2.0 - gamma_var, ...)`, whose second
-argument goes negative for gamma > 2. It is unreachable today because
+**`zh_betai` returns `inf` for a non-positive second argument** — but this
+is a warning about the PRE-EXISTING gNFW path only, not about anything the
+sBH path calls. `dm_potent` case 5 (legacy code 5) calls
+`zh_betai(1.0, 2.0 - gamma_var, ...)`, whose second argument goes negative
+for gamma > 2. It is unreachable today because
 `GeneralisedNFW.validate_parset` requires `gam <= 1`, and is left alone
-deliberately (not an active bug; editing a working upstream-shared path
-widens the merge surface for no current benefit). Anyone relaxing that
-constraint would get `inf` potentials, not merely reduced accuracy; the
-fix, if ever wanted, is the same downward recurrence used here.
+deliberately (editing a working upstream-shared path widens the merge
+surface for no current benefit). Anyone relaxing that constraint would get
+`inf` potentials, not merely reduced accuracy.
+
+**`-ffast-math` can delete a compensation branch.** `sbh_expm1_over_z`
+originally used Kahan's identity `(exp(z)-1)/log(exp(z))`, which is exact
+under IEEE arithmetic but relies on two rounding errors cancelling.
+gfortran's production flags include `-ffast-math`, which implies
+`-funsafe-math-optimizations` and folds `log(exp(z))` back to `z` — i.e.
+straight back to the naive form. Measured: 7.58e-16 at `-O2`, 5.76e-13
+under production flags at `(alpha,beta,gamma) = (3,4,1.99999)`. Fixed by
+using a Maclaurin series `sum_n z**n/(n+1)!` for `|z| < 0.5`, which has no
+cancellation to protect and so cannot be optimised away. **Lesson:** a
+random parameter sweep essentially never exercises a compensation branch,
+because it is only "live" in a narrow neighbourhood of its own
+cancellation point. Probe such branches by hand, under production flags.
+
+**The Fortran is the more accurate side at large r/a**, counter-intuitively.
+Python's `mass_enclosed` inherits scipy `betainc`'s error, roughly 1e-9 to
+1e-16 depending on the scipy version; the Fortran carries a separate
+exact-argument path. So a Fortran-vs-Python disagreement at large radius
+is Python drifting, not the Fortran.
+
+**`r = 0` gives NaN.** This matches the pre-existing gNFW case-5 behaviour
+exactly and is not a regression; no orbit is integrated at r = 0.
+
+**Underflow handling is deliberately asymmetric between the two sides.**
+Python's `_outer_tail_integral` raises on `y <= 0`; the Fortran
+(`sbh_yvar`) clamps `y` to `1e-300` and prints one warning instead.
+Aborting mid orbit-library integration is a far worse failure mode than a
+clamped (still enormous) potential, and underflow needs `r/a` below ~1e-79
+for the fitted exponents, which no orbit reaches.
+
+## Config note: `StellarBlackHolesMGE` needs `parameters: {}`
+
+`StellarBlackHolesMGE` has no sampled parameters, but
+`dynamite/config_reader.py` requires every component's YAML entry to carry
+a `parameters` key whose value supports `.items()`. Write it explicitly as
+`parameters: {}`; a bare `parameters:` (which YAML reads as `None`) raises
+`AttributeError`. Reference config:
+`dev_tests/user_test_config_sbh_mge.yaml`.
 
 ## Reference fit values
 

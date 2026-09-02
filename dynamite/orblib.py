@@ -520,15 +520,24 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 + str(len_disk_lum)
             )
             text += f"{self.parset['omega']}\n"
-            mge_pot = stars.mge_pot + stars.disk_pot
+            # the Fortran (iniparam_f.f90) reads the first ngaus_bulge rows
+            # as the bulge/stars and the NEXT ngaus_disk rows as the disk,
+            # so any sBH Gaussians must be folded in BEFORE the disk block:
+            # the on-disk row order has to stay [stars, sbh, disk].
+            if isinstance(sbh, physys.StellarBlackHolesMGE):
+                mge_pot = stars.mge_pot + sbh.mge_pot + stars.disk_pot
+            else:
+                mge_pot = stars.mge_pot + stars.disk_pot
             mge_lum = stars.mge_lum + stars.disk_lum
         else:
             header_string_pot = str(len_mge_pot)
             header_string_lum = str(len_mge_lum)
-            mge_pot = stars.mge_pot
+            if isinstance(sbh, physys.StellarBlackHolesMGE):
+                mge_pot = stars.mge_pot + sbh.mge_pot
+            else:
+                mge_pot = stars.mge_pot
             mge_lum = stars.mge_lum
         if isinstance(sbh, physys.StellarBlackHolesMGE):
-            mge_pot = mge_pot + sbh.mge_pot
             len_mge_pot = len(mge_pot.data)
             if self.system.is_bar_disk_system():
                 header_string_pot = (

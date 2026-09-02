@@ -118,15 +118,26 @@ stellar-mass black holes, `legacy_code = 6`. Config parameters: `m`
 sBH block is appended at the end of `parameters_pot.in`).
 
 `StellarBlackHolesMGE` — a fixed externally-supplied profile whose
-Gaussians concatenate into the potential MGE; no Fortran involved.
+Gaussians concatenate into the potential MGE; no Fortran involved. It has
+no sampled parameters, but the config reader still demands the key: its
+YAML entry needs an explicit `parameters: {}`. On a bar-disk system its
+Gaussians are folded in BEFORE the disk block, since the Fortran reads
+`[bulge, disk]` in file order.
 
 Design: `docs/superpowers/specs/2026-09-01-sbh-component-design.md`.
 Fits and provenance: `dev_notes/sbh_profile_fits/`.
 Tests: `dev_tests/test_sbh_profile.py`, `test_sbh_config.py`,
 `test_sbh_fortran.py` (needs `make sbh_probe`).
 
-**Trap:** never call `zh_betai` with a non-positive second argument — it
-returns `inf`. Use the downward recurrence (`sbh_betai` in `dmpotent.f90`).
+**Numerics:** the Fortran sBH path is self-contained in `dmpotent.f90`
+(`sbh_beta_series`, `sbh_betacf`, `sbh_binc`, `sbh_outer_tail_integral`)
+and must NEVER call `zh_betai` — the shared `zh_betacf` in
+`sub/specfunc_beta.f90` carries a single-precision `EPS = 3e-7`, which
+would cap Fortran-vs-Python agreement at ~1e-7 instead of the achieved
+1e-13. Separately, `zh_betai` returns `inf` for a non-positive second
+argument; that is a latent trap in the PRE-EXISTING gNFW `dm_potent`
+case 5 only, not something the sBH path touches. See
+`dev_notes/sbh_component.md` "Numerical traps".
 
 ### BayesOptGenerator (`bayesopt` branch)
 

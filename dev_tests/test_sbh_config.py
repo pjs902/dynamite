@@ -253,9 +253,11 @@ class _FakeMGERows:
     ``mges.MGE`` (which needs astropy Table plumbing the other stand-ins
     in this file don't set up either)."""
 
-    def __init__(self, n_rows):
+    def __init__(self, n_rows, fill=0.):
         import numpy as _np
-        self.data = _np.zeros((n_rows, 4))
+        # `fill` lets a test tell the blocks apart by value in the written
+        # file, so row ORDER (not just the header) can be asserted.
+        self.data = _np.full((n_rows, 4), float(fill))
 
     def __add__(self, other):
         import numpy as _np
@@ -266,10 +268,10 @@ class _FakeMGERows:
 
 class _PotStarsBar(_PotStars):
     """Bar-disk stand-in: stars.mge_pot / disk_pot are separate blocks."""
-    mge_pot = _FakeMGERows(3)
-    mge_lum = _FakeMGERows(3)
-    disk_pot = _FakeMGERows(2)
-    disk_lum = _FakeMGERows(2)
+    mge_pot = _FakeMGERows(3, fill=1.)
+    mge_lum = _FakeMGERows(3, fill=1.)
+    disk_pot = _FakeMGERows(2, fill=2.)
+    disk_lum = _FakeMGERows(2, fill=2.)
 
 
 class _PotSystemBar(_PotSystem):
@@ -286,7 +288,7 @@ def test_pot_in_bar_disk_with_mge_sbh_keeps_3token_header():
     from dynamite import orblib as orblib_mod
 
     sbh = _mk(physys.StellarBlackHolesMGE, 'sbh')
-    sbh.mge_pot = _FakeMGERows(4)
+    sbh.mge_pot = _FakeMGERows(4, fill=3.)
 
     ol = orblib_mod.LegacyOrbitLibrary.__new__(orblib_mod.LegacyOrbitLibrary)
     ol.logger = logging.getLogger('test')
@@ -311,6 +313,15 @@ def test_pot_in_bar_disk_with_mge_sbh_keeps_3token_header():
     header = data.split(b'\n', 1)[0]
     assert header == b'9 1 7 2', \
         f'bar-disk header with sBH MGE must stay 3-token, got {header!r}'
+
+    # ...and the ROW ORDER must match what that header claims. The Fortran
+    # (iniparam_f.f90) reads the first ngaus_bulge rows as bulge/stars and
+    # the NEXT ngaus_disk rows as the disk (applying psi_obs_d + 90), so the
+    # disk Gaussians must be LAST: [stars(1.), sbh(3.), disk(2.)].
+    rows = [ln for ln in data.decode().split('\n')[1:] if ln.strip()][:9]
+    first_col = [float(ln.split()[0]) for ln in rows]
+    assert first_col == [1., 1., 1., 3., 3., 3., 3., 2., 2.], \
+        f'bar-disk row order must be [stars, sbh, disk], got {first_col}'
     print('  pot_in_bar_disk_with_mge_sbh_keeps_3token_header OK')
 
 
@@ -327,6 +338,51 @@ def test_mge_sbh_is_not_a_legacy_block():
     print('  mge_sbh_is_not_a_legacy_block OK')
 
 
+def test_mge_sbh_from_config_file():
+    """End-to-end: the MGE variant must be constructible from YAML.
+
+    The config reader requires every component to carry a `parameters`
+    key; StellarBlackHolesMGE has no sampled parameters, so its YAML entry
+    needs an explicit `parameters: {}`.
+    """
+    import os
+    from dynamite import config_reader
+    here = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    os.chdir(here)
+    try:
+        c = config_reader.Configuration('user_test_config_sbh_mge.yaml',
+                                        reset_logging=False)
+    finally:
+        os.chdir(cwd)
+    sbh = c.system.get_sbh_component()
+    assert isinstance(sbh, physys.StellarBlackHolesMGE), \
+        f'expected StellarBlackHolesMGE from config, got {type(sbh)}'
+    assert len(sbh.mge_pot.data) > 0, 'sBH mge_pot was not populated'
+    assert c.system.get_halo_component() is not None, \
+        'halo and MGE sBH must coexist'
+    print('  mge_sbh_from_config_file OK')
+
+
+def test_sbh_validate_parset():
+    """validate_parset is the only guard against a Fortran stop mid-run."""
+    import logging
+    sbh = _mk(physys.StellarBlackHoles, 'sbh')
+    sbh.logger = logging.getLogger('test')  # _mk bypasses __init__
+    good = dict(m=1.0e5, a=352.0, alpha=2.15, beta=4.5, gamma=1.75)
+    assert sbh.validate_parset(good) is True, 'reference parset must pass'
+    for bad in [dict(good, m=0.), dict(good, m=-1.),
+                dict(good, a=0.), dict(good, alpha=0.),
+                dict(good, beta=3.), dict(good, beta=2.),
+                dict(good, gamma=3.), dict(good, gamma=3.5),
+                dict(good, gamma=2.0),          # exact gamma==2 pole
+                dict(good, gamma=2.0 + 1e-9)]:  # inside the 1e-6 band
+        assert sbh.validate_parset(bad) is False, f'must reject {bad}'
+    # ...and just OUTSIDE the band is accepted: pins the band width
+    assert sbh.validate_parset(dict(good, gamma=2.0 + 1e-5)) is True
+    print('  sbh_validate_parset OK')
+
+
 TESTS = [test_helpers_split_halo_and_sbh,
          test_helpers_return_none_when_absent,
          test_two_halos_still_rejected,
@@ -335,7 +391,9 @@ TESTS = [test_helpers_split_halo_and_sbh,
          test_pot_in_halo_and_sbh_trailing_block,
          test_pot_in_sbh_no_halo_slot1_is_00,
          test_pot_in_bar_disk_with_mge_sbh_keeps_3token_header,
-         test_mge_sbh_is_not_a_legacy_block]
+         test_mge_sbh_is_not_a_legacy_block,
+         test_mge_sbh_from_config_file,
+         test_sbh_validate_parset]
 
 if __name__ == '__main__':
     failed = 0

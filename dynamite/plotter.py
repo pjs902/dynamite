@@ -197,14 +197,9 @@ class Plotter():
                 self.all_models.get_model_velocity_scaling_factor( \
                                                             model_id=model_id)
 
-        dh = self.system.get_all_dark_non_plummer_components()
-        if len(dh) > 1:
-            txt = 'Zero or one non-plummer dark component should be ' \
-                  f' present, not {len(dh)}.'
-            self.logger.error(txt)
-            raise ValueError(txt)
-        if len(dh) > 0:
-            dh = dh[0]  # take the first as there should only be one of these
+        # the halo (sBH components are handled separately below)
+        dh = self.system.get_halo_component()
+        if dh is not None:
             if type(dh) is physys.NFW:
                 val[f'c-{dh.name}'] = val[f'c-{dh.name}']
                 val[f'f-{dh.name}'] = val[f'f-{dh.name}']
@@ -220,6 +215,13 @@ class Plotter():
                 text = f'unknown dark halo type component'
                 self.logger.error(text)
                 raise ValueError(text)
+
+        # the sBH component, if any: only its mass scales (like the other
+        # mass-like parameters, as scale_factor**2). a/alpha/beta/gamma are
+        # a length in arcsec and dimensionless exponents: unscaled.
+        sbh = self.system.get_sbh_component()
+        if isinstance(sbh, physys.StellarBlackHoles):
+            val[f'm-{sbh.name}'] = val[f'm-{sbh.name}']*scale_factor**2
 
         # get the plummer component i.e. black hole
         bh = self.system.get_component_from_class(physys.Plummer)
@@ -1176,16 +1178,13 @@ class Plotter():
 
         stars = \
             self.system.get_component_from_class(physys.TriaxialVisibleComponent)
-        dh = self.system.get_all_dark_non_plummer_components()
-        if len(dh) > 1:
-            txt = 'Zero or one non-plummer dark component should be ' \
-                  f' present, not {len(dh)}.'
-            self.logger.error(txt)
-            raise ValueError(txt)
-        if len(dh) > 0:
-            dh = dh[0]  # extract the one and only dm component
-        else:
-            dh = None
+        # the halo, if any (an sBH component is not a halo and is ignored
+        # here: mass_plot only knows how to add an NFW-like dark mass)
+        dh = self.system.get_halo_component()
+        if self.system.get_sbh_component() is not None:
+            self.logger.warning('mass_plot does not include the sBH '
+                                'component in the enclosed-mass profile; '
+                                'only stars and the dark halo are shown.')
 
         val0 = deepcopy(self.all_models.table)
         arg = np.argsort(np.array(val0[which_chi2]))
