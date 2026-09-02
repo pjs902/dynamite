@@ -58,6 +58,12 @@ module initial_parameters
     real(kind=dp), dimension(:), allocatable, public :: dmparam
     real(kind=dp), public :: gamma_var
 
+    ! Optional second dark component (stellar-mass black hole subcluster).
+    ! Written at the END of parameters_pot.in so that files without it parse
+    ! unchanged; sbh_profile_type stays 0 when the block is absent.
+    integer(kind=i4b), public :: n_sbhparam, sbh_profile_type
+    real(kind=dp), dimension(:), allocatable, public :: sbhparam
+
     ! Global parameters for the orbital starting points
     ! nEner = # energies, nI2 = # I2, nI3 = # I3
     ! rLogMin and rLogMax : log10 of min and max radius in KM
@@ -93,6 +99,7 @@ contains
         real(kind=dp), dimension(:), allocatable :: surf_pc, sigobs_arcsec
         real(kind=dp) :: distance, upsilon, softl_arcsec, H
         integer(kind=i4b) :: j
+        integer(kind=i4b) :: sbh_iostat
 
         print *, "Gravitational Constant in km^3/(s^2 Msun)", grav_const_km
         print *, "parsec in km", parsec_km
@@ -151,6 +158,19 @@ contains
         read (unit=13, fmt=*) dmparam(1:n_dmparam)
         read (unit=13, fmt=*) H
 
+        ! Optional sBH block, appended after H. Absent in every pre-existing
+        ! parameters_pot.in, so a nonzero iostat simply means "no sBH".
+        sbh_profile_type = 0
+        n_sbhparam = 0
+        read (unit=13, fmt=*, iostat=sbh_iostat) sbh_profile_type, n_sbhparam
+        if (sbh_iostat /= 0) then
+            sbh_profile_type = 0
+            n_sbhparam = 0
+        else
+            allocate (sbhparam(n_sbhparam))
+            read (unit=13, fmt=*) sbhparam(1:n_sbhparam)
+        end if
+
         close (unit=13)
 
         !  critical density rho_crit = 3H^2/8piG
@@ -206,6 +226,7 @@ contains
         real (kind=dp), dimension(:), allocatable :: surf_pc_b, sigobs_arcsec_b    ! (BT)
         real(kind=dp) :: distance, upsilon, softl_arcsec, H
         integer(kind=i4b) :: j
+        integer(kind=i4b) :: sbh_iostat
 
         print *, "Gravitational Constant in km^3/(s^2 Msun)", grav_const_km
         print *, "parsec in km", parsec_km
@@ -286,6 +307,19 @@ contains
         read (unit=13, fmt=*) dmparam(1:n_dmparam)
         read (unit=13, fmt=*) Omega   ! (BT) reading pattern speed
         read (unit=13, fmt=*) H
+
+        ! Optional sBH block, appended after H. Absent in every pre-existing
+        ! parameters_pot.in, so a nonzero iostat simply means "no sBH".
+        sbh_profile_type = 0
+        n_sbhparam = 0
+        read (unit=13, fmt=*, iostat=sbh_iostat) sbh_profile_type, n_sbhparam
+        if (sbh_iostat /= 0) then
+            sbh_profile_type = 0
+            n_sbhparam = 0
+        else
+            allocate (sbhparam(n_sbhparam))
+            read (unit=13, fmt=*) sbhparam(1:n_sbhparam)
+        end if
 
         close (unit=13)
 
