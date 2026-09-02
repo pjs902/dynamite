@@ -88,11 +88,24 @@ def test_incomplete_beta_negative_q():
     print('  incomplete_beta_negative_q OK')
 
 
+def test_incomplete_beta_integer_q_raises():
+    """A non-positive integer q hits qq=0 in the recurrence; must raise."""
+    for q in [0.0, -1.0, -2.0, -5.0]:
+        try:
+            SBH.incomplete_beta(0.5, 0.64, q)
+        except ValueError:
+            continue
+        raise AssertionError(
+            f'incomplete_beta(0.5, 0.64, {q}) should have raised ValueError')
+    print('  incomplete_beta_integer_q_raises OK')
+
+
 TESTS = [
     test_density_matches_formula,
     test_mass_enclosed_matches_quadrature,
     test_rho0_from_mass_round_trips,
     test_incomplete_beta_negative_q,
+    test_incomplete_beta_integer_q_raises,
 ]
 
 if __name__ == '__main__':

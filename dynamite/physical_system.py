@@ -1544,16 +1544,29 @@ class StellarBlackHoles(DarkComponent):
         p : float
             first parameter, must be > 0
         q : float
-            second parameter, may be <= 0 but must not be 0
+            second parameter, may be <= 0 but must not be a non-positive
+            integer (0, -1, -2, ...): the downward recurrence used for
+            q <= 0 steps through every ``qq = q, q+1, ..., 0`` on its way
+            up, and hits a division by zero at ``qq == 0``.
 
         Returns
         -------
         float
             the incomplete beta function value
 
+        Raises
+        ------
+        ValueError
+            if q is a non-positive integer, where the recurrence used for
+            q <= 0 divides by zero.
+
         """
         if q > 0.:
             return special.betainc(p, q, x) * special.beta(p, q)
+        if q == np.floor(q):
+            raise ValueError(
+                f'incomplete_beta: q={q} is a non-positive integer; the '
+                'q<=0 downward recurrence divides by zero at qq=0.')
         n = int(np.ceil(1. - q)) + 1
         val = special.betainc(p, q + n, x) * special.beta(p, q + n)
         for j in range(n, 0, -1):
