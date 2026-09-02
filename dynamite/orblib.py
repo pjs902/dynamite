@@ -530,7 +530,13 @@ class LegacyOrbitLibrary(OrbitLibrary):
         if isinstance(sbh, physys.StellarBlackHolesMGE):
             mge_pot = mge_pot + sbh.mge_pot
             len_mge_pot = len(mge_pot.data)
-            header_string_pot = str(len_mge_pot)
+            if self.system.is_bar_disk_system():
+                header_string_pot = (
+                    f"{len_mge_pot} 1 {len_mge_pot - len_disk_pot} "
+                    f"{len_disk_pot}"
+                )
+            else:
+                header_string_pot = str(len_mge_pot)
         text += f"{self.system.H * 1e-6}"
 
         # parameters_pot.in

@@ -247,6 +247,73 @@ def test_pot_in_sbh_no_halo_slot1_is_00():
     print('  pot_in_sbh_no_halo_slot1_is_00 OK')
 
 
+class _FakeMGERows:
+    """Stand-in MGE with just enough behaviour for the header-format test:
+    a `.data` numpy array and `+` that concatenates rows. Not a real
+    ``mges.MGE`` (which needs astropy Table plumbing the other stand-ins
+    in this file don't set up either)."""
+
+    def __init__(self, n_rows):
+        import numpy as _np
+        self.data = _np.zeros((n_rows, 4))
+
+    def __add__(self, other):
+        import numpy as _np
+        combined = _FakeMGERows.__new__(_FakeMGERows)
+        combined.data = _np.vstack([self.data, other.data])
+        return combined
+
+
+class _PotStarsBar(_PotStars):
+    """Bar-disk stand-in: stars.mge_pot / disk_pot are separate blocks."""
+    mge_pot = _FakeMGERows(3)
+    mge_lum = _FakeMGERows(3)
+    disk_pot = _FakeMGERows(2)
+    disk_lum = _FakeMGERows(2)
+
+
+class _PotSystemBar(_PotSystem):
+    def is_bar_disk_system(self):
+        return True
+
+
+def test_pot_in_bar_disk_with_mge_sbh_keeps_3token_header():
+    """Bar-disk system + StellarBlackHolesMGE must NOT collapse the
+    3-token bar header ("<total> 1 <mge_len> <disk_len>") into a bare
+    single-token length when the sBH Gaussians are folded in."""
+    import logging
+    import tempfile
+    from dynamite import orblib as orblib_mod
+
+    sbh = _mk(physys.StellarBlackHolesMGE, 'sbh')
+    sbh.mge_pot = _FakeMGERows(4)
+
+    ol = orblib_mod.LegacyOrbitLibrary.__new__(orblib_mod.LegacyOrbitLibrary)
+    ol.logger = logging.getLogger('test')
+    ol.system = _PotSystemBar(halo=None, sbh=sbh)
+    ol.settings = _POT_SETTINGS
+    ol.parset = dict(_POT_PARSET)
+    ol.parset['omega'] = 0.0
+    ol.parset['theta-stars'] = 10.0
+    ol.parset['phi-stars'] = 20.0
+    ol.parset['psi-stars'] = 30.0
+    ol.stars = _PotStarsBar()
+
+    path = tempfile.mkdtemp() + '/'
+    try:
+        ol.create_fortran_input_orblib(path)
+    except KeyError:
+        pass
+    with open(path + 'parameters_pot.in', 'rb') as f:
+        data = f.read()
+
+    # stars(3) + disk(2) + sbh(4) = 9 rows total; star+sbh = 7, disk = 2
+    header = data.split(b'\n', 1)[0]
+    assert header == b'9 1 7 2', \
+        f'bar-disk header with sBH MGE must stay 3-token, got {header!r}'
+    print('  pot_in_bar_disk_with_mge_sbh_keeps_3token_header OK')
+
+
 def test_mge_sbh_is_not_a_legacy_block():
     """The MGE variant must contribute Gaussians, never a dm block."""
     s = physys.System()
@@ -267,6 +334,7 @@ TESTS = [test_helpers_split_halo_and_sbh,
          test_pot_in_no_sbh_is_byte_identical,
          test_pot_in_halo_and_sbh_trailing_block,
          test_pot_in_sbh_no_halo_slot1_is_00,
+         test_pot_in_bar_disk_with_mge_sbh_keeps_3token_header,
          test_mge_sbh_is_not_a_legacy_block]
 
 if __name__ == '__main__':
