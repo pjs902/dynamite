@@ -169,7 +169,18 @@ from the PhaseFlow fiducial 9.27 pc at 5.43 kpc to 352 arcsec using
 
 ## Regression status
 
-See the Task 9 report
-(`.superpowers/sdd/2026-09-01-sbh-component/task-9-report.md`) for the
-verbatim `dev_tests/test_nnls.py` output against the pre-existing
-single-halo config on this branch.
+`cd dev_tests && python test_nnls.py` was run against the pre-existing,
+untouched single-halo `user_test_config_ml.yaml` (the `sbh` component was
+never invoked). It completed end to end with the local editable
+`dynamite` — config load, orblib build, NNLS weight solve, kinchi2/chi2
+plots, kinematic map — with no exceptions and no unexpected NaN (one row's
+`nan` chi2 is expected `LegacyGridSearch` behaviour, outside the
+3-model toy grid's evaluated range).
+
+**This is not a pass/fail gate.** `test_nnls.py` has no `assert` or
+reference-comparison statements at all (zero matches for
+`assert|reference|expected`) — see [[dynamite_stale_test_references]].
+It prints a table and makes plots with no stored baseline to diff
+against, so running it cannot verify "unchanged from master"; it only
+shows the single-halo path still runs to completion untouched by this
+branch's changes.
