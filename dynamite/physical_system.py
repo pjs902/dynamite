@@ -1461,6 +1461,184 @@ class GeneralisedNFW(DarkComponent):
         return ax, ay, az
 
 
+class StellarBlackHoles(DarkComponent):
+    """A subcluster of stellar-mass black holes
+
+    Spherical Zhao (1996) alpha-beta-gamma double power law::
+
+        rho(r) = rho0 * (r/a)**-gamma * (1 + (r/a)**alpha)**(-(beta-gamma)/alpha)
+
+    Config parameters: m [total sBH mass, Msun], a [scale radius, arcsec],
+    alpha [transition sharpness], beta [outer log-slope], gamma [inner
+    log-slope].
+
+    The profile family was chosen by fitting both the PhaseFlow relaxed cusp
+    and the GCfit/LIMEPY posterior jointly on rho(r) and M(<r); see
+    ``dev_notes/sbh_profile_fits/`` and the design spec.
+
+    Note ``beta > 3`` is required for the total mass to converge and
+    ``gamma < 3`` for M(<r) to converge at the origin. ``gamma == 2``
+    exactly is excluded because it makes the beta-function recurrence
+    divide by zero; the physical content there is a logarithmic limit and
+    the parameter is continuous.
+    """
+    # legacy sequence: rhoc replaces m, and a is in km not arcsec
+    par_names = ['rhoc', 'a', 'alpha', 'beta', 'gamma']
+    # config/sampled parameter names
+    par = ['m', 'a', 'alpha', 'beta', 'gamma']
+
+    def __init__(self, **kwds):
+        self.legacy_code = 6
+        super().__init__(symmetry='spherical', **kwds)
+        self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+
+    def validate(self):
+        super().validate(par=self.par)
+
+    def validate_parset(self, par):
+        """
+        Validate the sBH parameter values.
+
+        Parameters
+        ----------
+        par : dict
+            { "p":val, ... } where "p" are the component's parameters and
+            val are their respective values
+
+        Returns
+        -------
+        bool
+            True if the parameter set is valid, False otherwise
+
+        """
+        ok = (par['m'] > 0.
+              and par['a'] > 0.
+              and par['alpha'] > 0.
+              and par['beta'] > 3.
+              and par['gamma'] < 3.
+              and abs(par['gamma'] - 2.) > 1e-6)
+        if not ok:
+            self.logger.debug(f'Invalid sBH parset {dict(par)}: needs m>0, '
+                              'a>0, alpha>0, beta>3, gamma<3, gamma!=2.')
+        return bool(ok)
+
+    @staticmethod
+    def incomplete_beta(x, p, q):
+        """Unregularised incomplete beta ``B(x; p, q)``, valid for q <= 0.
+
+        ``B(x;p,q) = int_0^x u**(p-1) * (1-u)**(q-1) du``.
+
+        For ``q > 0`` this is ``betainc(p,q,x) * beta(p,q)``. For ``q <= 0``
+        the complete beta is undefined, so we step down from a positive-q
+        evaluation using the contiguous relation::
+
+            B(x;p,q) = [ (p+q) * B(x;p,q+1) - x**p * (1-x)**q ] / q
+
+        This is the same recurrence the Fortran uses, and is why
+        ``zh_betai`` is never called with a non-positive second argument.
+
+        Parameters
+        ----------
+        x : float
+            upper limit, 0 < x < 1
+        p : float
+            first parameter, must be > 0
+        q : float
+            second parameter, may be <= 0 but must not be 0
+
+        Returns
+        -------
+        float
+            the incomplete beta function value
+
+        """
+        if q > 0.:
+            return special.betainc(p, q, x) * special.beta(p, q)
+        n = int(np.ceil(1. - q)) + 1
+        val = special.betainc(p, q + n, x) * special.beta(p, q + n)
+        for j in range(n, 0, -1):
+            qq = q + j - 1.
+            val = ((p + qq) * val - x ** p * (1. - x) ** qq) / qq
+        return val
+
+    @staticmethod
+    def density(x, y, z, pars):
+        '''
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates, same length units as ``a``
+        pars : tuple
+            (rho0, a, alpha, beta, gamma)
+
+        Returns
+        -------
+        rho : float or ndarray
+            density, in mass units of rho0
+        '''
+        rho0, a, alpha, beta, gamma = pars
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+        xx = r / a
+        return rho0 * xx**(-gamma) * (1. + xx**alpha)**(-(beta-gamma)/alpha)
+
+    @staticmethod
+    def mass_enclosed(x, y, z, pars):
+        '''
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates, same length units as ``a``
+        pars : tuple
+            (rho0, a, alpha, beta, gamma)
+
+        Returns
+        -------
+        Menc : float or ndarray
+            mass within r, = 4 pi a^3 rho0 / alpha * B(t; (3-g)/al, (b-3)/al)
+            with t = (r/a)^alpha / (1 + (r/a)^alpha)
+        '''
+        rho0, a, alpha, beta, gamma = pars
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+        xx = r / a
+        t = xx**alpha / (1. + xx**alpha)
+        p = (3. - gamma) / alpha
+        q = (beta - 3.) / alpha
+        # both p and q are > 0 given gamma < 3 and beta > 3
+        bi = special.betainc(p, q, t) * special.beta(p, q)
+        return 4. * np.pi * a**3 * rho0 / alpha * bi
+
+    @staticmethod
+    def rho0_from_mass(m, a, alpha, beta, gamma):
+        """Scale density giving a total mass ``m``.
+
+        ``M_tot = 4 pi a^3 rho0 / alpha * B((3-gamma)/alpha, (beta-3)/alpha)``
+        using the *complete* beta, which converges only for beta > 3.
+
+        Parameters
+        ----------
+        m : float
+            total sBH mass
+        a : float
+            scale radius
+        alpha, beta, gamma : float
+            shape exponents
+
+        Returns
+        -------
+        float
+            rho0, in mass units of m over length units of a cubed
+
+        """
+        b_complete = special.beta((3. - gamma) / alpha, (beta - 3.) / alpha)
+        return m * alpha / (4. * np.pi * a**3 * b_complete)
+
+
 class Chi2Ext(Component):
     """External component independent of DYNAMITE orbit and weight calculations
 
