@@ -485,7 +485,6 @@ class LegacyOrbitLibrary(OrbitLibrary):
             sbh_block = ""
 
         # header
-        len_mge_pot = len(stars.mge_pot.data)
         len_mge_lum = len(stars.mge_lum.data)
         settngs = self.settings
         text = f"{self.system.distMPc}\n"
@@ -502,15 +501,9 @@ class LegacyOrbitLibrary(OrbitLibrary):
         text += f"{settngs['quad_nph']}\n"
         text += f"{dm_specs}\n"
         text += f"{dm_par_vals}\n"
+        sbh_pot = sbh.mge_pot if isinstance(sbh, physys.StellarBlackHolesMGE) \
+            else None
         if self.system.is_bar_disk_system():
-            len_disk_pot = len(stars.disk_pot.data)
-            header_string_pot = (
-                str(len_mge_pot + len_disk_pot)
-                + " 1 "
-                + str(len_mge_pot)
-                + " "
-                + str(len_disk_pot)
-            )
             len_disk_lum = len(stars.disk_lum.data)
             header_string_lum = (
                 str(len_mge_lum + len_disk_lum)
@@ -524,28 +517,21 @@ class LegacyOrbitLibrary(OrbitLibrary):
             # as the bulge/stars and the NEXT ngaus_disk rows as the disk,
             # so any sBH Gaussians must be folded in BEFORE the disk block:
             # the on-disk row order has to stay [stars, sbh, disk].
-            if isinstance(sbh, physys.StellarBlackHolesMGE):
-                mge_pot = stars.mge_pot + sbh.mge_pot + stars.disk_pot
-            else:
-                mge_pot = stars.mge_pot + stars.disk_pot
+            len_disk_pot = len(stars.disk_pot.data)
+            mge_pot = stars.mge_pot + stars.disk_pot if sbh_pot is None \
+                else stars.mge_pot + sbh_pot + stars.disk_pot
+            len_mge_pot = len(mge_pot.data)
+            header_string_pot = (
+                f"{len_mge_pot} 1 {len_mge_pot - len_disk_pot} "
+                f"{len_disk_pot}"
+            )
             mge_lum = stars.mge_lum + stars.disk_lum
         else:
-            header_string_pot = str(len_mge_pot)
             header_string_lum = str(len_mge_lum)
-            if isinstance(sbh, physys.StellarBlackHolesMGE):
-                mge_pot = stars.mge_pot + sbh.mge_pot
-            else:
-                mge_pot = stars.mge_pot
+            mge_pot = stars.mge_pot if sbh_pot is None \
+                else stars.mge_pot + sbh_pot
+            header_string_pot = str(len(mge_pot.data))
             mge_lum = stars.mge_lum
-        if isinstance(sbh, physys.StellarBlackHolesMGE):
-            len_mge_pot = len(mge_pot.data)
-            if self.system.is_bar_disk_system():
-                header_string_pot = (
-                    f"{len_mge_pot} 1 {len_mge_pot - len_disk_pot} "
-                    f"{len_disk_pot}"
-                )
-            else:
-                header_string_pot = str(len_mge_pot)
         text += f"{self.system.H * 1e-6}"
 
         # parameters_pot.in

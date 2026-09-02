@@ -1131,17 +1131,19 @@ class Configuration(object):
                 continue
             if issubclass(type(c), physys.DarkComponent) \
                 and not isinstance(c, physys.Plummer):
-            # Check allowed dm halos in legacy mode
+            # Check allowed non-Plummer dark components (a DM halo or an
+            # sBH component) in legacy mode
                 if type(c) not in [physys.NFW, physys.NFW_m200_c,
                                    physys.Hernquist,
                                    physys.TriaxialCoredLogPotential,
                                    physys.GeneralisedNFW,
                                    physys.StellarBlackHoles,
                                    physys.StellarBlackHolesMGE]:
-                    text = 'DM Halo needs to be of type NFW, NFW_m200_c, ' \
-                           'Hernquist, TriaxialCoredLogPotential, ' \
-                           'GeneralisedNFW, StellarBlackHoles, ' \
-                           f'or StellarBlackHolesMGE, not {type(c)}'
+                    text = 'Non-Plummer dark component needs to be of ' \
+                           'type NFW, NFW_m200_c, Hernquist, ' \
+                           'TriaxialCoredLogPotential, GeneralisedNFW ' \
+                           '(a DM halo), or StellarBlackHoles, ' \
+                           f'StellarBlackHolesMGE (an sBH), not {type(c)}'
                     self.logger.error(text)
                     raise ValueError(text)
 

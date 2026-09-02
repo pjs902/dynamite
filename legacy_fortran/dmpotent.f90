@@ -244,7 +244,6 @@ contains
         real(kind=dp) :: e, zz, yc_e
         integer(kind=i4b) :: k
 
-        w = y/(1.0_dp + y)
         u = 1.0_dp/(1.0_dp + y)
         if (q .gt. 1.0_dp) then
             ! Comfortably finite at y = 0, and both of the Python's
@@ -253,6 +252,7 @@ contains
             ! 1 - 1/(1+y), and its own branch test already picks the side
             ! that avoids subtracting near-equal numbers, so the two are
             ! collapsed into one call here.
+            w = y/(1.0_dp + y)
             val = sbh_binc(u, w, p, q)
             return
         end if
@@ -290,12 +290,17 @@ contains
         val = total
     end function sbh_outer_tail_integral
 
-    ! 4 pi int_r^inf r' rho(r') dr', the potential's outer term.
-    function sbh_outer_tail(r) result(tail)
+    ! 4 pi int_r^inf r' rho(r') dr', the potential's outer term. Accepts an
+    ! already-computed y = (r/a)**alpha via y_in, so a caller that also
+    ! needs sbh_menc(r) at the same r (dm_potent's sBH block) evaluates the
+    ! (r/a)**alpha power once instead of once per function.
+    function sbh_outer_tail(r, y_in) result(tail)
         real(kind=dp), intent(in) :: r
+        real(kind=dp), intent(in), optional :: y_in
         real(kind=dp) :: tail, y, p_out, q_out
 
         y = sbh_yvar(r)
+        if (present(y_in)) y = y_in
         p_out = (sbh_be - 2.0_dp)/sbh_al
         q_out = (2.0_dp - sbh_ga)/sbh_al
         tail = 4.0_dp*pi_d*sbh_a*sbh_a*sbh_rho0/sbh_al &
@@ -303,12 +308,15 @@ contains
     end function sbh_outer_tail
 
     ! M(<r) for the sBH profile, in Msun. Both beta parameters are
-    ! strictly positive given gamma < 3 and beta > 3.
-    function sbh_menc(r) result(menc)
+    ! strictly positive given gamma < 3 and beta > 3. See sbh_outer_tail
+    ! for the optional y_in argument.
+    function sbh_menc(r, y_in) result(menc)
         real(kind=dp), intent(in) :: r
+        real(kind=dp), intent(in), optional :: y_in
         real(kind=dp) :: menc, y, w, u
 
         y = sbh_yvar(r)
+        if (present(y_in)) y = y_in
         w = y/(1.0_dp + y)
         u = 1.0_dp/(1.0_dp + y)
         menc = 4.0_dp*pi_d*sbh_a**3*sbh_rho0/sbh_al &
@@ -360,10 +368,11 @@ contains
     subroutine dm_potent_sbh_only(x, y, z, pot)
         real(kind=dp), intent(in) :: x, y, z
         real(kind=dp), intent(out) :: pot
-        real(kind=dp) :: d
+        real(kind=dp) :: d, yv
 
         d = sqrt(x*x + y*y + z*z)
-        pot = grav_const_km*(sbh_menc(d)/d + sbh_outer_tail(d))
+        yv = sbh_yvar(d)
+        pot = grav_const_km*(sbh_menc(d, yv)/d + sbh_outer_tail(d, yv))
     end subroutine dm_potent_sbh_only
 
     subroutine dm_accel_sbh_only(x, y, z, vx, vy, vz)
@@ -516,7 +525,7 @@ contains
         use initial_parameters
         real(kind=dp), intent(in) ::  x, y, z
         real(kind=dp), intent(out):: pot
-        real(kind=dp) :: d, d2, dnorm, xi, ibeta_v2, ibeta_v3, zh_betai
+        real(kind=dp) :: d, d2, dnorm, xi, ibeta_v2, ibeta_v3, zh_betai, sbh_yv
 
         d2 = x*x + y*y + z*z
 
@@ -572,9 +581,11 @@ contains
 
         if (sbh_present) then
             d = sqrt(d2)
+            sbh_yv = sbh_yvar(d)
             ! this module's `pot` is positive (psi = -Phi), matching the
             ! Plummer and NFW terms above
-            pot = pot + grav_const_km*(sbh_menc(d)/d + sbh_outer_tail(d))
+            pot = pot + grav_const_km &
+                  *(sbh_menc(d, sbh_yv)/d + sbh_outer_tail(d, sbh_yv))
         end if
 
     end subroutine dm_potent
