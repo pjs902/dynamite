@@ -1062,17 +1062,20 @@ class Configuration(object):
                 raise ValueError('System needs to have exactly one '
                                  'VisibleComponent object')
 
-        if len(self.system.get_all_dark_non_plummer_components()) > 1:
-            self.logger.error('System must have zero or one DM Halo object')
-            raise ValueError('System must have zero or one DM Halo object')
+        # raises if there is more than one of either kind
+        has_halo = self.system.get_halo_component() is not None
+        has_sbh = self.system.get_sbh_component() is not None
 
-        if self.system.get_unique_ext_chi2_component() is None:
-            check = (2, 3)
-        else:
-            check = (3, 4)
-        if len(self.system.cmp_list) not in check:
-            txt = 'System needs to comprise exactly one Plummer, ' \
-                  'one VisibleComponent, and zero or one DM Halo object(s)'
+        # base = one Plummer + one VisibleComponent, plus the optional
+        # halo, sBH and Chi2Ext components
+        n_expected = 2 + int(has_halo) + int(has_sbh)
+        if self.system.get_unique_ext_chi2_component() is not None:
+            n_expected += 1
+        if len(self.system.cmp_list) != n_expected:
+            txt = 'System needs to comprise exactly one Plummer, one ' \
+                  'VisibleComponent, and at most one DM Halo, one sBH ' \
+                  f'and one Chi2Ext object; expected {n_expected} ' \
+                  f'components, got {len(self.system.cmp_list)}'
             self.logger.error(txt)
             raise ValueError(txt)
 
@@ -1130,10 +1133,13 @@ class Configuration(object):
                 if type(c) not in [physys.NFW, physys.NFW_m200_c,
                                    physys.Hernquist,
                                    physys.TriaxialCoredLogPotential,
-                                   physys.GeneralisedNFW]:
+                                   physys.GeneralisedNFW,
+                                   physys.StellarBlackHoles,
+                                   physys.StellarBlackHolesMGE]:
                     text = 'DM Halo needs to be of type NFW, NFW_m200_c, ' \
                            'Hernquist, TriaxialCoredLogPotential, ' \
-                           f'or GeneralisedNFW, not {type(c)}'
+                           'GeneralisedNFW, StellarBlackHoles, ' \
+                           f'or StellarBlackHolesMGE, not {type(c)}'
                     self.logger.error(text)
                     raise ValueError(text)
 

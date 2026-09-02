@@ -296,6 +296,49 @@ class System(object):
         dark_non_plum_cmp = [c for c in dark_cmp if not isinstance(c, Plummer)]
         return dark_non_plum_cmp
 
+    def get_sbh_component(self):
+        """Get the stellar-black-hole component, if any
+
+        Returns
+        -------
+        StellarBlackHoles or StellarBlackHolesMGE or None
+
+        Raises
+        ------
+        ValueError : if more than one sBH component is present
+
+        """
+        sbh = [c for c in self.cmp_list
+               if isinstance(c, (StellarBlackHoles, StellarBlackHolesMGE))]
+        if len(sbh) > 1:
+            text = f'System can have at most one sBH component, not {len(sbh)}'
+            self.logger.error(text)
+            raise ValueError(text)
+        return sbh[0] if sbh else None
+
+    def get_halo_component(self):
+        """Get the dark halo component, if any
+
+        The halo is any dark, non-Plummer, non-sBH component.
+
+        Returns
+        -------
+        Component or None
+
+        Raises
+        ------
+        ValueError : if more than one halo is present
+
+        """
+        halo = [c for c in self.get_all_dark_non_plummer_components()
+                if not isinstance(c, (StellarBlackHoles,
+                                      StellarBlackHolesMGE))]
+        if len(halo) > 1:
+            text = f'System can have at most one DM halo, not {len(halo)}'
+            self.logger.error(text)
+            raise ValueError(text)
+        return halo[0] if halo else None
+
     def get_unique_ext_chi2_component(self):
         """Return the unique Chi2Ext component
 
@@ -1998,6 +2041,21 @@ class StellarBlackHoles(DarkComponent):
         self.logger.debug(f'sBH legacy strings: {specs} / {par_vals} '
                           f'(from m={m} Msun, a={a_arcsec} arcsec)')
         return specs, par_vals
+
+
+class StellarBlackHolesMGE(DarkComponent):
+    """A fixed, externally-supplied sBH profile represented as an MGE.
+
+    Filled in by Task 8. Carries an ``mge_pot`` whose Gaussians are
+    concatenated into the potential MGE, so it needs no legacy code and no
+    Fortran changes.
+    """
+    par_names = []
+
+    def __init__(self, mge_pot=None, **kwds):
+        self.mge_pot = mge_pot
+        super().__init__(symmetry='spherical', **kwds)
+        self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
 
 
 class Chi2Ext(Component):
