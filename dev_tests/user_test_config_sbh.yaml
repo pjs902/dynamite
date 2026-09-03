@@ -72,21 +72,27 @@ system_components:
                 value: 1.0e+5
                 logarithmic: False
                 LaTeX: "$M_\\mathrm{sBH}$"
-            a: # scale length [arcsec]; 9.27 pc at 5.43 kpc (1 arcsec = 0.02633 pc)
+            # Shape fixed at the GCfit/LIMEPY 0.05-10 pc joint fit -- the
+            # default, and the 'production' case in test_sbh_fortran.py.
+            # Prefer it over the PhaseFlow fiducial (2.15/12.0/1.74,
+            # a = 9.27 pc): that run truncates at r ~ 7 pc, so its scale
+            # radius falls outside its own fitting range and it constrains
+            # little beyond gamma. See dev_notes/sbh_component.md.
+            a: # scale length [arcsec]; 3.06 pc at 5.43 kpc (1 arcsec = 0.02633 pc)
                 fixed: True
-                value: 352.0
+                value: 116.2
                 LaTeX: "$a_\\mathrm{sBH}$"
             alpha: # Zhao sharpness exponent
                 fixed: True
-                value: 2.15
+                value: 3.91
                 LaTeX: "$\\alpha_\\mathrm{sBH}$"
             beta: # Zhao outer slope (must be > 3)
                 fixed: True
-                value: 4.5
+                value: 4.50
                 LaTeX: "$\\beta_\\mathrm{sBH}$"
             gamma: # Zhao inner slope (must be < 3, != 2)
                 fixed: True
-                value: 1.75
+                value: 2.24
                 LaTeX: "$\\gamma_\\mathrm{sBH}$"
         type: "StellarBlackHoles"
         include: True

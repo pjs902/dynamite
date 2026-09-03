@@ -143,6 +143,14 @@ stellar-mass black holes, `legacy_code = 6`. Config parameters: `m`
 `gamma < 3`, `gamma != 2`. Coexists with a DM halo (two dark slots; the
 sBH block is appended at the end of `parameters_pot.in`).
 
+**Default shape: the GCfit/LIMEPY 0.05-10 pc fit** — `a = 3.06 pc`
+(116.2 arcsec at 5.43 kpc), `alpha = 3.91`, `beta = 4.50`, `gamma = 2.24`,
+all **fixed**, with only `m` free. This is the `'production'` case in
+`test_sbh_fortran.py`. Do not use the PhaseFlow fiducial shape: its scale
+radius falls outside its own fitting range. The shape choice shifts
+M_sBH(<10 arcsec) by ~12x at fixed total mass and so biases `m-bh`
+directly — treat it as a systematic, not a detail.
+
 `StellarBlackHolesMGE` — a fixed externally-supplied profile whose
 Gaussians concatenate into the potential MGE; no Fortran involved. It has
 no sampled parameters, but the config reader still demands the key: its

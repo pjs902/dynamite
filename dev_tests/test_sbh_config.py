@@ -369,7 +369,8 @@ def test_sbh_validate_parset():
     import logging
     sbh = _mk(physys.StellarBlackHoles, 'sbh')
     sbh.logger = logging.getLogger('test')  # _mk bypasses __init__
-    good = dict(m=1.0e5, a=352.0, alpha=2.15, beta=4.5, gamma=1.75)
+    # the LIMEPY default shape, as in user_test_config_sbh.yaml
+    good = dict(m=1.0e5, a=116.2, alpha=3.91, beta=4.50, gamma=2.24)
     assert sbh.validate_parset(good) is True, 'reference parset must pass'
     for bad in [dict(good, m=0.), dict(good, m=-1.),
                 dict(good, a=0.), dict(good, alpha=0.),

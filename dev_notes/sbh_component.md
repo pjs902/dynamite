@@ -192,9 +192,28 @@ which uses the PhaseFlow fiducial row):
 
 Note the beta=12 rows sit at the fit bound and are degenerate with large
 `a`; bound `alpha` and `beta` in any config that samples them rather than
-letting a sampler wander toward that degeneracy. The reference config
-instead fixes `alpha, beta, gamma` at values within the well-conditioned
-range (2.15, 4.5, 1.75) and only frees `m`.
+letting a sampler wander toward that degeneracy.
+
+**The LIMEPY 0.05-10 pc row is the default**: `a = 3.06 pc`, `alpha = 3.91`,
+`beta = 4.50`, `gamma = 2.24`, all fixed, with only `m` free. It is the
+`'production'` case in `test_sbh_fortran.py`, held to the tightest
+tolerance there (`RTOL_PRODUCTION = 1e-14`), and the shape asserted at byte
+level in `test_sbh_config.py`.
+
+Prefer it over the PhaseFlow fiducial. That run truncates at r ~ 7 pc
+(`hmax=1e10`), so its fitted `a = 9.27 pc` lies *outside its own fitting
+range* and it constrains essentially nothing but `gamma` -- see
+`dev_notes/sbh_profile_fits/README.md`. LIMEPY, by contrast, is fitted to
+the omega Cen GCfit nested-sampling run over a range that contains its
+scale radius.
+
+The choice is not cosmetic. At fixed total mass 1e5 Msun the two shapes put
+very different amounts of mass in the centre -- M_sBH(<1") is 51 Msun for
+the PhaseFlow shape but 1951 Msun for LIMEPY (38x), and M_sBH(<10") is 905
+vs 11225 (12x). Since that mass is exactly what a central IMBH would
+otherwise account for, fixing the wrong shape biases `m-bh` directly.
+Treat the shape as a systematic: refit at both shapes and compare `m-bh`
+before deciding whether freeing `a` is worth the extra orbit libraries.
 
 ## Reference config
 
