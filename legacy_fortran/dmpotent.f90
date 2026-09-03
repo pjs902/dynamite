@@ -353,7 +353,9 @@ contains
         if (sbh_al .le. 0.0_dp) stop 'sBH alpha must be > 0'
         if (sbh_be .le. 3.0_dp) stop 'sBH beta must be > 3 (finite mass)'
         if (sbh_ga .ge. 3.0_dp) stop 'sBH gamma must be < 3'
-        if (abs(sbh_ga - 2.0_dp) .lt. 1.0e-6_dp) &
+        ! .le., not .lt., to match StellarBlackHoles.validate_parset, which
+        ! requires abs(gamma-2) > 1e-6 and so rejects exactly 1e-6 too.
+        if (abs(sbh_ga - 2.0_dp) .le. 1.0e-6_dp) &
             stop 'sBH gamma must not equal 2'
     end subroutine sbh_assign
 
