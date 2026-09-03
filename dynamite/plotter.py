@@ -178,7 +178,10 @@ class Plotter():
         self.logger.info(f'Making chi2 plot scaled according to {which_chi2}')
 
         pars = self.config.parspace
-        val = deepcopy(self.all_models.table)
+        # Masses are stored per orbit library; this returns them physical.
+        # Scaling before the cuts below keeps each row's scaling factor tied
+        # to its own model id rather than to a chi2-value lookup.
+        val = self.all_models.get_physical_parameter_table()
 
         # exclude the first 50, 100 (specified by the user)
         # models in case the values were really off there
@@ -187,43 +190,6 @@ class Plotter():
 
         #only use models that are finished
         val=val[val['all_done']==True]
-
-        # add black hole scaling
-        scale_factor = np.zeros(len(val))
-        for i in range(len(val)):
-            chi2val = val[which_chi2][i]
-            model_id=np.where(self.all_models.table[which_chi2]==chi2val)[0][0]
-            scale_factor[i] = \
-                self.all_models.get_model_velocity_scaling_factor( \
-                                                            model_id=model_id)
-
-        dh = self.system.get_all_dark_non_plummer_components()
-        if len(dh) > 1:
-            txt = 'Zero or one non-plummer dark component should be ' \
-                  f' present, not {len(dh)}.'
-            self.logger.error(txt)
-            raise ValueError(txt)
-        if len(dh) > 0:
-            dh = dh[0]  # take the first as there should only be one of these
-            if type(dh) is physys.NFW:
-                val[f'c-{dh.name}'] = val[f'c-{dh.name}']
-                val[f'f-{dh.name}'] = val[f'f-{dh.name}']
-            elif type(dh) is physys.NFW_m200_c:
-                pass
-            elif type(dh) is physys.Hernquist:
-                val[f'rhoc-{dh.name}']= val[f'rhoc-{dh.name}']*scale_factor**2
-            elif type(dh) is physys.TriaxialCoredLogPotential:
-                val[f'Vc-{dh.name}'] = val[f'Vc-{dh.name}']*scale_factor
-            elif type(dh) is physys.GeneralisedNFW:
-                val[f'Mvir-{dh.name}'] = val[f'Mvir-{dh.name}']*scale_factor**2
-            else:
-                text = f'unknown dark halo type component'
-                self.logger.error(text)
-                raise ValueError(text)
-
-        # get the plummer component i.e. black hole
-        bh = self.system.get_component_from_class(physys.Plummer)
-        val[f'm-{bh.name}'] = val[f'm-{bh.name}']*scale_factor**2
 
         #get number and names of parameters that are not fixed
         nofix_sel=[]
@@ -1176,18 +1142,24 @@ class Plotter():
 
         stars = \
             self.system.get_component_from_class(physys.TriaxialVisibleComponent)
-        dh = self.system.get_all_dark_non_plummer_components()
-        if len(dh) > 1:
-            txt = 'Zero or one non-plummer dark component should be ' \
-                  f' present, not {len(dh)}.'
-            self.logger.error(txt)
-            raise ValueError(txt)
-        if len(dh) > 0:
-            dh = dh[0]  # extract the one and only dm component
-        else:
-            dh = None
+        # the halo, if any (an sBH component is not a halo: it is spherical
+        # and analytic, and is added as its own term further down)
+        dh = self.system.get_halo_component()
+        sbh = self.system.get_sbh_component()
+        if sbh is not None and not isinstance(sbh, physys.StellarBlackHoles):
+            # StellarBlackHolesMGE has no sampled parameters to build a
+            # profile from - its Gaussians only join the potential MGE when
+            # orblib.py writes parameters_pot.in, not in stars.mge_pot here.
+            self.logger.warning('mass_plot cannot add a '
+                                f'{type(sbh).__name__} component to the '
+                                'enclosed-mass profile; its mass is omitted.')
+            sbh = None
 
-        val0 = deepcopy(self.all_models.table)
+        # physical, not stored, masses: 'm-bh' is held per orbit library, so
+        # a reused model's stored value is short by ml/ml_orblib and would be
+        # drawn against an ml-scaled stellar profile. 'c-dh'/'f-dh' are
+        # ratios, and are returned untouched.
+        val0 = self.all_models.get_physical_parameter_table()
         arg = np.argsort(np.array(val0[which_chi2]))
         val = val0[arg]
         chi2pmin = val[which_chi2][0]
@@ -1215,7 +1187,8 @@ class Plotter():
         r_pc = R*arctpc
         psi_off = mgePAtwist
 
-        mass = np.zeros((nm,n,3))
+        # components: 0 stars, 1 dark halo, 2 central BH, 3 sBH subcluster
+        mass = np.zeros((nm,n,4))
         bhm = np.zeros(n)
         mlstellar = np.zeros(n)
         incl_a = np.zeros(n)
@@ -1258,10 +1231,26 @@ class Plotter():
 
             mbh = val['m-bh'][i]
 
+            if sbh is not None:
+                # a is in arcsec in the config, so work the whole profile in
+                # pc: rho0_from_mass then returns Msun/pc**3 and the enclosed
+                # mass comes out in Msun, matching mstars and mdm.
+                a_pc = val[f'a-{sbh.name}'][i] * arctpc
+                sbh_pars = (val[f'alpha-{sbh.name}'][i],
+                            val[f'beta-{sbh.name}'][i],
+                            val[f'gamma-{sbh.name}'][i])
+                rho0 = physys.StellarBlackHoles.rho0_from_mass(
+                    val[f'm-{sbh.name}'][i], a_pc, *sbh_pars)
+                msbh = physys.StellarBlackHoles.mass_enclosed(
+                    r_pc, 0., 0., (rho0, a_pc) + sbh_pars)
+            else:
+                msbh = 0.
+
             mass[:,i,0] = mstars
             mass[:,i,1] = mdm
             nm_mbh = np.empty(nm); nm_mbh.fill(mbh)
             mass[:,i,2] = nm_mbh.flatten()
+            mass[:,i,3] = msbh
             bhm[i] = mbh
             mlstellar[i] = ml
             incl_a[i] = incl_view[0]
@@ -1333,6 +1322,14 @@ class Plotter():
                     label='Dark Matter')
             ax.fill_between(R, np.min(mass[:,:,1],axis=1),
                             np.max(mass[:,:,1],axis=1),facecolor='b',alpha=0.1)
+
+        # separate from the dh block: an sBH subcluster can be present with
+        # or without a dark halo
+        if sbh is not None:
+            ax.plot(R,mass[:,0,3], '-', color='g', linewidth=2.0,
+                    label='sBH subcluster')
+            ax.fill_between(R, np.min(mass[:,:,3],axis=1),
+                            np.max(mass[:,:,3],axis=1),facecolor='g',alpha=0.1)
 
         ax.legend(loc='upper left', fontsize=8)
         plt.tight_layout()

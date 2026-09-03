@@ -456,15 +456,9 @@ class LegacyOrbitLibrary(OrbitLibrary):
             p = self.parset[f"p-{stars.name}"]
             u = self.parset[f"u-{stars.name}"]
             theta, psi, phi = stars.triax_pqu2tpp(p, q, u)
-        # get dark halo
-        dh = self.system.get_all_dark_non_plummer_components()
-        if len(dh) > 1:
-            txt = f"Zero or one non-plummer dark component should be  present, not {len(dh)}."
-            self.logger.error(txt)
-            raise ValueError(txt)
-        if len(dh) > 0:
-            dh = dh[0]  # extract the one and only dm component
-
+        # slot 1: the dark halo (raises if more than one is present)
+        dh = self.system.get_halo_component()
+        if dh is not None:
             if isinstance(dh, physys.NFW_m200_c):
                 # fix c via m200_c relation, for legacy Fortran it is still NFW
                 dm_specs, dm_par_vals = dh.get_dh_legacy_strings(
@@ -476,8 +470,21 @@ class LegacyOrbitLibrary(OrbitLibrary):
             dm_specs = "0 0"
             dm_par_vals = ""
 
+        # slot 2: the sBH component, written at the END of the file so that
+        # existing single-halo parameters_pot.in files parse unchanged (the
+        # Fortran reads it under iostat and hits EOF when it is absent).
+        # StellarBlackHolesMGE contributes Gaussians to mge_pot instead and
+        # so has no legacy block.
+        sbh = self.system.get_sbh_component()
+        if isinstance(sbh, physys.StellarBlackHoles):
+            sbh_specs, sbh_par_vals = sbh.get_dh_legacy_strings(
+                self.parset, self.system
+            )
+            sbh_block = f"{sbh_specs}\n{sbh_par_vals}\n"
+        else:
+            sbh_block = ""
+
         # header
-        len_mge_pot = len(stars.mge_pot.data)
         len_mge_lum = len(stars.mge_lum.data)
         settngs = self.settings
         text = f"{self.system.distMPc}\n"
@@ -494,15 +501,9 @@ class LegacyOrbitLibrary(OrbitLibrary):
         text += f"{settngs['quad_nph']}\n"
         text += f"{dm_specs}\n"
         text += f"{dm_par_vals}\n"
+        sbh_pot = sbh.mge_pot if isinstance(sbh, physys.StellarBlackHolesMGE) \
+            else None
         if self.system.is_bar_disk_system():
-            len_disk_pot = len(stars.disk_pot.data)
-            header_string_pot = (
-                str(len_mge_pot + len_disk_pot)
-                + " 1 "
-                + str(len_mge_pot)
-                + " "
-                + str(len_disk_pot)
-            )
             len_disk_lum = len(stars.disk_lum.data)
             header_string_lum = (
                 str(len_mge_lum + len_disk_lum)
@@ -512,12 +513,24 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 + str(len_disk_lum)
             )
             text += f"{self.parset['omega']}\n"
-            mge_pot = stars.mge_pot + stars.disk_pot
+            # the Fortran (iniparam_f.f90) reads the first ngaus_bulge rows
+            # as the bulge/stars and the NEXT ngaus_disk rows as the disk,
+            # so any sBH Gaussians must be folded in BEFORE the disk block:
+            # the on-disk row order has to stay [stars, sbh, disk].
+            len_disk_pot = len(stars.disk_pot.data)
+            mge_pot = stars.mge_pot + stars.disk_pot if sbh_pot is None \
+                else stars.mge_pot + sbh_pot + stars.disk_pot
+            len_mge_pot = len(mge_pot.data)
+            header_string_pot = (
+                f"{len_mge_pot} 1 {len_mge_pot - len_disk_pot} "
+                f"{len_disk_pot}"
+            )
             mge_lum = stars.mge_lum + stars.disk_lum
         else:
-            header_string_pot = str(len_mge_pot)
             header_string_lum = str(len_mge_lum)
-            mge_pot = stars.mge_pot
+            mge_pot = stars.mge_pot if sbh_pot is None \
+                else stars.mge_pot + sbh_pot
+            header_string_pot = str(len(mge_pot.data))
             mge_lum = stars.mge_lum
         text += f"{self.system.H * 1e-6}"
 
@@ -530,6 +543,9 @@ class LegacyOrbitLibrary(OrbitLibrary):
             comments="",
             fmt=["%10.2f", "%10.5f", "%10.5f", "%10.2f"],
         )
+        if sbh_block:
+            with open(path + "parameters_pot.in", "a") as f_sbh:
+                f_sbh.write(sbh_block)
         # parameters_lum.in
         np.savetxt(
             path + "parameters_lum.in",

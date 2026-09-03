@@ -296,6 +296,49 @@ class System(object):
         dark_non_plum_cmp = [c for c in dark_cmp if not isinstance(c, Plummer)]
         return dark_non_plum_cmp
 
+    def get_sbh_component(self):
+        """Get the stellar-black-hole component, if any
+
+        Returns
+        -------
+        StellarBlackHoles or StellarBlackHolesMGE or None
+
+        Raises
+        ------
+        ValueError : if more than one sBH component is present
+
+        """
+        sbh = [c for c in self.cmp_list
+               if isinstance(c, (StellarBlackHoles, StellarBlackHolesMGE))]
+        if len(sbh) > 1:
+            text = f'System can have at most one sBH component, not {len(sbh)}'
+            self.logger.error(text)
+            raise ValueError(text)
+        return sbh[0] if sbh else None
+
+    def get_halo_component(self):
+        """Get the dark halo component, if any
+
+        The halo is any dark, non-Plummer, non-sBH component.
+
+        Returns
+        -------
+        Component or None
+
+        Raises
+        ------
+        ValueError : if more than one halo is present
+
+        """
+        halo = [c for c in self.get_all_dark_non_plummer_components()
+                if not isinstance(c, (StellarBlackHoles,
+                                      StellarBlackHolesMGE))]
+        if len(halo) > 1:
+            text = f'System can have at most one DM halo, not {len(halo)}'
+            self.logger.error(text)
+            raise ValueError(text)
+        return halo[0] if halo else None
+
     def get_unique_ext_chi2_component(self):
         """Return the unique Chi2Ext component
 
@@ -1459,6 +1502,614 @@ class GeneralisedNFW(DarkComponent):
         az = factor * z
 
         return ax, ay, az
+
+
+class StellarBlackHoles(DarkComponent):
+    """A subcluster of stellar-mass black holes
+
+    Spherical Zhao (1996) alpha-beta-gamma double power law::
+
+        rho(r) = rho0 * (r/a)**-gamma * (1 + (r/a)**alpha)**(-(beta-gamma)/alpha)
+
+    Config parameters: m [total sBH mass, Msun], a [scale radius, arcsec],
+    alpha [transition sharpness], beta [outer log-slope], gamma [inner
+    log-slope].
+
+    The profile family was chosen by fitting both the PhaseFlow relaxed cusp
+    and the GCfit/LIMEPY posterior jointly on rho(r) and M(<r); see
+    ``dev_notes/sbh_profile_fits/`` and the design spec.
+
+    Note ``beta > 3`` is required for the total mass to converge and
+    ``gamma < 3`` for M(<r) to converge at the origin. ``gamma == 2``
+    exactly is excluded because it makes the beta-function recurrence
+    divide by zero; the physical content there is a logarithmic limit and
+    the parameter is continuous.
+    """
+    # legacy sequence: rhoc replaces m, and a is in km not arcsec
+    par_names = ['rhoc', 'a', 'alpha', 'beta', 'gamma']
+    # config/sampled parameter names
+    par = ['m', 'a', 'alpha', 'beta', 'gamma']
+
+    def __init__(self, **kwds):
+        self.legacy_code = 6
+        super().__init__(symmetry='spherical', **kwds)
+        self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+
+    def validate(self):
+        super().validate(par=self.par)
+
+    def validate_parset(self, par):
+        """
+        Validate the sBH parameter values.
+
+        Parameters
+        ----------
+        par : dict
+            { "p":val, ... } where "p" are the component's parameters and
+            val are their respective values
+
+        Returns
+        -------
+        bool
+            True if the parameter set is valid, False otherwise
+
+        """
+        ok = (par['m'] > 0.
+              and par['a'] > 0.
+              and par['alpha'] > 0.
+              and par['beta'] > 3.
+              and par['gamma'] < 3.
+              and abs(par['gamma'] - 2.) > 1e-6)
+        if not ok:
+            self.logger.debug(f'Invalid sBH parset {dict(par)}: needs m>0, '
+                              'a>0, alpha>0, beta>3, gamma<3, gamma!=2.')
+        return bool(ok)
+
+    @staticmethod
+    def incomplete_beta(x, p, q):
+        """Unregularised incomplete beta ``B(x; p, q)``, valid for q <= 0.
+
+        ``B(x;p,q) = int_0^x u**(p-1) * (1-u)**(q-1) du``.
+
+        For ``q > 0`` this is ``betainc(p,q,x) * beta(p,q)``. For ``q <= 0``
+        the complete beta is undefined, so we step down from a positive-q
+        evaluation using the contiguous relation::
+
+            B(x;p,q) = [ (p+q) * B(x;p,q+1) - x**p * (1-x)**q ] / q
+
+        The Fortran side (``dmpotent.f90``) reaches the same q <= 0 region by
+        a different, independent route (power series + a private continued
+        fraction) rather than this recurrence; both avoid ever calling the
+        shared ``zh_betai`` with a non-positive second argument, since its
+        continued fraction ``zh_betacf`` is single precision.
+
+        Parameters
+        ----------
+        x : float
+            upper limit, 0 < x < 1
+        p : float
+            first parameter, must be > 0
+        q : float
+            second parameter, may be <= 0 but must not be a non-positive
+            integer (0, -1, -2, ...): the downward recurrence used for
+            q <= 0 steps through every ``qq = q, q+1, ..., 0`` on its way
+            up, and hits a division by zero at ``qq == 0``.
+
+        Returns
+        -------
+        float
+            the incomplete beta function value
+
+        Raises
+        ------
+        ValueError
+            if q is a non-positive integer, where the recurrence used for
+            q <= 0 divides by zero.
+
+        """
+        if q > 0.:
+            return special.betainc(p, q, x) * special.beta(p, q)
+        if q == np.floor(q):
+            raise ValueError(
+                f'incomplete_beta: q={q} is a non-positive integer; the '
+                'q<=0 downward recurrence divides by zero at qq=0.')
+        n = int(np.ceil(1. - q)) + 1
+        val = special.betainc(p, q + n, x) * special.beta(p, q + n)
+        for j in range(n, 0, -1):
+            qq = q + j - 1.
+            val = ((p + qq) * val - x ** p * (1. - x) ** qq) / qq
+        return val
+
+    @staticmethod
+    def density(x, y, z, pars):
+        '''
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates, same length units as ``a``
+        pars : tuple
+            (rho0, a, alpha, beta, gamma)
+
+        Returns
+        -------
+        rho : float or ndarray
+            density, in mass units of rho0
+        '''
+        rho0, a, alpha, beta, gamma = pars
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+        xx = r / a
+        return rho0 * xx**(-gamma) * (1. + xx**alpha)**(-(beta-gamma)/alpha)
+
+    @staticmethod
+    def mass_enclosed(x, y, z, pars):
+        '''
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates, same length units as ``a``
+        pars : tuple
+            (rho0, a, alpha, beta, gamma)
+
+        Returns
+        -------
+        Menc : float or ndarray
+            mass within r, = 4 pi a^3 rho0 / alpha * B(t; (3-g)/al, (b-3)/al)
+            with t = (r/a)^alpha / (1 + (r/a)^alpha)
+
+        Notes
+        -----
+        Carried in ``yy = (r/a)**alpha``, for the same reason
+        ``_outer_tail_integral`` is: ``t`` alone does not determine
+        ``B(t;p,q)`` to double precision once ``t -> 1``. At ``r/a = 1e4``
+        with the fitted exponents the true ``1-t`` is 2.29087e-16 but the
+        nearest double below 1 puts it at 2.220446e-16 -- a 3% error in the
+        small quantity, and since ``B = B(p,q) - c*(1-t)**q + ...`` that
+        surfaces as a 4.4e-9 error in the mass. Handing ``betainc`` the
+        complement ``u = 1/(1+yy)`` as its own argument, rather than letting
+        it recover ``1-t`` from ``t``, keeps the small quantity small.
+        Verified against mpmath at 50 digits: <= 3e-16 over
+        ``r/a = 1e-6..1e4``, against 4.4e-9 before.
+
+        '''
+        rho0, a, alpha, beta, gamma = pars
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+        yy = (r / a)**alpha
+        u = 1. / (1. + yy)          # = 1-t, exactly, never by subtraction
+        t = yy * u                  # = yy/(1+yy)
+        p = (3. - gamma) / alpha
+        q = (beta - 3.) / alpha
+        # both p and q are > 0 given gamma < 3 and beta > 3
+        b_pq = special.beta(p, q)
+        # Whichever of t, u is the small one is the one that carries the
+        # information, so evaluate on that side and reflect if needed:
+        # B(t;p,q) = B(p,q) - B(u;q,p). yy > 1 is exactly t > 1/2.
+        outer = yy > 1.
+        # the dummy 0.5 keeps the untaken branch finite (yy = inf makes t nan)
+        t_in = np.where(outer, 0.5, t)
+        u_in = np.where(outer, u, 0.5)
+        bi = np.where(outer,
+                      b_pq * (1. - special.betainc(q, p, u_in)),
+                      b_pq * special.betainc(p, q, t_in))
+        return 4. * np.pi * a**3 * rho0 / alpha * bi
+
+    @staticmethod
+    def rho0_from_mass(m, a, alpha, beta, gamma):
+        """Scale density giving a total mass ``m``.
+
+        ``M_tot = 4 pi a^3 rho0 / alpha * B((3-gamma)/alpha, (beta-3)/alpha)``
+        using the *complete* beta, which converges only for beta > 3.
+
+        Parameters
+        ----------
+        m : float
+            total sBH mass
+        a : float
+            scale radius
+        alpha, beta, gamma : float
+            shape exponents
+
+        Returns
+        -------
+        float
+            rho0, in mass units of m over length units of a cubed
+
+        """
+        b_complete = special.beta((3. - gamma) / alpha, (beta - 3.) / alpha)
+        return m * alpha / (4. * np.pi * a**3 * b_complete)
+
+    @staticmethod
+    def _outer_tail(r, rho0, a, alpha, beta, gamma):
+        """4 pi int_r^inf r' rho(r') dr', the potential's outer term.
+
+        In terms of ``y = (r/a)**alpha`` the integral is
+
+            (4 pi a^2 rho0 / alpha) * I(y),
+            I(y) = int_y^inf s**(q-1) * (1+s)**-(p+q) ds
+
+        with ``p = (beta-2)/alpha > 0`` and ``q = (2-gamma)/alpha``, which
+        is <= 0 for the fitted gamma > 2 profiles. ``I`` is delegated to
+        ``_outer_tail_integral``; see there for why this is parametrised
+        by ``y`` and not by ``x = 1/(1+y)``.
+
+        Parameters
+        ----------
+        r : float
+            radius [pc], scalar
+        rho0, a, alpha, beta, gamma : float
+            profile parameters, see ``density``
+
+        Returns
+        -------
+        float
+        """
+        y = (r / a) ** alpha
+        p_out = (beta - 2.) / alpha
+        q_out = (2. - gamma) / alpha
+        val = StellarBlackHoles._outer_tail_integral(y, p_out, q_out)
+        return 4. * np.pi * a**2 * rho0 / alpha * val
+
+    # Tolerance and hard cap shared by the two series below. Both converge
+    # geometrically, so the tolerance is what stops them and the cap only
+    # ever fires on a caller outside the documented domain -- where it
+    # raises rather than returning a silently truncated sum. It has to be
+    # generous: the x-series' ratio is ``x = 1/(1+y_c)`` and the split
+    # ``y_c`` shrinks like 1/(p+q) (see ``_outer_tail_integral``), so the
+    # term count goes like 37*(p+q). Randomly sampling the whole legal
+    # (alpha, beta, gamma) box with p, |q| <= 200 peaked at 1346 terms.
+    _SERIES_TOL = 1e-16
+    _SERIES_MAXIT = 100000
+
+    @staticmethod
+    def _expm1_over_z(z):
+        """``(exp(z)-1)/z``, accurate as z -> 0, where it tends to 1.
+
+        Fortran has no ``expm1`` intrinsic, so the Task 6 port needs the
+        three-term Maclaurin branch below for small ``|z|`` and a plain
+        ``(exp(z)-1)/z`` otherwise.
+        """
+        if abs(z) < 1e-5:
+            return 1. + z * (0.5 + z * (1. / 6. + z / 24.))
+        return np.expm1(z) / z
+
+    @staticmethod
+    def _beta_series_small_x(x, p, q):
+        """``B(x; p, q)`` by the series about x = 0; needs 0 <= x < 1.
+
+        Expanding ``(1-u)**(q-1)`` binomially inside
+        ``int_0^x u**(p-1) (1-u)**(q-1) du`` and integrating term by term::
+
+            B(x;p,q) = x**p * Sum_{k>=0} e_k x**k / (p+k),
+            e_0 = 1,  e_k = e_{k-1} * (k-q) / k
+
+        ``e_k`` is the generalised binomial coefficient ``C(q-1,k)(-1)**k``,
+        built by a recurrence so that non-integer ``q`` -- the normal case,
+        ``q = (2-gamma)/alpha`` -- costs nothing extra. ``p > 0`` is
+        guaranteed by ``beta > 3``, so ``p+k`` never vanishes and no sign of
+        ``q`` is special: unlike ``incomplete_beta``'s downward recurrence
+        this is well defined for integer ``q <= 0`` too.
+
+        Terms fall off like ``x**k``, so the term count goes like
+        ``37/(1-x)``. Conditioning: for ``q <= 0`` every ``e_k`` is
+        positive, so the sum has no cancellation at all; for ``q > 0``,
+        ``Sum_k |e_k| x**k`` stays bounded only while ``x`` is not too
+        close to 1, which is why the ``q > 0`` callers below keep their
+        argument small rather than letting ``x -> 1``.
+
+        Parameters
+        ----------
+        x : float
+            upper limit, 0 <= x < 1
+        p : float
+            first parameter, must be > 0
+        q : float
+            second parameter, any sign
+
+        Returns
+        -------
+        float
+        """
+        if x <= 0.:
+            return 0.
+        total = 1. / p
+        coef = 1.
+        for k in range(1, StellarBlackHoles._SERIES_MAXIT):
+            coef *= (k - q) / k
+            term = coef * x ** k / (p + k)
+            total += term
+            # |e_k| grows while k < |q|, so only test once the ratio
+            # (k-q)/k * x is safely below 1; then the remaining tail is
+            # bounded by |term| * x / (1-x)
+            if k > abs(q) and abs(term) * x <= (1. - x) \
+                    * StellarBlackHoles._SERIES_TOL * abs(total):
+                break
+        else:
+            raise RuntimeError(
+                f'_beta_series_small_x: no convergence in '
+                f'{StellarBlackHoles._SERIES_MAXIT} terms at x={x}, '
+                f'p={p}, q={q}; x is too close to 1 for this series.')
+        return x ** p * total
+
+    @staticmethod
+    def _outer_tail_integral(y, p, q):
+        """``int_y^inf s**(q-1) (1+s)**-(p+q) ds``, for y > 0 and p > 0.
+
+        This is the potential's outer term in the natural variable
+        ``y = (r/a)**alpha``. Writing it instead as ``B(x; p, q)`` with
+        ``x = 1/(1+y)`` is algebraically equivalent but numerically fatal
+        for small ``r``: the information lives in ``1-x = y/(1+y)``, and
+        once ``y`` drops below ~1e-16 a double ``x`` rounds to exactly 1,
+        where the integral is not even finite for ``q <= 0``. Keeping
+        ``y`` as the argument keeps the small quantity small rather than
+        hiding it in the last bits of a number near 1.
+
+        For ``q > 1`` the integral is comfortably finite at ``y = 0`` and
+        is taken as ``B(p,q)`` minus an explicit shortfall; see the code.
+        Everything below is the ``q <= 1`` path, which covers both the
+        genuinely divergent ``q <= 0`` (gamma >= 2) and the near-divergent
+        small positive ``q``. Two regimes, crossing over at ``y = y_c``:
+
+        * ``y >= y_c``: ``x = 1/(1+y) <= 1/(1+y_c)``, away from the
+          singular endpoint, so ``_beta_series_small_x(x, p, q)`` is used
+          directly (the substitution ``u = 1/(1+s)`` turns the integral
+          into exactly ``B(x;p,q)``).
+        * ``y < y_c``: split at ``s = y_c``. The upper piece is the
+          constant ``B(1/(1+y_c); p, q)``, again by the same series. On
+          the lower piece ``s <= y_c``, so expanding ``(1+s)**-(p+q)``
+          binomially converges like ``y_c**k``::
+
+              int_y^y_c = Sum_k d_k [ y_c**(q+k) - y**(q+k) ] / (q+k),
+              d_0 = 1,  d_k = -d_{k-1} * (p+q+k-1) / k
+
+          The ``k = 0`` term is ``~ -y**q/q``, the divergent part for
+          ``q < 0``, and it is evaluated directly from ``y`` rather than
+          reconstructed from a cancellation -- which is the whole point.
+
+        ``y_c = min(1/2, 1/(p+q))``. The bound on ``p+q = (beta-gamma)/
+        alpha`` is what makes the second series unconditionally stable:
+        ``Sum_k |d_k| y_c**k = (1-y_c)**-(p+q)``, which for
+        ``y_c = 1/(p+q)`` tends to ``e`` while the sum itself tends to
+        ``1/e`` -- under one digit of cancellation for any exponents. A
+        fixed ``y_c = 1/2`` looks tempting (~90 terms) but blows up: at
+        ``(alpha,beta,gamma) = (0.2,12,2.9)``, ``p+q = 45.5`` and the
+        partial sums would peak far above the answer. The
+        price of the adaptive split is that the *first* series then runs
+        at ratio ``1 - 1/(p+q)`` and needs ~``37*(p+q)`` terms; that is
+        cheap arithmetic and this is not a hot path.
+
+        ``[ y_c**e - y**e ] / e`` with ``e = q+k`` is itself a
+        cancellation when ``|e*L|``, ``L = ln(y/y_c)``, is small (``e``
+        near zero, i.e. ``q`` near a non-positive integer). It is
+        rewritten there as ``-y_c**e * L * (exp(e*L)-1)/(e*L)``, whose
+        last factor is regular at 0. That also makes ``e == 0`` exactly
+        give the correct ``-y_c**e * L`` limit instead of dividing by 0,
+        so integer ``q <= 0`` (e.g. alpha=0.5, gamma=2.5) is handled --
+        which the ``incomplete_beta`` recurrence cannot do.
+
+        Parameters
+        ----------
+        y : float
+            lower limit, > 0
+        p : float
+            must be > 0
+        q : float
+            any sign
+
+        Returns
+        -------
+        float
+        """
+        if y <= 0.:
+            raise ValueError(f'_outer_tail_integral: y={y} must be > 0.')
+        if q > 1.:
+            # Comfortably finite at y = 0: the shortfall from the limit
+            # B(p,q) goes like y**q / q. Reach it by subtracting that
+            # shortfall from the complete beta, taking the complement
+            # exactly as y/(1+y) rather than through 1 - 1/(1+y).
+            #
+            # The threshold is 1, not 0. For 0 < q <= 1 this route loses
+            # digits twice over: B(p,q) and the shortfall both blow up
+            # like 1/q as q -> 0 (i.e. gamma -> 2) and cancel, and for
+            # small q the shortfall is a large fraction of the answer
+            # anyway -- 18% at y = 3e-7, q = 0.12. The series route below
+            # has no such problem: its e_k are all positive whenever
+            # q <= 1, so it sums without any cancellation at all.
+            w = y / (1. + y)
+            if w <= min(0.5, 1. / p):
+                return special.beta(p, q) \
+                    - StellarBlackHoles._beta_series_small_x(w, q, p)
+            # w is bounded away from 0, so 1-x carries full precision and
+            # the ordinary betainc (Fortran: zh_betai) is well conditioned
+            return StellarBlackHoles.incomplete_beta(1. / (1. + y), p, q)
+        c = p + q
+        y_c = min(0.5, 1. / c)
+        if y >= y_c:
+            return StellarBlackHoles._beta_series_small_x(1. / (1. + y), p, q)
+        log_ratio = np.log(y / y_c)
+        total = StellarBlackHoles._beta_series_small_x(1. / (1. + y_c), p, q)
+        coef = 1.
+        for k in range(0, StellarBlackHoles._SERIES_MAXIT):
+            if k > 0:
+                coef *= -(c + k - 1.) / k
+            e = q + k
+            z = e * log_ratio
+            yc_e = y_c ** e
+            if abs(z) < 1.:
+                # regular form: no cancellation, and safe at e == 0
+                term = -coef * yc_e * log_ratio \
+                    * StellarBlackHoles._expm1_over_z(z)
+            else:
+                term = coef * (yc_e - y ** e) / e
+            total += term
+            # successive |d_k| grow while k < c, so only start testing
+            # once the ratio (c+k)/(k+1) * y_c is safely below 1
+            if k > c and abs(term) * y_c <= (1. - y_c) \
+                    * StellarBlackHoles._SERIES_TOL * abs(total):
+                break
+        else:
+            raise RuntimeError(
+                f'_outer_tail_integral: no convergence in '
+                f'{StellarBlackHoles._SERIES_MAXIT} terms at y={y}, '
+                f'p={p}, q={q}.')
+        return total
+
+    @staticmethod
+    def potential(x, y, z, pars):
+        '''
+        Gravitational potential Phi (negative, and -> 0 at large r for
+        gamma < 2; for gamma >= 2 it diverges as r -> 0, which is physical).
+
+        Phi(r) = -G [ M(<r)/r + 4 pi int_r^inf r' rho dr' ]
+
+        The outer term is
+        ``(4 pi a^2 rho0 / alpha) * B(1-t; (beta-2)/alpha, (2-gamma)/alpha)``,
+        whose second beta parameter is <= 0 when gamma >= 2. It is
+        evaluated by ``_outer_tail`` in the variable ``y = (r/a)**alpha``
+        rather than in ``x = 1-t``, which loses all precision as r -> 0;
+        see ``_outer_tail_integral``.
+
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates [pc]
+        pars : tuple
+            (rho0, a, alpha, beta, gamma), rho0 in Msun/pc**3, a in pc
+
+        Returns
+        -------
+        Phi : ndarray
+            potential [(km/s)**2]
+        '''
+        rho0, a, alpha, beta, gamma = pars
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+        tail = np.vectorize(StellarBlackHoles._outer_tail)(
+            r, rho0, a, alpha, beta, gamma)
+        m_enc = StellarBlackHoles.mass_enclosed(x, y, z, pars)
+        G = dyn.constants.GRAV_CONST_KM / dyn.constants.PARSEC_KM
+        return -G * (m_enc / r + tail)
+
+    @staticmethod
+    def acceleration(x, y, z, par):
+        """
+        Gravitational acceleration of the sBH subcluster.
+
+        Exact for all gamma < 3: ``a_r = -G M(<r) / r**2``.
+
+        Parameters
+        ----------
+        x, y, z : float or array-like
+            Cartesian coordinates [pc]
+        par : dict
+            must contain m [Msun], a_pc [pc], alpha, beta, gamma
+
+        Returns
+        -------
+        ax, ay, az : ndarray
+            Acceleration components [(km/s)**2/pc]
+        """
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        z = np.asarray(z, dtype=float)
+        r = np.sqrt(x**2 + y**2 + z**2)
+
+        # 'a_pc' only -- deliberately NO a_km fallback. Mixing the two
+        # silently scales the profile by ~3e13. The km-unit path is the
+        # legacy file, and get_dh_legacy_strings converts there separately.
+        a_pc = par['a_pc']
+        rho0 = StellarBlackHoles.rho0_from_mass(
+            par['m'], a_pc, par['alpha'], par['beta'], par['gamma'])
+        pars = (rho0, a_pc, par['alpha'], par['beta'], par['gamma'])
+        m_enc = StellarBlackHoles.mass_enclosed(x, y, z, pars)
+
+        G = dyn.constants.GRAV_CONST_KM / dyn.constants.PARSEC_KM
+        factor = -G * m_enc / r**3
+        return factor * x, factor * y, factor * z
+
+    def get_dh_legacy_strings(self, parset, system):
+        """
+        Generate the two strings the legacy Fortran needs.
+
+        Overrides the parent because the sampled parameters (m in Msun,
+        a in arcsec) differ from the legacy sequence (rhoc in Msun/km**3,
+        a in km). This mirrors ``NFW_m200_c``, which likewise injects a
+        derived quantity, and ``Hernquist``, which likewise passes a scale
+        density rather than a mass.
+
+        Parameters
+        ----------
+        parset : astropy table row
+            Holds the parameter set.
+        system : a ``dyn.physical_system.System`` object
+            Needed for the distance, to convert arcsec to km.
+
+        Returns
+        -------
+        specs : str
+            legacy code and number of parameters, space separated
+        par_vals : str
+            parameter values in the sequence legacy Fortran expects
+
+        """
+        m = parset[f'm-{self.name}']
+        a_arcsec = parset[f'a-{self.name}']
+        alpha = parset[f'alpha-{self.name}']
+        beta = parset[f'beta-{self.name}']
+        gamma = parset[f'gamma-{self.name}']
+        a_km = a_arcsec * dyn.constants.ARC_KM(system.distMPc)
+        rhoc = self.rho0_from_mass(m, a_km, alpha, beta, gamma)
+        specs = f'{self.legacy_code} {len(self.par_names)}'
+        par_vals = f'{rhoc} {a_km} {alpha} {beta} {gamma}'
+        self.logger.debug(f'sBH legacy strings: {specs} / {par_vals} '
+                          f'(from m={m} Msun, a={a_arcsec} arcsec)')
+        return specs, par_vals
+
+
+class StellarBlackHolesMGE(DarkComponent):
+    """A fixed, externally-supplied sBH profile, as an MGE
+
+    Represents an sBH subcluster whose shape comes from an external model
+    (LIMEPY, PhaseFlow, or a collaborator's fit) rather than being fitted.
+    Its Gaussians are concatenated into the potential MGE, exactly as
+    ``BarDiskComponent``'s ``disk_pot`` is, so this component needs no
+    legacy code and no Fortran changes at all.
+
+    Note the structural limit: a sum of Gaussians is flat at the origin, so
+    an MGE cannot represent a central cusp below its smallest sigma. Use it
+    for a cored profile, or for a cusp only over a bounded radial range.
+
+    Parameters
+    ----------
+    mge_pot : a ``dyn.mges.MGE`` object
+        the (projected) surface-mass density of the sBH subcluster
+
+    """
+    # deliberately no legacy_code: this component contributes Gaussians,
+    # not a dm block, and orblib.py keys on isinstance(..., StellarBlackHoles)
+    par_names = []
+
+    def __init__(self, mge_pot=None, **kwds):
+        self.mge_pot = mge_pot
+        super().__init__(symmetry='spherical', **kwds)
+        self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+
+    def validate(self):
+        if not isinstance(self.mge_pot, mge.MGE):
+            text = f'{self.__class__.__name__}.mge_pot must be an mges.MGE ' \
+                   'object'
+            self.logger.error(text)
+            raise ValueError(text)
+
+    def validate_parset(self, par):
+        # the profile is fixed; there is nothing to sample
+        return True
 
 
 class Chi2Ext(Component):

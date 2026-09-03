@@ -109,6 +109,70 @@ Selected by `generator_type` in `parameter_space_settings`:
 - `SpecificModels` — run a user-specified list of parameter sets
 - `BayesOptGenerator` — GP-driven Bayesian Optimization via BoTorch (bayesopt branch)
 
+### Mass parameters are stored per orbit library
+
+An orblib is reused across `ml` by rescaling LOSVD velocity axes by
+`sqrt(ml/ml_orblib)`, which scales the *whole potential* by `ml/ml_orblib`.
+So dark-component masses in `all_models` are **per orbit library**:
+
+```
+physical mass = stored value * ml/ml_orblib  ( = scale_factor**2 )
+```
+
+This applies to `m-bh`, the fitted `StellarBlackHoles` `m`, `Hernquist`
+`rhoc` and `GeneralisedNFW` `Mvir`. `NFW`'s `c`/`f` and the shape exponents
+are invariant (`f` is a fraction of `totalmass`, which is `ml`-scaled in
+`iniparam_f.f90`), as is `StellarBlackHolesMGE`, whose Gaussians sit in the
+`ml`-scaled potential MGE. `TriaxialCoredLogPotential`'s `Vc` is a velocity,
+so it takes `scale_factor**1`.
+
+Use `AllModels.get_physical_parameter_table()` for any readout of masses for
+analysis, plotting or a warm start. Use the raw `self.table` only to
+reconstruct what the Fortran actually computed — in particular
+`get_model_from_parset()` matches on *stored* values. Corollary: reuse across
+`ml` and an `ml`-independent absolute mass are mutually exclusive; the only
+reuse-invariant way to write a mass is as a ratio, which is what `f` is.
+Quantify the effect for a given system with
+`dev_tests/check_ml_selfsimilarity.py`.
+
+### sBH component (`sBH` branch)
+
+`StellarBlackHoles` — spherical Zhao alpha-beta-gamma subcluster of
+stellar-mass black holes, `legacy_code = 6`. Config parameters: `m`
+[Msun], `a` [arcsec], `alpha`, `beta`, `gamma`. Requires `beta > 3`,
+`gamma < 3`, `gamma != 2`. Coexists with a DM halo (two dark slots; the
+sBH block is appended at the end of `parameters_pot.in`).
+
+**Default shape: the GCfit/LIMEPY 0.05-10 pc fit** — `a = 3.06 pc`
+(116.2 arcsec at 5.43 kpc), `alpha = 3.91`, `beta = 4.50`, `gamma = 2.24`,
+all **fixed**, with only `m` free. This is the `'production'` case in
+`test_sbh_fortran.py`. Do not use the PhaseFlow fiducial shape: its scale
+radius falls outside its own fitting range. The shape choice shifts
+M_sBH(<10 arcsec) by ~12x at fixed total mass and so biases `m-bh`
+directly — treat it as a systematic, not a detail.
+
+`StellarBlackHolesMGE` — a fixed externally-supplied profile whose
+Gaussians concatenate into the potential MGE; no Fortran involved. It has
+no sampled parameters, but the config reader still demands the key: its
+YAML entry needs an explicit `parameters: {}`. On a bar-disk system its
+Gaussians are folded in BEFORE the disk block, since the Fortran reads
+`[bulge, disk]` in file order.
+
+Design: `docs/superpowers/specs/2026-09-01-sbh-component-design.md`.
+Fits and provenance: `dev_notes/sbh_profile_fits/`.
+Tests: `dev_tests/test_sbh_profile.py`, `test_sbh_config.py`,
+`test_sbh_fortran.py` (needs `make sbh_probe`).
+
+**Numerics:** the Fortran sBH path is self-contained in `dmpotent.f90`
+(`sbh_beta_series`, `sbh_betacf`, `sbh_binc`, `sbh_outer_tail_integral`)
+and must NEVER call `zh_betai` — the shared `zh_betacf` in
+`sub/specfunc_beta.f90` carries a single-precision `EPS = 3e-7`, which
+would cap Fortran-vs-Python agreement at ~1e-7 instead of the achieved
+1e-13. Separately, `zh_betai` returns `inf` for a non-positive second
+argument; that is a latent trap in the PRE-EXISTING gNFW `dm_potent`
+case 5 only, not something the sBH path touches. See
+`dev_notes/sbh_component.md` "Numerical traps".
+
 ### BayesOptGenerator (`bayesopt` branch)
 
 Located in `parameter_space.py:~1132`. Requires `botorch`, `gpytorch`, `torch`.

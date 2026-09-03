@@ -691,6 +691,63 @@ class AllModels(object):
         scaling_factor = np.sqrt(self.table['ml'][model_id]/ml_orblib)
         return scaling_factor
 
+    def get_physical_parameter_table(self):
+        """Copy of ``self.table`` with dark-component masses made physical
+
+        Mass parameters of the dark components are stored *per orbit
+        library*. A model that reuses an orbit library built at
+        ``ml_orblib`` has every mass in its potential scaled by
+        ``ml/ml_orblib`` - that is what rescaling the LOSVD velocity axes by
+        ``sqrt(ml/ml_orblib)`` means - so a stored mass must be multiplied
+        by ``ml/ml_orblib``, i.e. the square of the velocity scaling factor,
+        to become that model's physical mass.
+
+        Parameters that are *ratios* are already invariant under the same
+        rescaling and are left alone: ``NFW``'s ``c`` and ``f`` (``f`` is a
+        fraction of ``totalmass``, which scales with ``ml`` in the Fortran),
+        and the sBH shape exponents. ``StellarBlackHolesMGE`` likewise needs
+        no correction - its Gaussians ride in the ``ml``-scaled potential
+        MGE and so already track ``ml``.
+
+        Use this - not ``self.table`` - whenever masses are read for
+        analysis, plotting or a warm start.
+
+        Raises
+        ------
+        ValueError
+            If the dark halo is of an unknown type.
+
+        Returns
+        -------
+        an ``astropy.table`` copy of ``self.table``, masses in physical units
+
+        """
+        val = copy.deepcopy(self.table)
+        if len(val) == 0:
+            return val
+        # a row index in self.table is the model id, so no lookup is needed
+        sf = np.array([self.get_model_velocity_scaling_factor(model_id=i)
+                       for i in range(len(val))])
+        physys = dyn.physical_system
+        dh = self.system.get_halo_component()
+        if dh is not None:
+            if type(dh) is physys.Hernquist:
+                val[f'rhoc-{dh.name}'] = val[f'rhoc-{dh.name}'] * sf**2
+            elif type(dh) is physys.TriaxialCoredLogPotential:
+                val[f'Vc-{dh.name}'] = val[f'Vc-{dh.name}'] * sf
+            elif type(dh) is physys.GeneralisedNFW:
+                val[f'Mvir-{dh.name}'] = val[f'Mvir-{dh.name}'] * sf**2
+            elif type(dh) not in (physys.NFW, physys.NFW_m200_c):
+                text = f'unknown dark halo type {type(dh)}'
+                self.logger.error(text)
+                raise ValueError(text)
+        sbh = self.system.get_sbh_component()
+        if isinstance(sbh, physys.StellarBlackHoles):
+            val[f'm-{sbh.name}'] = val[f'm-{sbh.name}'] * sf**2
+        bh = self.system.get_component_from_class(physys.Plummer)
+        val[f'm-{bh.name}'] = val[f'm-{bh.name}'] * sf**2
+        return val
+
     def save(self):
         """Save the all_models table
 
