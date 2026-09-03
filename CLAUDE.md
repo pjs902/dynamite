@@ -109,6 +109,32 @@ Selected by `generator_type` in `parameter_space_settings`:
 - `SpecificModels` — run a user-specified list of parameter sets
 - `BayesOptGenerator` — GP-driven Bayesian Optimization via BoTorch (bayesopt branch)
 
+### Mass parameters are stored per orbit library
+
+An orblib is reused across `ml` by rescaling LOSVD velocity axes by
+`sqrt(ml/ml_orblib)`, which scales the *whole potential* by `ml/ml_orblib`.
+So dark-component masses in `all_models` are **per orbit library**:
+
+```
+physical mass = stored value * ml/ml_orblib  ( = scale_factor**2 )
+```
+
+This applies to `m-bh`, the fitted `StellarBlackHoles` `m`, `Hernquist`
+`rhoc` and `GeneralisedNFW` `Mvir`. `NFW`'s `c`/`f` and the shape exponents
+are invariant (`f` is a fraction of `totalmass`, which is `ml`-scaled in
+`iniparam_f.f90`), as is `StellarBlackHolesMGE`, whose Gaussians sit in the
+`ml`-scaled potential MGE. `TriaxialCoredLogPotential`'s `Vc` is a velocity,
+so it takes `scale_factor**1`.
+
+Use `AllModels.get_physical_parameter_table()` for any readout of masses for
+analysis, plotting or a warm start. Use the raw `self.table` only to
+reconstruct what the Fortran actually computed — in particular
+`get_model_from_parset()` matches on *stored* values. Corollary: reuse across
+`ml` and an `ml`-independent absolute mass are mutually exclusive; the only
+reuse-invariant way to write a mass is as a ratio, which is what `f` is.
+Quantify the effect for a given system with
+`dev_tests/check_ml_selfsimilarity.py`.
+
 ### sBH component (`sBH` branch)
 
 `StellarBlackHoles` — spherical Zhao alpha-beta-gamma subcluster of

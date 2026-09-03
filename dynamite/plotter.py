@@ -178,7 +178,10 @@ class Plotter():
         self.logger.info(f'Making chi2 plot scaled according to {which_chi2}')
 
         pars = self.config.parspace
-        val = deepcopy(self.all_models.table)
+        # Masses are stored per orbit library; this returns them physical.
+        # Scaling before the cuts below keeps each row's scaling factor tied
+        # to its own model id rather than to a chi2-value lookup.
+        val = self.all_models.get_physical_parameter_table()
 
         # exclude the first 50, 100 (specified by the user)
         # models in case the values were really off there
@@ -187,45 +190,6 @@ class Plotter():
 
         #only use models that are finished
         val=val[val['all_done']==True]
-
-        # add black hole scaling
-        scale_factor = np.zeros(len(val))
-        for i in range(len(val)):
-            chi2val = val[which_chi2][i]
-            model_id=np.where(self.all_models.table[which_chi2]==chi2val)[0][0]
-            scale_factor[i] = \
-                self.all_models.get_model_velocity_scaling_factor( \
-                                                            model_id=model_id)
-
-        # the halo (sBH components are handled separately below)
-        dh = self.system.get_halo_component()
-        if dh is not None:
-            if type(dh) is physys.NFW:
-                val[f'c-{dh.name}'] = val[f'c-{dh.name}']
-                val[f'f-{dh.name}'] = val[f'f-{dh.name}']
-            elif type(dh) is physys.NFW_m200_c:
-                pass
-            elif type(dh) is physys.Hernquist:
-                val[f'rhoc-{dh.name}']= val[f'rhoc-{dh.name}']*scale_factor**2
-            elif type(dh) is physys.TriaxialCoredLogPotential:
-                val[f'Vc-{dh.name}'] = val[f'Vc-{dh.name}']*scale_factor
-            elif type(dh) is physys.GeneralisedNFW:
-                val[f'Mvir-{dh.name}'] = val[f'Mvir-{dh.name}']*scale_factor**2
-            else:
-                text = f'unknown dark halo type component'
-                self.logger.error(text)
-                raise ValueError(text)
-
-        # the sBH component, if any: only its mass scales (like the other
-        # mass-like parameters, as scale_factor**2). a/alpha/beta/gamma are
-        # a length in arcsec and dimensionless exponents: unscaled.
-        sbh = self.system.get_sbh_component()
-        if isinstance(sbh, physys.StellarBlackHoles):
-            val[f'm-{sbh.name}'] = val[f'm-{sbh.name}']*scale_factor**2
-
-        # get the plummer component i.e. black hole
-        bh = self.system.get_component_from_class(physys.Plummer)
-        val[f'm-{bh.name}'] = val[f'm-{bh.name}']*scale_factor**2
 
         #get number and names of parameters that are not fixed
         nofix_sel=[]
