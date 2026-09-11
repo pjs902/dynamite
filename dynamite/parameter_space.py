@@ -1,4 +1,5 @@
 import sys
+import os
 import copy
 import logging
 import itertools
@@ -159,10 +160,27 @@ def fit_gp(X_norm, y):
         fitted on -chi2 (BoTorch maximizes, so training targets are
         negated chi2).
     """
+    _saved_affinity = None
+    try:
+        _saved_affinity = os.sched_getaffinity(0) \
+            if hasattr(os, "sched_getaffinity") else None
+    except (OSError, AttributeError):
+        _saved_affinity = None
     import torch
     from botorch.models import SingleTaskGP
     from botorch.fit import fit_gpytorch_mll
     from gpytorch.mlls import ExactMarginalLogLikelihood
+    # torch's import/threadpool init narrows this process's CPU affinity to a
+    # single core on some boxes (reproduced: 192 -> 1; adelie has the same
+    # side effect, guarded in weight_solvers.py). Every worker forked
+    # afterwards inherits the 1-core mask -> N integrators on one core, the
+    # machine crawling at ~1%/proc with load ~N. Restore what we had rather
+    # than opening up to os.cpu_count() (taskset is not cgroup-enforced).
+    if _saved_affinity is not None:
+        try:
+            os.sched_setaffinity(0, _saved_affinity)
+        except OSError:
+            pass
 
     X_t = torch.tensor(X_norm, dtype=torch.double)
     Y_t = -torch.tensor(y, dtype=torch.double).unsqueeze(-1)
