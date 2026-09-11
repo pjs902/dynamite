@@ -317,6 +317,223 @@ class Plotter():
 
         return fig
 
+    def make_gp_iteration_plot(self, which_chi2=None, figtype=None,
+                               par_generator=None, iteration=None):
+        """Inter-iteration GP diagnostic as a single corner figure.
+
+        Off-diagonal (j<i): evaluated models (viridis_r by Delta-chi2,
+        black-x best) + latest batch as large orange circles sized by true
+        joint EI (one warm family = acquisition). Diagonal: 1-D LogEI slices
+        through best (conditional, labeled LogEI|best) + proposal ticks +
+        training rug. Upper triangle empty. Two colorbars
+        (training Delta-chi2, EI LogEI|best). Saves
+        ``gp_iteration_{iteration}.png``. EI needs torch/BoTorch + a fittable
+        GP; if unavailable the contours degrade gracefully (scatter stands).
+
+        Parameters
+        ----------
+        which_chi2 : STR, optional
+            chi2 for coloring/best (defaults to config setting).
+        figtype : STR, optional
+            file extension (default '.png').
+        par_generator : BayesOptGenerator, optional
+            live fitted _gp_model reused (no refit); supplies TR bounds.
+        iteration : int, optional
+            stamped into filename (default: max which_iter in table).
+
+        Returns
+        -------
+        fig : matplotlib.pyplot.figure
+        """
+        if figtype is None:
+            figtype = '.png'
+        which_chi2 = self.config.validate_chi2(which_chi2)
+        pars = self.config.parspace
+        val = self.all_models.get_physical_parameter_table()
+        val = val[val['all_done'] == True]
+        val = val[np.isfinite(val[which_chi2])]
+        nofix_name, nofix_latex, nofix_islog = [], [], []
+        for i in np.arange(len(pars)):
+            if pars[i].fixed is False:
+                if pars[i].name == 'ml':
+                    nofix_name.insert(0, 'ml')
+                    nofix_latex.insert(0, pars[i].LaTeX)
+                    nofix_islog.insert(0, pars[i].logarithmic)
+                else:
+                    nofix_name.append(pars[i].name)
+                    nofix_latex.append(pars[i].LaTeX)
+                    nofix_islog.append(pars[i].logarithmic)
+                if pars[i].logarithmic:
+                    val[pars[i].name] = np.log10(val[pars[i].name])
+        nnofix = len(nofix_name)
+        chlim = np.sqrt(self.config.get_2n_obs())
+        chi2pmin = np.nanmin(val[which_chi2])
+        val.add_column(val[which_chi2] - chi2pmin, name='chi2t')
+        val.sort(['chi2t'])
+        nf = len(val)
+        itmax = int(np.max(self.all_models.table['which_iter']))
+        if iteration is None:
+            iteration = itmax
+        latest = self.all_models.table[
+            self.all_models.table['which_iter'] == itmax]
+        colormap = mpl.colormaps.get_cmap('viridis_r')
+        size = 12 + len(nofix_islog)
+        fontsize = max(size - 4, 15)
+        tr_phys = None
+        if par_generator is not None:
+            try:
+                tr = par_generator._tr_bounds()
+            except Exception:  # noqa: BLE001 - no box, skip it
+                tr = None
+            if tr is not None:
+                tr = np.asarray(tr, dtype=float).reshape(2, -1)
+                lo = np.array([p.par_generator_settings['lo']
+                               for p in par_generator.free_params], float)
+                hi = np.array([p.par_generator_settings['hi']
+                               for p in par_generator.free_params], float)
+                raw_lo = tr[0] * (hi - lo) + lo
+                raw_hi = tr[1] * (hi - lo) + lo
+                tr_phys = {}
+                for j, p in enumerate(par_generator.free_params):
+                    a, b = raw_lo[j], raw_hi[j]
+                    if p.logarithmic:
+                        a, b = np.log10(a), np.log10(b)
+                    tr_phys[p.name] = (a, b)
+        # GP for 2-D EI contours: reuse live fitted model (no refit); else fit
+        _gp_ok = False
+        try:
+            from dynamite.parameter_space import extract_gp_training_data
+            import torch as _torch
+            from botorch.acquisition import qLogExpectedImprovement as _qLEI
+            _live = getattr(par_generator, '_gp_model', None) \
+                if par_generator is not None else None
+            if _live is not None:
+                _X, _y, _fnames, _lo_raw, _hi_raw = extract_gp_training_data(
+                    self.all_models.table, self.config.parspace,
+                    which_chi2=which_chi2)
+                _m = _live
+            else:
+                from dynamite.parameter_space import fit_gp_from_table
+                _m, _X, _y, _fnames, _lo_raw, _hi_raw = fit_gp_from_table(
+                    self.all_models.table, self.config.parspace,
+                    which_chi2=which_chi2, logger=self.logger)
+            _Xa = np.asarray(_X, dtype=float)
+            _ya = np.asarray(_y, dtype=float)
+            _Yt = -_torch.tensor(_ya, dtype=_torch.double).unsqueeze(-1)
+            _best = _Xa[int(np.argmin(_ya))]
+            _acqf = _qLEI(model=_m, best_f=_Yt.max())
+            _gp_ok = True
+        except Exception as _e:  # noqa: BLE001 - EI off, scatter stands
+            self.logger.warning(f'GP for EI unavailable: {_e}')
+        _fidx = {n: k for k, n in enumerate(list(_fnames))} if _gp_ok else {}
+
+        fig = plt.figure(figsize=(size, size))
+        for i in range(nnofix):  # row = y param
+            for j in range(nnofix):  # col = x param
+                if j > i:
+                    continue
+                ax = plt.subplot(nnofix, nnofix, i * nnofix + j + 1)
+                if i == j:
+                    # diagonal: 1-D EI slice through best (conditional) +
+                    # training rug + proposal ticks sized by joint EI
+                    _pname, _islog = nofix_name[j], nofix_islog[j]
+                    if _gp_ok:
+                        _k = _fidx[_pname]
+                        _g = np.linspace(0., 1., 200)
+                        _M = np.repeat(_best[None, :], 200, axis=0)
+                        _M[:, _k] = _g
+                        import torch as _torch2
+                        with _torch2.no_grad():
+                            _ei = _acqf(_torch2.tensor(
+                                _M[:, None, :],
+                                dtype=_torch2.double)).numpy().ravel()
+                        _lo, _hi = float(_lo_raw[_k]), float(_hi_raw[_k])
+                        _xx = _g * (_hi - _lo) + _lo
+                        if _islog:
+                            _xx = np.log10(_xx)
+                        ax.plot(_xx, _ei, color='darkorange', linewidth=2)
+                        _tr = _Xa[:, _k] * (_hi - _lo) + _lo
+                        if _islog:
+                            _tr = np.log10(_tr)
+                        ax.plot(_tr, np.zeros_like(_tr), '|', color='gray',
+                                markersize=8)
+                    else:
+                        _xv = np.asarray(val[nofix_name[j]], dtype=float)
+                        ax.hist(_xv, bins=20, color='gray', alpha=0.6)
+                    for _pi, _r in enumerate(latest):
+                        _v = _r[_pname]
+                        if _islog:
+                            _v = np.log10(_v)
+                        _ymax = ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 1.0
+                        ax.plot(_v, _ymax * 0.95, 'o', markersize=10,
+                                color='dodgerblue', markeredgecolor='white',
+                                markeredgewidth=1.5)
+                    ax.set_xlabel(nofix_latex[j], fontsize=size)
+                    if j == 0:
+                        ax.set_ylabel('LogEI|best', fontsize=size)
+                else:
+                    plt.plot(val[nofix_name[j]], val[nofix_name[i]], 'D',
+                             color='gray', markersize=4)
+                    for k in range(nf - 1, -1, -1):
+                        if val['chi2t'][k] / chlim <= 3:
+                            norm = mpl.colors.Normalize(vmin=0., vmax=3)
+                            color = colormap(norm(val['chi2t'][k] / chlim))
+                            markersize = 15 - 3 * (val['chi2t'][k] / (chlim))
+                            plt.plot((val[nofix_name[j]])[k],
+                                     (val[nofix_name[i]])[k], 'o',
+                                     markersize=markersize, color=color)
+                        if val['chi2t'][k] == 0:
+                            plt.plot((val[nofix_name[j]])[k],
+                                     (val[nofix_name[i]])[k], 'x',
+                                     markersize=15, color='k')
+                    for _r in latest:
+                        xi, yj = _r[nofix_name[j]], _r[nofix_name[i]]
+                        if nofix_islog[j]:
+                            xi = np.log10(xi)
+                        if nofix_islog[i]:
+                            yj = np.log10(yj)
+                        plt.plot(xi, yj, 'o', markersize=10, color='dodgerblue',
+                                 markeredgecolor='white', markeredgewidth=1.5)
+                    if tr_phys is not None and nofix_name[j] in tr_phys \
+                            and nofix_name[i] in tr_phys:
+                        (x0, x1), (y0, y1) = tr_phys[nofix_name[j]], \
+                            tr_phys[nofix_name[i]]
+                        import matplotlib.patches as _mp
+                        ax.add_patch(_mp.Rectangle(
+                            (x0, y0), x1 - x0, y1 - y0, fill=False,
+                            edgecolor='black', linestyle='--', linewidth=2))
+                    if i == nnofix - 1:
+                        ax.set_xlabel(nofix_latex[j], fontsize=size)
+                    else:
+                        ax.xaxis.set_major_formatter(NullFormatter())
+                    if j == 0:
+                        ax.set_ylabel(nofix_latex[i], fontsize=size)
+                    else:
+                        ax.yaxis.set_major_formatter(NullFormatter())
+                ax.xaxis.set_major_locator(MaxNLocator(nbins=4, prune='lower'))
+                ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune='lower'))
+                ax.xaxis.set_minor_formatter(NullFormatter())
+                ax.yaxis.set_minor_formatter(NullFormatter())
+                ax.set_xmargin(0.05)
+                ax.set_ymargin(0.1)
+        fig.suptitle('LogEI | others=best (orange) + training (viridis)',
+                     fontsize=size)
+        plt.subplots_adjust(hspace=0.4, wspace=0.3)
+        axcb = fig.add_axes([0.68, 0.88, 0.25, 0.025])
+        cb = mpl.colorbar.ColorbarBase(axcb,
+                    cmap=plt.get_cmap('viridis_r'),
+                    norm=mpl.colors.Normalize(vmin=0., vmax=3),
+                    orientation='horizontal')
+        cb.ax.tick_params(labelsize=fontsize)
+        cb.set_label(label='$\\left.'
+                           '\\left(\\chi^2-\\chi^2_\\mathrm{min}\\right)'
+                           '\\right/\\sqrt{2n_\\mathrm{obs}}$', size=fontsize)
+        plt.subplots_adjust(top=0.92, right=0.99, bottom=0.07, left=0.1)
+        figname = self.plotdir + f'gp_iteration_{iteration}' + figtype
+        fig.savefig(figname)
+        self.logger.info(f'Plot {figname} saved in {self.plotdir}')
+        return fig
+
     def make_contour_plot(self):
         # first version written by sabine, will add in the weekend
         #

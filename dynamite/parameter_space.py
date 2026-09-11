@@ -81,8 +81,12 @@ def extract_gp_training_data(all_models_table, parspace, which_chi2="kinchi2"):
     n_free = len(free_params)
     n_valid = int(np.sum(valid_mask))
 
-    lo_raw = np.array([p.par_generator_settings["lo"] for p in free_params], dtype=float)
-    hi_raw = np.array([p.par_generator_settings["hi"] for p in free_params], dtype=float)
+    lo_raw = np.array(
+        [p.par_generator_settings["lo"] for p in free_params], dtype=float
+    )
+    hi_raw = np.array(
+        [p.par_generator_settings["hi"] for p in free_params], dtype=float
+    )
 
     raw_matrix = np.empty((n_valid, n_free), dtype=float)
     for j, par in enumerate(free_params):
@@ -116,7 +120,9 @@ def raw_to_par_values(raw_values_row, free_params):
     return par_vals
 
 
-def clip_training_to_bounds(X_norm, free_param_names, lo_raw=None, hi_raw=None, logger=None):
+def clip_training_to_bounds(
+    X_norm, free_param_names, lo_raw=None, hi_raw=None, logger=None
+):
     """Clip normalized training rows into [0,1]; warn per axis.
 
     Historical rows from a warm-start may lie outside the current lo/hi;
@@ -130,7 +136,9 @@ def clip_training_to_bounds(X_norm, free_param_names, lo_raw=None, hi_raw=None, 
     if logger is not None:
         for j, name in enumerate(free_param_names):
             if n_lo[j] or n_hi[j]:
-                bounds = f"[{lo_raw[j]}, {hi_raw[j]}]" if lo_raw is not None else "[0, 1]"
+                bounds = (
+                    f"[{lo_raw[j]}, {hi_raw[j]}]" if lo_raw is not None else "[0, 1]"
+                )
                 logger.warning(
                     f"{int(n_lo[j]) + int(n_hi[j])} warm-start training "
                     f"rows outside {bounds} for {name}; clipping to the bounds"
@@ -215,7 +223,9 @@ def fit_gp_from_table(table, parspace, which_chi2="kinchi2", logger=None):
     X_norm, y, free_param_names, lo_raw, hi_raw = extract_gp_training_data(
         table, parspace, which_chi2=which_chi2
     )
-    X_norm = clip_training_to_bounds(X_norm, free_param_names, lo_raw=lo_raw, hi_raw=hi_raw, logger=logger)
+    X_norm = clip_training_to_bounds(
+        X_norm, free_param_names, lo_raw=lo_raw, hi_raw=hi_raw, logger=logger
+    )
     model = fit_gp(X_norm, y)
     return model, X_norm, y, free_param_names, lo_raw, hi_raw
 
@@ -453,7 +463,9 @@ class ParameterSpace(list):
             list of parameter value
 
         """
-        par_val = [p.get_par_value_from_raw_value(rv0) for (rv0, p) in zip(raw_value, self)]
+        par_val = [
+            p.get_par_value_from_raw_value(rv0) for (rv0, p) in zip(raw_value, self)
+        ]
         return par_val
 
     def get_raw_value_from_param_value(self, par_val):
@@ -475,7 +487,9 @@ class ParameterSpace(list):
             list of raw parameter value
 
         """
-        raw_value = [p.get_raw_value_from_par_value(pv0) for (pv0, p) in zip(par_val, self)]
+        raw_value = [
+            p.get_raw_value_from_par_value(pv0) for (pv0, p) in zip(par_val, self)
+        ]
         return raw_value
 
     def get_parameter_from_name(self, name):
@@ -536,9 +550,17 @@ class ParameterSpace(list):
         """
         isvalid = True
         for comp in self.system.cmp_list:
-            par = {comp.get_parname(p.name): p.raw_value for p in parset if p.name.rfind(f"{comp.name}") >= 0}
+            par = {
+                comp.get_parname(p.name): p.raw_value
+                for p in parset
+                if p.name.endswith(f"-{comp.name}")
+            }
             isvalid = isvalid and comp.validate_parset(par)
-        par = {p.name: p.raw_value for p in parset if p.name in [n.name for n in self.system.parameters]}
+        par = {
+            p.name: p.raw_value
+            for p in parset
+            if p.name in [n.name for n in self.system.parameters]
+        }
         isvalid = isvalid and self.system.validate_parset(par)
         return isvalid
 
@@ -562,12 +584,20 @@ class ParameterSpace(list):
 
         """
         for comp in self.system.cmp_list:
-            par = {comp.get_parname(p.name): p.raw_value for p in self if p.name.rfind(f"{comp.name}") >= 0}
+            par = {
+                comp.get_parname(p.name): p.raw_value
+                for p in self
+                if p.name.endswith(f"-{comp.name}")
+            }
             if not comp.validate_parset(par):
                 text = f"Parameters {par} of component {comp.name} failed to validate."
                 self.logger.error(text)
                 raise ValueError(text)
-        par = {p.name: p.raw_value for p in self if p.name in [n.name for n in self.system.parameters]}
+        par = {
+            p.name: p.raw_value
+            for p in self
+            if p.name in [n.name for n in self.system.parameters]
+        }
         if not self.system.validate_parset(par):
             text = f"System parameters {par} failed to validate."
             self.logger.error(text)
@@ -647,7 +677,9 @@ class ParameterGenerator(object):
                     self.lo.append(None)
                     self.hi.append(None)
         except:
-            text = "ParameterGenerator: non-fixed parameters " + "need hi and lo settings"
+            text = (
+                "ParameterGenerator: non-fixed parameters " + "need hi and lo settings"
+            )
             self.logger.error(text)
             raise ValueError(text)
         try:
@@ -657,7 +689,10 @@ class ParameterGenerator(object):
             self.logger.error(text)
             raise ValueError(text)
         if not stop_crit.get("n_max_mods") and not stop_crit.get("n_max_iter"):
-            text = "ParameterGenerator: need n_max_mods and " + "n_max_iter stopping criteria settings"
+            text = (
+                "ParameterGenerator: need n_max_mods and "
+                + "n_max_iter stopping criteria settings"
+            )
             self.logger.error(text)
             raise ValueError(text)
 
@@ -716,7 +751,9 @@ class ParameterGenerator(object):
                     newmodels += 1
         else:
             self.model_list = []
-        self.logger.info(f"{self.name} added {newmodels} new model(s) out of {len(self.model_list)}")
+        self.logger.info(
+            f"{self.name} added {newmodels} new model(s) out of {len(self.model_list)}"
+        )
         # combine first two iterations by calling the generator again...
         if this_iter == 0 and newmodels > 0:
             newmodels0 = newmodels
@@ -727,7 +764,9 @@ class ParameterGenerator(object):
                 if self._is_newmodel(m, eps=1e-10):
                     self.add_model(m, n_iter=this_iter)
                     newmodels += 1
-            self.logger.info(f"{self.name} added {newmodels - newmodels0} new model(s) out of {len(self.model_list)}")
+            self.logger.info(
+                f"{self.name} added {newmodels - newmodels0} new model(s) out of {len(self.model_list)}"
+            )
         self.status["n_new_models"] = newmodels
         self.status["last_iter_added_no_new_models"] = newmodels == 0
         self.status["stop"] = newmodels == 0
@@ -817,10 +856,12 @@ class ParameterGenerator(object):
 
         """
         self.status["n_max_mods_reached"] = (
-            len(self.current_models.table) >= self.parspace_settings["stopping_criteria"]["n_max_mods"]
+            len(self.current_models.table)
+            >= self.parspace_settings["stopping_criteria"]["n_max_mods"]
         )
         self.status["n_max_iter_reached"] = (
-            np.max(self.current_models.table["which_iter"]) >= self.parspace_settings["stopping_criteria"]["n_max_iter"]
+            np.max(self.current_models.table["which_iter"])
+            >= self.parspace_settings["stopping_criteria"]["n_max_iter"]
         )
         # iii) ...
 
@@ -969,7 +1010,11 @@ class LegacyGridSearch(ParameterGenerator):
     """
 
     def __init__(self, par_space=[], parspace_settings=None):
-        super().__init__(par_space=par_space, parspace_settings=parspace_settings, name="LegacyGridSearch")
+        super().__init__(
+            par_space=par_space,
+            parspace_settings=parspace_settings,
+            name="LegacyGridSearch",
+        )
         self.logger = logging.getLogger(f"{__name__}.{__class__.__name__}")
         # We need a local parameter copy because we don't want to change the
         # minstep in the original par_space:
@@ -984,7 +1029,11 @@ class LegacyGridSearch(ParameterGenerator):
                     # Use 'minstep' value if present, otherwise use 'step'.
                     # Explicitly set minstep=0 to allow arbitrarily
                     # small steps, not recommended.
-                    self.minstep.append(settings["minstep"] if "minstep" in settings else settings["step"])
+                    self.minstep.append(
+                        settings["minstep"]
+                        if "minstep" in settings
+                        else settings["step"]
+                    )
                 else:
                     self.step.append(None)
                     self.minstep.append(None)
@@ -993,7 +1042,9 @@ class LegacyGridSearch(ParameterGenerator):
             self.logger.error(text)
             raise ValueError(text)
         try:
-            self.thresh = self.parspace_settings["generator_settings"]["threshold_del_chi2"]
+            self.thresh = self.parspace_settings["generator_settings"][
+                "threshold_del_chi2"
+            ]
         except:
             text = (
                 "LegacyGridSearch: need generator_settings - "
@@ -1005,7 +1056,10 @@ class LegacyGridSearch(ParameterGenerator):
         stop_abs = "min_delta_chi2_abs" in stop_crit
         stop_rel = "min_delta_chi2_rel" in stop_crit
         if (stop_abs and stop_rel) or not (stop_abs or stop_rel):
-            text = "LegacyGridSearch: specify exactly one of the " + "options min_delta_chi2_abs, min_delta_chi2_rel"
+            text = (
+                "LegacyGridSearch: specify exactly one of the "
+                + "options min_delta_chi2_abs, min_delta_chi2_rel"
+            )
             self.logger.error(text)
             raise ValueError(text)
         if stop_abs:
@@ -1051,7 +1105,9 @@ class LegacyGridSearch(ParameterGenerator):
                 text = "All (kin)chi2 values are nan."
                 self.logger.error(text)
                 raise ValueError(text)
-            prop_mask = abs(self.current_models.table[self.chi2] - min_chi2) <= self.thresh
+            prop_mask = (
+                abs(self.current_models.table[self.chi2] - min_chi2) <= self.thresh
+            )
         prop_list = self.current_models.table[prop_mask]
         self.model_list = []
         step_ok = True
@@ -1069,10 +1125,15 @@ class LegacyGridSearch(ParameterGenerator):
                     raw_center = self.new_parset[paridx].raw_value
                     for s in [-1, 1]:
                         new_raw_value = np.clip(raw_center + s * step, lo, hi)
-                        if abs(new_raw_value - par.raw_value) >= minstep - sys.float_info.epsilon:
+                        if (
+                            abs(new_raw_value - par.raw_value)
+                            >= minstep - sys.float_info.epsilon
+                        ):
                             self.new_parset[paridx].raw_value = new_raw_value
                             if self._is_newmodel(self.new_parset, eps=1e-10):
-                                self.model_list.append([copy.deepcopy(p) for p in self.new_parset])
+                                self.model_list.append(
+                                    [copy.deepcopy(p) for p in self.new_parset]
+                                )
             #                                    (copy.deepcopy(self.new_parset))
             # If no new models: cut stepsize in half & try again
             if len(self.model_list) == 0:
@@ -1103,7 +1164,9 @@ class GridWalk(ParameterGenerator):
     """
 
     def __init__(self, par_space=[], parspace_settings=None):
-        super().__init__(par_space=par_space, parspace_settings=parspace_settings, name="GridWalk")
+        super().__init__(
+            par_space=par_space, parspace_settings=parspace_settings, name="GridWalk"
+        )
         self.logger = logging.getLogger(f"{__name__}.{__class__.__name__}")
         self.step = []
         self.minstep = []
@@ -1113,7 +1176,11 @@ class GridWalk(ParameterGenerator):
                 if par.fixed is False:
                     self.step.append(settings["step"])
                     # use 'minstep' value if present, otherwise use 'step'
-                    self.minstep.append(settings["minstep"] if "minstep" in settings else settings["step"])
+                    self.minstep.append(
+                        settings["minstep"]
+                        if "minstep" in settings
+                        else settings["step"]
+                    )
                 else:
                     self.step.append(None)
                     self.minstep.append(None)
@@ -1125,7 +1192,10 @@ class GridWalk(ParameterGenerator):
         stop_abs = "min_delta_chi2_abs" in stop_crit
         stop_rel = "min_delta_chi2_rel" in stop_crit
         if (stop_abs and stop_rel) or not (stop_abs or stop_rel):
-            text = "GridWalk: specify exactly one of the " + "options min_delta_chi2_abs, min_delta_chi2_rel"
+            text = (
+                "GridWalk: specify exactly one of the "
+                + "options min_delta_chi2_abs, min_delta_chi2_rel"
+            )
             self.logger.error(text)
             raise ValueError(text)
         if stop_abs:
@@ -1304,7 +1374,11 @@ class BayesOptGenerator(ParameterGenerator):
     """
 
     def __init__(self, par_space=[], parspace_settings=None):
-        super().__init__(par_space=par_space, parspace_settings=parspace_settings, name="BayesOptGenerator")
+        super().__init__(
+            par_space=par_space,
+            parspace_settings=parspace_settings,
+            name="BayesOptGenerator",
+        )
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
         gen = (parspace_settings or {}).get("generator_settings") or {}
@@ -1326,7 +1400,9 @@ class BayesOptGenerator(ParameterGenerator):
         self.anneal_batches = int(gen.get("anneal_batches", 10))
         self._gp_batches_done = 0
         # R2: tempered-posterior batch members (SALE annealed objective).
-        self.n_annealed_members = int(gen.get("n_annealed_members", max(1, self.batch_size // 4)))
+        self.n_annealed_members = int(
+            gen.get("n_annealed_members", max(1, self.batch_size // 4))
+        )
         self.tau_start = float(gen.get("tau_start", 1.0))
         self.tau_decay = float(gen.get("tau_decay", 0.7))
         self.tau_min = float(gen.get("tau_min", 0.05))
@@ -1364,9 +1440,7 @@ class BayesOptGenerator(ParameterGenerator):
         stop_abs = "min_delta_chi2_abs" in stop_crit
         stop_rel = "min_delta_chi2_rel" in stop_crit
         if (stop_abs and stop_rel) or not (stop_abs or stop_rel):
-            text = (
-                "BayesOptGenerator: specify exactly one of min_delta_chi2_abs, min_delta_chi2_rel in stopping_criteria"
-            )
+            text = "BayesOptGenerator: specify exactly one of min_delta_chi2_abs, min_delta_chi2_rel in stopping_criteria"
             self.logger.error(text)
             raise ValueError(text)
         self.min_delta_chi2_abs = stop_crit.get("min_delta_chi2_abs")
@@ -1379,7 +1453,9 @@ class BayesOptGenerator(ParameterGenerator):
         self.hi_free = [self.hi[i] for i in self.free_par_idx]
         self.free_param_names = [p.name for p in self.free_params]
         # R3 (cont.): consecutive-hit requirement, default max(4, ceil(d/2))
-        self.pred_hits_needed = int(gen.get("pred_hits_needed", max(4, -(-len(self.free_par_idx) // 2))))
+        self.pred_hits_needed = int(
+            gen.get("pred_hits_needed", max(4, -(-len(self.free_par_idx) // 2)))
+        )
 
         # Position of q / p / u among the FREE parameters (for triaxiality).
         # Parameter names carry a component suffix (e.g. 'q-stars'), so strip
@@ -1401,10 +1477,14 @@ class BayesOptGenerator(ParameterGenerator):
 
         # Snap non-ml GP proposals to the grid defined by par_generator_settings.step.
         self.discretize_non_ml_params = gen.get("discretize_non_ml_params", False)
-        self._norm_steps = self._build_norm_steps() if self.discretize_non_ml_params else None
+        self._norm_steps = (
+            self._build_norm_steps() if self.discretize_non_ml_params else None
+        )
 
         # Build axial queue after free_params bookkeeping is complete.
-        self._axial_queue = self._build_axial_queue() if self.warmup_mode == "initial_guess" else []
+        self._axial_queue = (
+            self._build_axial_queue() if self.warmup_mode == "initial_guess" else []
+        )
         self._initial_guess_explicit = bool(self._initial_guess_phys)
         self._axial_rebuilt = False
         # See check_specific_stopping_criteria: guards against the inherited
@@ -1420,7 +1500,9 @@ class BayesOptGenerator(ParameterGenerator):
         if not np.any(ok):
             return None
         rows = table[np.where(ok)[0]]
-        X_norm, _, _, _, _ = extract_gp_training_data(rows, self.par_space, which_chi2=self.chi2)
+        X_norm, _, _, _, _ = extract_gp_training_data(
+            rows, self.par_space, which_chi2=self.chi2
+        )
         chi2v = np.asarray(rows[self.chi2], dtype=float)
         return X_norm[int(np.argmin(chi2v))]
 
@@ -1485,7 +1567,10 @@ class BayesOptGenerator(ParameterGenerator):
 
     def _norm_bounds_arrays(self):
         """Return (lo_raw, hi_raw) numpy arrays over free parameters."""
-        return (np.array(self.lo_free, dtype=float), np.array(self.hi_free, dtype=float))
+        return (
+            np.array(self.lo_free, dtype=float),
+            np.array(self.hi_free, dtype=float),
+        )
 
     def _build_norm_steps(self):
         """Build per-free-param step sizes in normalized [0,1] space.
@@ -1520,7 +1605,9 @@ class BayesOptGenerator(ParameterGenerator):
         lo, hi = self._unit_cube() if box is None else (box[0], box[1])
 
         def draw(m):
-            return self._project_unit_to_feasible_qpu(lo + (hi - lo) * self._sobol_unit(m))
+            return self._project_unit_to_feasible_qpu(
+                lo + (hi - lo) * self._sobol_unit(m)
+            )
 
         kept = np.empty((0, len(lo)))
         for _ in range(10):
@@ -1580,7 +1667,9 @@ class BayesOptGenerator(ParameterGenerator):
             span = hi_raw[j] - lo_raw[j]
             norm = (raw - lo_raw[j]) / span if span > 0 else 0.5
             if norm < 0.0 or norm > 1.0:
-                self.logger.warning(f"initial_guess {p.name}={phys} normalizes to {norm:.3f}, clipping to [0, 1]")
+                self.logger.warning(
+                    f"initial_guess {p.name}={phys} normalizes to {norm:.3f}, clipping to [0, 1]"
+                )
             center[j] = np.clip(norm, 0.0, 1.0)
         return center
 
@@ -1648,9 +1737,14 @@ class BayesOptGenerator(ParameterGenerator):
             if not np.all(good):
                 # only possible when q and p are FIXED and infeasible;
                 # nothing to project onto
-                self.logger.warning("fixed (q, p) leave an empty triaxiality window for u")
+                self.logger.warning(
+                    "fixed (q, p) leave an empty triaxiality window for u"
+                )
                 good = np.broadcast_to(good, np.shape(uv))
-            mid = 0.5 * (np.broadcast_to(u_lo, np.shape(uv)) + np.broadcast_to(u_hi, np.shape(uv)))
+            mid = 0.5 * (
+                np.broadcast_to(u_lo, np.shape(uv))
+                + np.broadcast_to(u_hi, np.shape(uv))
+            )
             uv = np.where(
                 good,
                 np.clip(
@@ -1791,13 +1885,38 @@ class BayesOptGenerator(ParameterGenerator):
                         # the best point (e.g. from a prior grid-based
                         # generator), rather than always spending a batch on
                         # axial probes designed for a cold start.
-                        self.logger.info("warm-start: axial warm-up centered on the best historical model")
+                        self.logger.info(
+                            "warm-start: axial warm-up centered on the best historical model"
+                        )
                         self._axial_queue = self._build_axial_queue(center=center)
             if self._axial_queue:
                 self._gp_model = None
                 self._last_acq_value = None
-                self.model_list = self._propose_axial_batch()
-                return
+                # Resume guard: the queue rebuilds at __init__ but the table
+                # may already hold these points (re-proposing them yields 0
+                # new -> premature stop, looping forever across resumes).
+                # Filter to novel-only; if none remain, fall through to GP
+                # acquisition instead of returning duplicates.
+                try:
+                    _lo, _hi = self._norm_bounds_arrays()
+                    _span = _hi - _lo
+                    _kept = []
+                    for _pt in self._axial_queue:
+                        _pt = np.asarray(_pt, dtype=float)
+                        _raw = _pt * _span + _lo
+                        try:
+                            _m = self._raw_free_to_model(_raw)
+                            if self._is_newmodel(_m, eps=1e-10):
+                                _kept.append(_pt)
+                        except Exception:  # noqa: BLE001 - keep on uncheckable
+                            _kept.append(_pt)
+                    self._axial_queue = _kept
+                except Exception:  # noqa: BLE001 - filter failed; use queue as-is
+                    pass
+                if self._axial_queue:
+                    self.model_list = self._propose_axial_batch()
+                    return
+                # else: all axial done -> fall through to GP (don't return dups)
         else:  # 'sobol'
             if n_valid < self.n_initial_random:
                 self._gp_model = None
@@ -1806,6 +1925,24 @@ class BayesOptGenerator(ParameterGenerator):
                 return
 
         self.model_list = self._gp_acquisition_batch()
+        # Collapse guard: if the GP batch yields ZERO novel models (acquisition
+        # collapse onto existing rows -- observed as repeated 0/12 stops on
+        # tightly-clustered tables where qLogEI maxima snap to sampled points),
+        # fall back to a Sobol dispersal batch (guaranteed novel, space-filling
+        # via _propose_random_batch) instead of stopping the run. Only triggers
+        # on total collapse; any batch with >=1 novel passes through untouched.
+        # Gives the GP the diversity it needs to acquire properly next round.
+        try:
+            _n_novel = sum(1 for _m in self.model_list
+                           if self._is_newmodel(_m, eps=1e-10))
+        except Exception:  # noqa: BLE001 - novelty uncheckable; trust GP
+            _n_novel = len(self.model_list)
+        if _n_novel == 0 and len(self.model_list) > 0:
+            self.logger.warning(
+                "GP batch collapsed to 0 novel models; falling back to Sobol "
+                "dispersal batch"
+            )
+            self.model_list = self._propose_random_batch()
 
     # --- triaxiality constraints (normalized space) --------------------
 
@@ -1901,7 +2038,9 @@ class BayesOptGenerator(ParameterGenerator):
             # normalized coordinates, so projecting a full-cube draw and then
             # rescaling would land somewhere the projection never vetted
             unit = lo + (hi - lo) * torch.rand(n_try, d, dtype=bounds.dtype)
-            cand = torch.tensor(self._project_unit_to_feasible_qpu(unit.numpy()), dtype=bounds.dtype)
+            cand = torch.tensor(
+                self._project_unit_to_feasible_qpu(unit.numpy()), dtype=bounds.dtype
+            )
 
             for i in range(cand.shape[0]):
                 x = cand[i]
@@ -1920,7 +2059,9 @@ class BayesOptGenerator(ParameterGenerator):
         if len(collected) < need:
             if not collected:
                 # box centre may violate the constraint; BoTorch reports it
-                self.logger.warning("feasible IC sampling found no feasible point; using box centre")
+                self.logger.warning(
+                    "feasible IC sampling found no feasible point; using box centre"
+                )
                 collected = [0.5 * (lo + hi)]
             collected = (collected * need)[:need]
 
@@ -1938,9 +2079,13 @@ class BayesOptGenerator(ParameterGenerator):
             table, self.par_space, which_chi2=self.chi2, logger=self.logger
         )
 
-        assert names == self.free_param_names, f"param order mismatch: {names} vs {self.free_param_names}"
+        assert names == self.free_param_names, (
+            f"param order mismatch: {names} vs {self.free_param_names}"
+        )
 
-        Y_t = -torch.tensor(y, dtype=torch.double).unsqueeze(-1)  # BoTorch maximizes; negate chi2
+        Y_t = -torch.tensor(y, dtype=torch.double).unsqueeze(
+            -1
+        )  # BoTorch maximizes; negate chi2
         self._gp_model = model
 
         d = len(self.free_par_idx)
@@ -1951,7 +2096,9 @@ class BayesOptGenerator(ParameterGenerator):
             )
             bounds = torch.tensor(tr, dtype=torch.double)
         else:
-            bounds = torch.stack([torch.zeros(d, dtype=torch.double), torch.ones(d, dtype=torch.double)])
+            bounds = torch.stack(
+                [torch.zeros(d, dtype=torch.double), torch.ones(d, dtype=torch.double)]
+            )
         eta = self._exploration_eta(self._gp_batches_done)
         acqf = (
             qLogExpectedImprovement(model=model, best_f=Y_t.max())
@@ -1968,7 +2115,13 @@ class BayesOptGenerator(ParameterGenerator):
         # so a fixed sample budget that reliably finds the qLogEI optimum at
         # 3D is not guaranteed to at ~10D. Re-check (and likely raise) both
         # before trusting a higher-dimensional run's proposals.
-        opt_kwargs = dict(acq_function=acqf, bounds=bounds, q=self.batch_size, num_restarts=10, raw_samples=128)
+        opt_kwargs = dict(
+            acq_function=acqf,
+            bounds=bounds,
+            q=self.batch_size,
+            num_restarts=10,
+            raw_samples=128,
+        )
         if nonlinear is not None:
             opt_kwargs["nonlinear_inequality_constraints"] = nonlinear
             opt_kwargs["ic_generator"] = self._feasible_ic_generator
@@ -1978,9 +2131,13 @@ class BayesOptGenerator(ParameterGenerator):
         self._last_acq_value = float(acq_value.item())
         self._gp_batches_done += 1
 
-        cand_np = self._dedup_and_fill(self._snap_to_grid(candidates.detach().numpy(), tr), tr)
+        cand_np = self._dedup_and_fill(
+            self._snap_to_grid(candidates.detach().numpy(), tr), tr
+        )
         if self.n_annealed_members > 0:
-            tau = max(self.tau_min, self.tau_start * (self.tau_decay**self._gp_batches_done))
+            tau = max(
+                self.tau_min, self.tau_start * (self.tau_decay**self._gp_batches_done)
+            )
             n_annealed = min(self.n_annealed_members, self.batch_size - 1)
             annealed = self._sample_annealed_members(n_annealed, tau, tr)
             cand_np = np.vstack([cand_np[: self.batch_size - n_annealed], annealed])
@@ -1989,7 +2146,11 @@ class BayesOptGenerator(ParameterGenerator):
         import torch as _torch
 
         with _torch.no_grad():
-            pred_mu = self._gp_posterior_mean(_torch.tensor(cand_np, dtype=_torch.double)).numpy().ravel()
+            pred_mu = (
+                self._gp_posterior_mean(_torch.tensor(cand_np, dtype=_torch.double))
+                .numpy()
+                .ravel()
+            )
         self._record_predictions(cand_np, pred_mu)
         return self._raw_free_matrix_to_model_list(raw_free)
 
@@ -2016,7 +2177,11 @@ class BayesOptGenerator(ParameterGenerator):
         while len(out) < n and total < self.annealed_max_draws:
             cand = self._sobol_in_box(min(chunk, self.annealed_max_draws - total), box)
             total += cand.shape[0]
-            mu = self._gp_posterior_mean(torch.tensor(cand, dtype=torch.double)).numpy().ravel()
+            mu = (
+                self._gp_posterior_mean(torch.tensor(cand, dtype=torch.double))
+                .numpy()
+                .ravel()
+            )
             w = np.exp((mu - mu.max()) / tau)
             acc = np.random.random(cand.shape[0]) < w
             out.extend(cand[acc].tolist())
@@ -2069,7 +2234,9 @@ class BayesOptGenerator(ParameterGenerator):
             else:
                 self._tr_stale_batches += 1
                 if self._tr_stale_batches >= self.tr_patience:
-                    self._tr_side = max(self._tr_side * self.tr_shrink, self.tr_min_side)
+                    self._tr_side = max(
+                        self._tr_side * self.tr_shrink, self.tr_min_side
+                    )
                     self._tr_stale_batches = 0
         self._tr_best_seen = best
 
@@ -2100,7 +2267,9 @@ class BayesOptGenerator(ParameterGenerator):
         if not self.trust_region:
             return None
         table = self.current_models.table
-        X_norm, y_train, _, _, _ = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
+        X_norm, y_train, _, _, _ = extract_gp_training_data(
+            table, self.par_space, which_chi2=self.chi2
+        )
         if X_norm.shape[0] < 10:
             return None
         if self._knn_radius(X_norm, y_train) > self.tr_trigger_frac:
@@ -2135,7 +2304,9 @@ class BayesOptGenerator(ParameterGenerator):
         ok = done & np.isfinite(chi2)
         if not np.any(ok):
             return
-        X_norm, _, _, _, _ = extract_gp_training_data(table, self.par_space, which_chi2=self.chi2)
+        X_norm, _, _, _, _ = extract_gp_training_data(
+            table, self.par_space, which_chi2=self.chi2
+        )
         rows = table[np.where(ok)[0]]
         best = float(np.min(np.asarray(rows[self.chi2], dtype=float)))
         for row, x in zip(rows, X_norm):
@@ -2146,11 +2317,15 @@ class BayesOptGenerator(ParameterGenerator):
             yv = float(row[self.chi2])
             if abs(mu - yv) <= (self.pred_eps_abs + self.pred_eps_rel * abs(best - mu)):
                 self._pred_streak += 1
-                self.logger.info(f"GP prediction accurate ({self._pred_streak}/{self.pred_hits_needed} consecutive)")
+                self.logger.info(
+                    f"GP prediction accurate ({self._pred_streak}/{self.pred_hits_needed} consecutive)"
+                )
             else:
                 self.logger.debug(f"GP prediction missed: mu={mu:.2f} y={yv:.2f}")
                 self._pred_streak = 0
-        self.status["gp_predictions_accurate"] = self._pred_streak >= self.pred_hits_needed
+        self.status["gp_predictions_accurate"] = (
+            self._pred_streak >= self.pred_hits_needed
+        )
 
     def check_specific_stopping_criteria(self):
         """BayesOpt convergence signals plus the inherited chi2 backstop.
@@ -2190,7 +2365,8 @@ class BayesOptGenerator(ParameterGenerator):
             max_variance = posterior.variance.max().item()
 
         self.status["gp_max_variance_low"] = (
-            self.max_gp_variance_threshold is not None and max_variance < self.max_gp_variance_threshold
+            self.max_gp_variance_threshold is not None
+            and max_variance < self.max_gp_variance_threshold
         )
 
         if self._last_acq_value is not None and self.min_ei_threshold is not None:
@@ -2217,7 +2393,9 @@ class FullGrid(ParameterGenerator):
     """
 
     def __init__(self, par_space=[], parspace_settings=None):
-        super().__init__(par_space=par_space, parspace_settings=parspace_settings, name="FullGrid")
+        super().__init__(
+            par_space=par_space, parspace_settings=parspace_settings, name="FullGrid"
+        )
         self.logger = logging.getLogger(f"{__name__}.{__class__.__name__}")
         self.step = []
         self.minstep = []
@@ -2227,7 +2405,11 @@ class FullGrid(ParameterGenerator):
                 if par.fixed is False:
                     self.step.append(settings["step"])
                     # use 'minstep' value if present, otherwise use 'step'
-                    self.minstep.append(settings["minstep"] if "minstep" in settings else settings["step"])
+                    self.minstep.append(
+                        settings["minstep"]
+                        if "minstep" in settings
+                        else settings["step"]
+                    )
                 else:
                     self.step.append(None)
                     self.minstep.append(None)
@@ -2240,7 +2422,10 @@ class FullGrid(ParameterGenerator):
         stop_abs = "min_delta_chi2_abs" in stop_crit
         stop_rel = "min_delta_chi2_rel" in stop_crit
         if (stop_abs and stop_rel) or not (stop_abs or stop_rel):
-            text = "FullGrid: specify exactly one of the " + "options min_delta_chi2_abs, min_delta_chi2_rel"
+            text = (
+                "FullGrid: specify exactly one of the "
+                + "options min_delta_chi2_abs, min_delta_chi2_rel"
+            )
             self.logger.error(text)
             raise ValueError(text)
         if stop_abs:
@@ -2353,7 +2538,10 @@ class FullGrid(ParameterGenerator):
             # start with lo...
             while raw_value >= lo:
                 raw_new = self.clip(raw_value - step, lo, hi)
-                if abs(raw_value - raw_new) >= max(minstep, eps) - sys.float_info.epsilon:
+                if (
+                    abs(raw_value - raw_new)
+                    >= max(minstep, eps) - sys.float_info.epsilon
+                ):
                     raw_values.append(raw_new)
                 else:
                     break
@@ -2362,7 +2550,10 @@ class FullGrid(ParameterGenerator):
             raw_value = center[paridx]
             while raw_value <= hi:
                 raw_new = self.clip(raw_value + step, lo, hi)
-                if abs(raw_value - raw_new) >= max(minstep, eps) - sys.float_info.epsilon:
+                if (
+                    abs(raw_value - raw_new)
+                    >= max(minstep, eps) - sys.float_info.epsilon
+                ):
                     raw_values.append(raw_new)
                 else:
                     break
@@ -2429,10 +2620,16 @@ class SpecificModels(ParameterGenerator):
     """
 
     def __init__(self, par_space=[], parspace_settings=None):
-        super().__init__(par_space=par_space, parspace_settings=parspace_settings, name="SpecificModels")
+        super().__init__(
+            par_space=par_space,
+            parspace_settings=parspace_settings,
+            name="SpecificModels",
+        )
         self.logger = logging.getLogger(f"{__name__}.{__class__.__name__}")
         try:
-            self.mode = self.parspace_settings["generator_settings"]["SpecificModels_mode"].lower()
+            self.mode = self.parspace_settings["generator_settings"][
+                "SpecificModels_mode"
+            ].lower()
         except:
             text = "Need SpecificModels_mode setting in generator_settings."
             self.logger.error(text)
@@ -2468,7 +2665,10 @@ class SpecificModels(ParameterGenerator):
             self.logger.info("Found ONE individual model.")
             return  ###########################################################
 
-        lengths = [len(self.par_space[i].par_generator_settings["specific_values"]) for i in par_list_idx]
+        lengths = [
+            len(self.par_space[i].par_generator_settings["specific_values"])
+            for i in par_list_idx
+        ]
         if self.mode == "list":
             if len(set(lengths)) > 1:
                 text = "For a simple list of new models all specific_values lists must be of equal length."
@@ -2479,7 +2679,10 @@ class SpecificModels(ParameterGenerator):
             n_mod = np.prod(lengths)
         self.logger.info(f"Adding {n_mod} individual models.")
 
-        specific_values = [self.par_space[i].par_generator_settings["specific_values"] for i in par_list_idx]
+        specific_values = [
+            self.par_space[i].par_generator_settings["specific_values"]
+            for i in par_list_idx
+        ]
         if self.mode == "list":
             for i in range(n_mod):
                 new_parset = [copy.deepcopy(p) for p in self.par_space]

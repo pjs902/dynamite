@@ -3,11 +3,92 @@ import logging
 import numpy as np
 from astropy.io import ascii
 from pathos.multiprocessing import Pool
+import multiprocess as mp
 import matplotlib.pyplot as plt
 
 from dynamite import parameter_space
 from dynamite import weight_solvers as ws
 from dynamite import plotter
+
+
+class _TaskWatch(object):
+    """Picklable wrapper that records which pid is running which task.
+
+    Kept a module-level class rather than a closure so it pickles cleanly
+    under every start method, not just fork.
+    """
+    def __init__(self, func, live):
+        self.func = func
+        self.live = live
+
+    def __call__(self, indexed_arg):
+        idx, arg = indexed_arg
+        self.live[idx] = os.getpid()
+        try:
+            return self.func(arg)
+        finally:
+            self.live.pop(idx, None)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def pool_map(pool, func, iterable, logger=None, poll=10.0, manager=None):
+    """``pool.map(func, iterable)``, but raise if a worker dies mid-task.
+
+    ``Pool.map`` waits on the result queue with no timeout, so a worker that
+    dies without posting a result - the kernel OOM-killer sending SIGKILL is
+    the case that bites here - leaves the parent blocked forever while every
+    other worker sits idle in a futex. A weight-solve grid hit exactly this
+    twice, losing 8-10 h of wall clock each time with no error and no output.
+    A Python-level MemoryError is already caught and turned into a nan model
+    by the solvers; only an OS-level kill is invisible, so this is the one gap.
+
+    Detection cannot work by scanning ``pool._pool`` for a non-zero exitcode:
+    ``_join_exited_workers`` runs on the pool's own handler thread, deletes the
+    dead worker from that list and immediately starts a replacement, so a
+    poller almost never sees the corpse. Instead each task registers the pid
+    running it in a shared dict and clears it on return; a task whose
+    registered pid no longer exists was killed and its result will never
+    arrive.
+    """
+    log = logger or logging.getLogger(f'{__name__}.pool_map')
+    items = list(iterable)
+    own_manager = manager is None
+    if own_manager:
+        manager = mp.Manager()
+    try:
+        live = manager.dict()
+        result = pool.map_async(_TaskWatch(func, live), list(enumerate(items)))
+        while not result.ready():
+            result.wait(poll)
+            if result.ready():
+                break
+            lost = [(k, pid) for k, pid in list(live.items())
+                    if not _pid_alive(pid)]
+            if lost:
+                detail = ', '.join(f'task {k} on pid {pid}'
+                                   for k, pid in lost)
+                txt = ('Worker process died without returning a result '
+                       f'({detail}). The usual cause is the kernel '
+                       'OOM-killer, i.e. this run needs a lower '
+                       'ncpus_weights. Aborting instead of waiting forever '
+                       'on a result that will never arrive.')
+                log.error(txt)
+                pool.terminate()
+                raise RuntimeError(txt)
+        return result.get()
+    finally:
+        if own_manager:
+            manager.shutdown()
+
 
 class ModelIterator(object):
     """Iterator for models
@@ -99,6 +180,13 @@ class ModelIterator(object):
                     self.kinematic_maps = \
                         the_plotter.plot_kinematic_maps(kin_set='all',
                                                         cbar_lims='default')
+                    # GP inter-iteration diagnostic (proposals + EI + TR box),
+                    # BayesOpt grids only, last so a GP-plot failure can never
+                    # block the three standard plots above (same try already).
+                    if par_generator_type == 'BayesOptGenerator':
+                        self.gp_plot = the_plotter.make_gp_iteration_plot(
+                            par_generator=self.par_generator,
+                            iteration=total_iter)
                     plt.close('all')  # just to make sure...
                 except:
                     self.logger.warning(f'Iteration {total_iter}: '
@@ -151,8 +239,9 @@ class ModelIterator(object):
             self.logger.info(f'Reattempting weight solving: models {to_do}.')
             n_proc = config.settings.multiprocessing_settings['ncpus_weights']
             with Pool(n_proc) as p:
-                output = p.map(self.get_missing_weights,
-                               rows_with_orbits_but_no_weights)
+                output = pool_map(p, self.get_missing_weights,
+                                  rows_with_orbits_but_no_weights,
+                                  logger=self.logger)
             for i, row in enumerate(rows_with_orbits_but_no_weights):
                 chi2, kinchi2, kinmapchi2, time = output[i]
                 all_models.table[row]['chi2'] = chi2
@@ -178,7 +267,7 @@ class ModelIterator(object):
                 self.logger.info(f'Reattempting chi2_ext: models {to_do}.')
                 n_proc = config.settings.multiprocessing_settings['ncpus_ext']
                 with Pool(n_proc) as p:
-                    output = p.map(self.get_missing_chi2_ext,
+                    output = pool_map(p, self.get_missing_chi2_ext,
                                    rows_with_no_chi2_ext)
                 for i, row in enumerate(rows_with_no_chi2_ext):
                     chi2, kinchi2, kinmapchi2, chi2_ext, time = output[i]
@@ -410,8 +499,9 @@ class ModelInnerIterator(object):
                                      for i in enumerate(rows_to_do_orblib)]
                 if len(input_list_orblib) > 0:
                     with Pool(self.ncpus) as p:
-                        output = p.map(self.create_and_run_model,
-                                       input_list_orblib)
+                        output = pool_map(p, self.create_and_run_model,
+                                          input_list_orblib,
+                                          logger=self.logger)
                     self.write_output_to_all_models_table(rows_to_do_orblib,
                                                           output)
                     self.all_models.save()
@@ -421,7 +511,8 @@ class ModelInnerIterator(object):
                 if len(rows_to_do_orblib + rows_to_do_ml) > 0:
                     with Pool(self.ncpus_weights,
                               maxtasksperchild=self.ncpus_weights_maxtasksperchild) as p:
-                        output = p.map(self.create_and_run_model, input_list_ml)
+                        output = pool_map(p, self.create_and_run_model,
+                                          input_list_ml, logger=self.logger)
                     self.write_output_to_all_models_table(
                         rows_to_do_orblib + rows_to_do_ml, output)
             else:  # first the orblibs incl. weights, then remaining weights
@@ -430,11 +521,15 @@ class ModelInnerIterator(object):
                 if len(input_list_orblib) + len(input_list_ml) > 0:
                     with Pool(self.ncpus) as p:
                         if len(input_list_orblib) > 0:
-                            output_orblib = p.map(self.create_and_run_model,
-                                                  input_list_orblib)
+                            output_orblib = pool_map(p,
+                                                     self.create_and_run_model,
+                                                     input_list_orblib,
+                                                     logger=self.logger)
                         if len(input_list_ml) > 0:
-                            output_ml = p.map(self.create_and_run_model,
-                                              input_list_ml)
+                            output_ml = pool_map(p,
+                                                 self.create_and_run_model,
+                                                 input_list_ml,
+                                                 logger=self.logger)
                     if len(input_list_orblib) > 0:
                         self.write_output_to_all_models_table(rows_to_do_orblib,
                                                               output_orblib)
@@ -447,7 +542,8 @@ class ModelInnerIterator(object):
                 input_list = [i + (do_orblib, do_weights, do_chi2_ext)
                               for i in enumerate(rows_to_do)]
                 with Pool(self.ncpus_ext) as p:
-                    output = p.map(self.create_and_run_model, input_list)
+                    output = pool_map(p, self.create_and_run_model,
+                                      input_list, logger=self.logger)
                 self.write_output_to_all_models_table(rows_to_do, output)
             self.all_models.save()  # save all_models table once models are run
             self.logger.info('Iteration done, '

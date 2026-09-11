@@ -1782,6 +1782,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
         velhist0,
         chunk=2000000,
         keep=None,
+        ap_off=0,
     ):
         """Fill ``velhist0`` from a 2d proper-motion file, without a read loop.
 
@@ -1818,18 +1819,33 @@ class LegacyOrbitLibrary(OrbitLibrary):
         ap_global = np.asarray(ap_global)
         n_ap_file = ap_global.size
         n_pairs = norb * n_ap_file
-        try:
-            start, ivmin0, ivmin1, n0, nv = self._walk_pm_records(buf, n_pairs)
-        except IndexError:
-            err_msg = (
-                f"{fname} (model {self.mod_dir}) ended before the expected "
-                f"{n_pairs} (orbit, aperture) pairs ({norb} orbits x "
-                f"{n_ap_file} apertures) had been read; the file is "
-                "truncated. Delete the orbit library and the datfil/*_done "
-                "flags to have it rebuilt."
-            )
-            self.logger.error(err_msg)
-            raise ValueError(err_msg) from None
+        # S1 + grid reuse: the walk is a ~46M-iteration Python loop over the
+        # raw buffer. S1 grouped reads re-run it once per aperture group, and
+        # every grid model reuses the SAME orblib, so cache the walk arrays to
+        # ``fname + '.walk.npz'`` and run the walk once per file ever instead
+        # of once per group/model. fszie + norb + n_ap_file validate the cache
+        # against the file; a changed/truncated file recomputes the walk (and
+        # re-arms the truncation error below). Cache is an optimization only:
+        # a read-only datfil just recomputes each time.
+        walk = self._pm_walk_load(fname, norb, n_ap_file)
+        if walk is None:
+            try:
+                start, ivmin0, ivmin1, n0, nv = self._walk_pm_records(
+                    buf, n_pairs)
+            except IndexError:
+                err_msg = (
+                    f"{fname} (model {self.mod_dir}) ended before the expected "
+                    f"{n_pairs} (orbit, aperture) pairs ({norb} orbits x "
+                    f"{n_ap_file} apertures) had been read; the file is "
+                    "truncated. Delete the orbit library and the datfil/*_done "
+                    "flags to have it rebuilt."
+                )
+                self.logger.error(err_msg)
+                raise ValueError(err_msg) from None
+            self._pm_walk_save(fname, norb, n_ap_file, start, ivmin0, ivmin1,
+                               n0, nv)
+        else:
+            start, ivmin0, ivmin1, n0, nv = walk
         # centre offsets per kinematic set; 1d sets are absent from this file
         centre0 = np.array(
             [
@@ -1870,7 +1886,42 @@ class LegacyOrbitLibrary(OrbitLibrary):
             col = np.repeat(ivmin1[k] + centre1[kin], nvs) + i1
             for kin_id in np.unique(kin_e):
                 m = kin_e == kin_id
-                velhist0[kin_id][orb_e[m], row[m], col[m], ap_e[m]] = vals[m]
+                # ap_off maps the set-local aperture to a group-local column
+                # (S1 read-side streaming): a group-sized velhist0 target
+                # addresses only its own range. ap_off=0 (default) is today's
+                # full-set behaviour.
+                velhist0[kin_id][orb_e[m], row[m], col[m], ap_e[m] - ap_off] = vals[m]
+
+    def _pm_walk_load(self, fname, norb, n_ap_file):
+        """Return cached pm walk arrays if a valid ``fname + '.walk.npz'``
+        exists, else None. Validated on norb, n_ap_file and source file size
+        so a rebuilt/truncated file recomputes instead of reusing stale
+        offsets."""
+        path = fname + ".walk.npz"
+        try:
+            z = np.load(path)
+            ok = (
+                int(z["norb"]) == norb
+                and int(z["n_ap_file"]) == n_ap_file
+                and int(z["fsize"]) == os.path.getsize(fname)
+            )
+            if ok:
+                return (z["start"], z["ivmin0"], z["ivmin1"], z["n0"],
+                        z["nv"])
+        except (OSError, KeyError, ValueError):
+            pass
+        return None
+
+    def _pm_walk_save(self, fname, norb, n_ap_file, start, ivmin0, ivmin1,
+                      n0, nv):
+        """Persist the pm walk arrays to ``fname + '.walk.npz'``. Best-effort:
+        a read-only datfil silently falls back to recomputing each time."""
+        try:
+            np.savez(fname + ".walk.npz", norb=norb, n_ap_file=n_ap_file,
+                     fsize=os.path.getsize(fname), start=start,
+                     ivmin0=ivmin0, ivmin1=ivmin1, n0=n0, nv=nv)
+        except OSError:
+            pass
 
     def _read_individual_orbit(self, fort_file, quad_light_grid_sizes):
         """Read individual orbit parameters from file
@@ -1917,6 +1968,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
         pops=False,
         kin_sets=None,
         want_density=True,
+        ap_group=None,
     ):
         """
         Read orbit library from file datfil/{fileroot}.dat.bz2'
@@ -2151,7 +2203,15 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 if hist_dim[kin_idx] == 1:
                     velhist0 += [np.zeros((norb, nv, n_apertures[kin_idx]))]
                 elif hist_dim[kin_idx] == 2:
-                    velhist0 += [np.zeros((norb, nv[0], nv[1], n_apertures[kin_idx]))]
+                    # S1 read-side: ap_group=(g0,g1) restricts this 2d set's
+                    # allocation to a set-local aperture range [g0,g1) so the
+                    # full n_apertures[si] array never materializes. Applied
+                    # to the single 2d set S1 reads at a time; 1d fields stay
+                    # full (tiny next to hst_pm).
+                    na = n_apertures[kin_idx]
+                    if ap_group is not None:
+                        na = ap_group[1] - ap_group[0]
+                    velhist0 += [np.zeros((norb, nv[0], nv[1], na))]
                 else:
                     error_msg = "Invalid histogram dimension."
                     self.logger.error(error_msg)  # should never happen
@@ -2180,6 +2240,12 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 ap_2d = ap_all[hist_dim_per_ap == 2]
                 keep_1d = np.isin(kin_idx_per_ap[ap_1d], requested_sets)
                 keep_2d = np.isin(kin_idx_per_ap[ap_2d], requested_sets)
+                if ap_group is not None:
+                    # restrict the 2d scatter to the requested set-local range
+                    k = kin_idx_per_ap[ap_2d]
+                    local = ap_2d - idx_ap_reset[k]
+                    in_grp = (local >= ap_group[0]) & (local < ap_group[1])
+                    keep_2d &= in_grp
                 if ap_1d.size and keep_1d.any():
                     self._read_losvd_hist_vectorised(
                         tmpfname,
@@ -2201,6 +2267,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
                         hist_bins,
                         velhist0,
                         keep=keep_2d,
+                        ap_off=ap_group[0] if ap_group is not None else 0,
                     )
             # per-record loop: legacy format and intrinsic moments only
             if not vectorised:
@@ -2349,7 +2416,8 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 velhists += [vvv]
         return velhists, density_3D  #######################
 
-    def combine_and_mirror_orblibs(self, tube, box, mirror=True):
+    def combine_and_mirror_orblibs(self, tube, box, mirror=True,
+                                   dtype=None, free_inputs=False):
         """Build the combined (tube+box) orbit library in one allocation.
 
         Replaces the previous ``duplicate_flip_and_interlace_orblib`` +
@@ -2373,6 +2441,14 @@ class LegacyOrbitLibrary(OrbitLibrary):
         box : ``dyn.kinematics.Histogram`` or ``dyn.kinematics.Histogram2D``
         mirror : bool
             whether to mirror+interlace the tube orbits. Default True.
+        dtype : numpy dtype, optional
+            allocate the combined array in this dtype instead of the inputs'.
+            Bit-identical to combining in the input dtype and downcasting
+            afterwards, but never has both resident at once.
+        free_inputs : bool, optional
+            release ``tube.y``/``box.y`` as soon as each has been copied.
+            Only safe when the caller is discarding them, which the read
+            path does.
 
         Returns
         -------
@@ -2405,11 +2481,21 @@ class LegacyOrbitLibrary(OrbitLibrary):
         assert tube.y.shape[-1] == box.y.shape[-1], error_msg
         self.logger.debug("...checks ok.")
 
+        # captured before free_inputs can null tube.y below
+        ndim = tube.y.ndim
+        tube_xedg = tube.xedg
         n_tube = tube.y.shape[0]
         n_box = box.y.shape[0]
         n_tube_out = 2 * n_tube if mirror else n_tube
         final_shape = (n_tube_out + n_box,) + tube.y.shape[1:]
-        final = np.zeros(final_shape, dtype=tube.y.dtype)
+        # Allocating straight into the caller's target dtype, rather than
+        # building in float64 and downcasting afterwards, is what keeps this
+        # bounded: at omega Cen's hst_pm the float64 combined array is
+        # 249.5 GiB and the float32 one 124.8 GiB, and the downcast-after
+        # route has BOTH resident at once. The values are identical either
+        # way - a float64 that is going to be rounded to float32 rounds the
+        # same whether that happens on assignment here or in a later astype.
+        final = np.zeros(final_shape, dtype=dtype or tube.y.dtype)
 
         if mirror:
             if tube.y.ndim == 3:  # 1D histograms (losvd)
@@ -2420,10 +2506,17 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 final[1 : 2 * n_tube : 2] = tube.y[:, ::-1, ::-1, :]
         else:
             final[0:n_tube] = tube.y
+        # Drop the tube source before pulling in the box one: the caller's
+        # reference to it dies with this call anyway, and releasing it here
+        # keeps tube, box and final from all being resident simultaneously.
+        if free_inputs:
+            tube.y = None
         final[n_tube_out:] = box.y
+        if free_inputs:
+            box.y = None
 
-        cls = dyn_kin.Histogram if tube.y.ndim == 3 else dyn_kin.Histogram2D
-        return cls(xedg=tube.xedg, y=final)
+        cls = dyn_kin.Histogram if ndim == 3 else dyn_kin.Histogram2D
+        return cls(xedg=tube_xedg, y=final)
 
     def duplicate_flip_and_interlace_intmoms(self, intmom):
         """equiv of `duplicate_flip_and_interlace_orblib` for intrinsic moments"""
@@ -2438,7 +2531,8 @@ class LegacyOrbitLibrary(OrbitLibrary):
         new_intmom[1::2, :] = reversed_intmom
         return new_intmom
 
-    def read_vel_histograms(self, pops=False, kin_sets=None, skip_density=False):
+    def read_vel_histograms(self, pops=False, kin_sets=None,
+                            skip_density=False, dtype=None, ap_group=None):
         """Read the orbit library
 
         Read box orbits and tube orbits, mirrors the latter, and combines.
@@ -2459,6 +2553,12 @@ class LegacyOrbitLibrary(OrbitLibrary):
             Skip the qgrid/density parse entirely; requires a previous call
             to have set ``self.intrinsic_masses`` and ``self.n_orbs``.
             Ignored (densities always parsed) for legacy libraries.
+        dtype : numpy dtype, optional
+            Build the combined histograms directly in this dtype. Results are
+            bit-identical to reading in the file dtype and downcasting after,
+            but the float64 combined array never exists - which at omega Cen's
+            hst_pm set is the difference between a 249.5 GiB and a 124.8 GiB
+            allocation, and between having both resident at once or neither.
 
         Returns
         -------
@@ -2490,6 +2590,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 pops=pops,
                 kin_sets=kin_sets,
                 want_density=not skip_density,
+                ap_group=ap_group,
             )
         except:
             self.logger.error(
@@ -2511,6 +2612,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 pops=pops,
                 kin_sets=kin_sets,
                 want_density=not skip_density,
+                ap_group=ap_group,
             )
         except:
             self.logger.error(
@@ -2524,7 +2626,8 @@ class LegacyOrbitLibrary(OrbitLibrary):
         # combine (and, if mirror, mirror/interlace) orblibs in one
         # allocation rather than building through several copy generations
         self.vel_histograms = [
-            self.combine_and_mirror_orblibs(t, b, mirror=mirror)
+            self.combine_and_mirror_orblibs(t, b, mirror=mirror,
+                                            dtype=dtype, free_inputs=True)
             if t is not None
             else None
             for t, b in zip(tube_orblib, box_orblib)

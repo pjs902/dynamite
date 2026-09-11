@@ -222,6 +222,7 @@ class RecordingReadOrbitBase:
         pops=False,
         kin_sets=None,
         want_density=True,
+        ap_group=None,
     ):
         requested = (
             list(range(len(self.tube_hists))) if kin_sets is None else sorted(kin_sets)

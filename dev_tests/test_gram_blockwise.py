@@ -86,6 +86,23 @@ def test_blockwise_q_matches_materialized():
     assert rel < 1e-12, rel
 
 
+def test_finalize_in_place_equals_out_of_place():
+    """O2: finalize(in_place=True) must normalize into G's buffer and return
+    a P bitwise-identical to the out-of-place copy, with raw G consumed
+    (acc.G is None after). The in-place ALIAS is what removes the second
+    full (n_orbs, n_orbs) buffer at the finalize peak."""
+    A, b, blk = _matrix()
+    acc_op = _accumulate(A, b, blk)
+    P_op, q_op, col_op, bm_op = acc_op.finalize()
+    acc_ip = _accumulate(A, b, blk)
+    P_ip, q_ip, col_ip, bm_ip = acc_ip.finalize(in_place=True)
+    np.testing.assert_array_equal(P_ip, P_op)
+    np.testing.assert_array_equal(q_ip, q_op)
+    np.testing.assert_array_equal(col_ip, col_op)
+    assert bm_ip == bm_op
+    assert acc_ip.G is None  # buffer now IS P; raw G dropped
+
+
 def test_col_norm_survives_the_column_spread():
     """col_norm falls out of sqrt(diag(G)) with nothing subtracted - that is
     exactly why it does not lose precision the way a two-pass mean/variance
