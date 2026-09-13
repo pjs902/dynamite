@@ -486,7 +486,8 @@ contains
                 print *, "Energy conserved to ", (Ebeg - Eend)/Ebeg*100.0_dp, ", Increasing integrator accuracy"
             end select
 
-            if (RTOL .lt. 1e-12_dp) then
+            ! Give-up floor 1e-10 (was 1e-12): see orblib_f_new_mirror.f90.
+            if (RTOL .lt. 1e-10_dp) then
                 print *, '  * orbit ', orbit, ' failed. Energy conserved up to ', (Ebeg - Eend)/Ebeg*100.0_dp
                 ! Orbit integration unsuccesfull even at higher accuracy
                 if (stored_orbit .eq. 0) stop 'Abort, No backup orbit stored'

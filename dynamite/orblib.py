@@ -1,4 +1,5 @@
 import functools
+import hashlib
 import os
 import pathlib
 import subprocess
@@ -178,8 +179,16 @@ class LegacyOrbitLibrary(OrbitLibrary):
             histograms, populations datasets, or proper motion datasets, resp.
 
         """
-        # check whether orbit library was calculated already
-        if not os.path.isfile(self.mod_dir + "datfil/tube_box_done"):
+        # check whether orbit library was calculated already; a bare
+        # marker is not enough: after a resume that re-proposes into
+        # same-named orblib dirs, the marker can belong to a DIFFERENT
+        # potential, and weights would silently solve on the wrong library
+        # (observed Sep-11 on sBH_GP_grid: 7 models). The parset hash
+        # distinguishes a genuinely reusable library from a stale one.
+        reuse = os.path.isfile(self.mod_dir + "datfil/tube_box_done")
+        if reuse:
+            reuse = self._orblib_marker_matches_parset()
+        if not reuse:
             if not self.claim_orblib_build():
                 # another (possibly concurrent) model already claimed this
                 # library; wait for it rather than integrating it again
@@ -244,6 +253,8 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 box_done = os.path.isfile(self.mod_dir + "datfil/box_done")
                 if tube_done and box_done:
                     pathlib.Path(self.mod_dir + "datfil/tube_box_done").touch()
+                    with open(self.mod_dir + "datfil/orblib_parset.md5", "w") as f:
+                        f.write(self._orblib_parset_hash())
                 else:
                     # without tube_box_done this library counts as un-built, so
                     # every model that needs it integrates it again - silent,
@@ -260,6 +271,57 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 # instead of being stuck waiting for a done-file that will
                 # never appear
                 self.release_orblib_build_claim()
+
+    def _orblib_parset_hash(self):
+        """md5 over the orbit-library-relevant parameters of this model.
+
+        Same parameter set that ``is_new_orblib`` compares (everything
+        except ``ml`` and chi2_ext parameters): two models agree here iff
+        they need bit-identical orbit libraries.
+        """
+        names = self.config.parspace.par_names[:]
+        if self.system.has_chi2_ext:
+            ext = self.system.get_unique_ext_chi2_component()
+            skip = [p.name for p in ext.parameters]
+        else:
+            skip = []
+        skip.append('ml')
+        items = sorted((n, float(self.parset[n]))
+                       for n in names if n not in skip)
+        return hashlib.md5(repr(items).encode()).hexdigest()
+
+    def _orblib_marker_matches_parset(self):
+        """Whether the existing ``tube_box_done`` library is this model's.
+
+        True: marker + matching parset hash on disk -> reuse is safe.
+        Missing hash file (pre-hash libraries): trust once and stamp it,
+        so the next comparison is meaningful.
+        Mismatch: delete marker + hash so the caller rebuilds; the merge
+        overwrites the stale outputs atomically. Chunk/input files untouched.
+        """
+        hashfile = self.mod_dir + "datfil/orblib_parset.md5"
+        current = self._orblib_parset_hash()
+        try:
+            with open(hashfile) as f:
+                stored = f.read().strip()
+        except FileNotFoundError:
+            stored = None
+        if stored is None:
+            with open(hashfile, "w") as f:
+                f.write(current)
+            self.logger.info(
+                f"{self.mod_dir}: no parset hash with existing library, "
+                "stamping current parameters (trust-once for pre-hash builds).")
+            return True
+        if stored != current:
+            self.logger.warning(
+                f"{self.mod_dir}: library on disk was built for different "
+                "parameters (parset hash mismatch) - discarding marker, "
+                "will rebuild.")
+            os.remove(self.mod_dir + "datfil/tube_box_done")
+            os.remove(hashfile)
+            return False
+        return True
 
     def ics_match_settings(self):
         """Whether ``datfil/begin.dat`` was generated for the current orbit grid.

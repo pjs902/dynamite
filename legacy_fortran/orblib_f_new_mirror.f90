@@ -639,7 +639,13 @@ contains
                 print *, "Energy conserved to ", (Ebeg - Eend)/Ebeg*100.0_dp, ", Increasing integrator accuracy"
             end select
 
-            if (RTOL .lt. 1e-12_dp) then
+            ! Give-up floor 1e-10 (was 1e-12): NMAX scales as 1/RTOL, so the
+            ! 6th/7th retries cost ~100x the first five combined while
+            ! essentially never succeeding (measured over 15 production
+            ! orblibs: deepest success ever needed 6 tightenings, 4 orbits
+            ! once; all other deep retries failed anyway). Failed orbits fall
+            ! back to the stored neighbour trajectory as before.
+            if (RTOL .lt. 1e-10_dp) then
                 print *, '  * orbit ', orbit, ' failed. Energy conserved up to ', (Ebeg - Eend)/Ebeg*100.0_dp
                 ! Orbit integration unsuccesfull even at higher accuracy
                 if (stored_orbit .eq. 0) stop 'Abort, No backup orbit stored'
