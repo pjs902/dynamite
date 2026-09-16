@@ -1,5 +1,7 @@
 import os
 import logging
+import signal
+import threading
 import numpy as np
 from astropy.io import ascii
 from pathos.multiprocessing import Pool
@@ -40,7 +42,63 @@ def _pid_alive(pid):
     return True
 
 
-def pool_map(pool, func, iterable, logger=None, poll=10.0, manager=None):
+def _proc_rss_mb(pid):
+    """Resident memory of a pid in MiB, or None (portable no-op off Linux)."""
+    try:
+        with open(f'/proc/{pid}/statm') as fh:
+            resident_pages = int(fh.read().split()[1])
+        return resident_pages * os.sysconf('SC_PAGE_SIZE') / 2 ** 20
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _live_pool_workers(pool, extra_pids=()):
+    """(pid, rss_mb|None) for processes affiliated with this pool."""
+    pids = list(dict.fromkeys(list(extra_pids) + [
+        p.pid for p in list(getattr(pool, '_pool', []) or [])
+        if getattr(p, 'pid', None)]))
+    out = []
+    for pid in pids:
+        if _pid_alive(pid):
+            out.append((pid, _proc_rss_mb(pid)))
+    return out
+
+
+def _bounded_terminate(pool, extra_pids=(), timeout=120, logger=None):
+    """pool.terminate() that cannot hang the error path, then SIGKILL leftovers.
+
+    terminate() joins handler threads which can block forever on dead or
+    wedged workers; run it in a thread and move on after ``timeout``.
+    Residual pool-affiliated PIDs then get SIGKILL, guarded by a cmdline
+    check so a recycled PID can never kill an innocent process.
+    """
+    t = threading.Thread(target=pool.terminate, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    me = os.getpid()
+    seen, killed = set(), []
+    for pid, _ in _live_pool_workers(pool, extra_pids):
+        if not pid or pid == me or pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as fh:
+                cmd = fh.read().decode('utf-8', 'replace')
+        except OSError:
+            continue  # exited between the checks
+        if 'python' not in cmd:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+        except OSError:
+            pass
+    if killed and logger is not None:
+        logger.warning(f'pool teardown: SIGKILLed residual workers {killed}.')
+
+
+def pool_map(pool, func, iterable, logger=None, poll=10.0, manager=None,
+             phase=None):
     """``pool.map(func, iterable)``, but raise if a worker dies mid-task.
 
     ``Pool.map`` waits on the result queue with no timeout, so a worker that
@@ -74,15 +132,29 @@ def pool_map(pool, func, iterable, logger=None, poll=10.0, manager=None):
             lost = [(k, pid) for k, pid in list(live.items())
                     if not _pid_alive(pid)]
             if lost:
-                detail = ', '.join(f'task {k} on pid {pid}'
-                                   for k, pid in lost)
-                txt = ('Worker process died without returning a result '
-                       f'({detail}). The usual cause is the kernel '
-                       'OOM-killer, i.e. this run needs a lower '
-                       'ncpus_weights. Aborting instead of waiting forever '
-                       'on a result that will never arrive.')
+                detail = ', '.join(
+                    f'task {k} (input {items[k]!r}) on pid {pid}'
+                    for k, pid in lost)
+                sibs = _live_pool_workers(
+                    pool, [pid for _, pid in list(live.items())])
+                sib_gb = sum(r for _, r in sibs if r) / 1024
+                txt = (f'Worker process died without returning a result '
+                       f'(phase={phase}, {detail}). '
+                       f'{len(sibs)} sibling workers alive, '
+                       f'{sib_gb:.1f} GiB RSS total. Suspects in order: '
+                       'kernel OOM-killer (dmesg -T | grep -i oom; lower '
+                       'ncpus_weights if so); native segfault '
+                       '(faultlogs/worker_<pid>.log and launch output '
+                       '"Fatal Python error"); external kill. The input '
+                       'shown is the pool input entry (a table row id, or '
+                       'an (index, row[, flags]) tuple); map rows to model '
+                       'directories via the all_models table. '
+                       'Aborting instead of waiting forever on a result '
+                       'that will never arrive.')
                 log.error(txt)
-                pool.terminate()
+                _bounded_terminate(
+                    pool, [pid for _, pid in list(live.items())],
+                    logger=log)
                 raise RuntimeError(txt)
         return result.get()
     finally:
@@ -241,7 +313,8 @@ class ModelIterator(object):
             with Pool(n_proc) as p:
                 output = pool_map(p, self.get_missing_weights,
                                   rows_with_orbits_but_no_weights,
-                                  logger=self.logger)
+                                  logger=self.logger,
+                                  phase='reattempt')
             for i, row in enumerate(rows_with_orbits_but_no_weights):
                 chi2, kinchi2, kinmapchi2, time = output[i]
                 all_models.table[row]['chi2'] = chi2
@@ -268,7 +341,8 @@ class ModelIterator(object):
                 n_proc = config.settings.multiprocessing_settings['ncpus_ext']
                 with Pool(n_proc) as p:
                     output = pool_map(p, self.get_missing_chi2_ext,
-                                   rows_with_no_chi2_ext)
+                                   rows_with_no_chi2_ext,
+                                   phase='chi2_ext')
                 for i, row in enumerate(rows_with_no_chi2_ext):
                     chi2, kinchi2, kinmapchi2, chi2_ext, time = output[i]
                     all_models.table[row]['chi2'] += chi2
@@ -501,7 +575,8 @@ class ModelInnerIterator(object):
                     with Pool(self.ncpus) as p:
                         output = pool_map(p, self.create_and_run_model,
                                           input_list_orblib,
-                                          logger=self.logger)
+                                          logger=self.logger,
+                                          phase='orblib')
                     self.write_output_to_all_models_table(rows_to_do_orblib,
                                                           output)
                     self.all_models.save()
@@ -512,7 +587,8 @@ class ModelInnerIterator(object):
                     with Pool(self.ncpus_weights,
                               maxtasksperchild=self.ncpus_weights_maxtasksperchild) as p:
                         output = pool_map(p, self.create_and_run_model,
-                                          input_list_ml, logger=self.logger)
+                                          input_list_ml, logger=self.logger,
+                                          phase='weights')
                     self.write_output_to_all_models_table(
                         rows_to_do_orblib + rows_to_do_ml, output)
             else:  # first the orblibs incl. weights, then remaining weights
@@ -524,12 +600,14 @@ class ModelInnerIterator(object):
                             output_orblib = pool_map(p,
                                                      self.create_and_run_model,
                                                      input_list_orblib,
-                                                     logger=self.logger)
+                                                     logger=self.logger,
+                                                     phase='models')
                         if len(input_list_ml) > 0:
                             output_ml = pool_map(p,
                                                  self.create_and_run_model,
                                                  input_list_ml,
-                                                 logger=self.logger)
+                                                 logger=self.logger,
+                                                 phase='models')
                     if len(input_list_orblib) > 0:
                         self.write_output_to_all_models_table(rows_to_do_orblib,
                                                               output_orblib)
@@ -543,7 +621,8 @@ class ModelInnerIterator(object):
                               for i in enumerate(rows_to_do)]
                 with Pool(self.ncpus_ext) as p:
                     output = pool_map(p, self.create_and_run_model,
-                                      input_list, logger=self.logger)
+                                      input_list, logger=self.logger,
+                                      phase='chi2_ext')
                 self.write_output_to_all_models_table(rows_to_do, output)
             self.all_models.save()  # save all_models table once models are run
             self.logger.info('Iteration done, '
@@ -685,6 +764,19 @@ class ModelInnerIterator(object):
             msg = 'get_chi2_ext cannot be used with get_orblib or get_weights.'
             self.logger.error(msg)
             raise ValueError(msg)
+        # Post-fork BLAS threads: the driver stays OMP=1 so fork() never
+        # inherits live threads; each worker raises its own limit here
+        # (fresh threads owned by this process) for compute-heavy phases
+        # (dsyrk in Gram assembly, ADMM). Env override, default 8.
+        try:
+            from threadpoolctl import threadpool_limits
+            # Default 1 (single-threaded): 8-thread OpenBLAS dsyrk
+            # segfaulted production workers 2026-09-16 (see V2_CHANGES).
+            # Raise ONLY deliberately per experiment, never by default.
+            _blas_threads = int(os.environ.get("DYNAMITE_BLAS_THREADS", "1"))
+            threadpool_limits(limits=_blas_threads)
+        except Exception:  # noqa: BLE001 - threadpoolctl missing: stay single-threaded
+            pass
         mod = self.all_models.get_model_from_row(row)
         msg = 'get_orblib' if get_orblib else ''
         msg += ' get_weights' if get_weights else ''
