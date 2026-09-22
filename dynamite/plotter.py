@@ -411,6 +411,8 @@ class Plotter():
             from dynamite.parameter_space import extract_gp_training_data
             import torch as _torch
             from botorch.acquisition import qLogExpectedImprovement as _qLEI
+            from botorch.acquisition import (
+                qLogNoisyExpectedImprovement as _qLNEI)
             _live = getattr(par_generator, '_gp_model', None) \
                 if par_generator is not None else None
             if _live is not None:
@@ -427,11 +429,26 @@ class Plotter():
             _ya = np.asarray(_y, dtype=float)
             _Yt = -_torch.tensor(_ya, dtype=_torch.double).unsqueeze(-1)
             _best = _Xa[int(np.argmin(_ya))]
-            _acqf = _qLEI(model=_m, best_f=_Yt.max())
+            # Draw the acquisition the GENERATOR is actually using. This
+            # panel is a diagnostic of the search, so hardcoding qLogEI
+            # would silently plot a different function from the one
+            # choosing the proposals once acquisition_type is qLogNEI.
+            _acq_type = getattr(par_generator, 'acquisition_type', 'qLogEI') \
+                if par_generator is not None else 'qLogEI'
+            if _acq_type == 'qLogNEI':
+                _acqf = _qLNEI(
+                    model=_m,
+                    X_baseline=_torch.tensor(_Xa, dtype=_torch.double),
+                    prune_baseline=True)
+            else:
+                _acqf = _qLEI(model=_m, best_f=_Yt.max())
             _gp_ok = True
         except Exception as _e:  # noqa: BLE001 - EI off, scatter stands
             self.logger.warning(f'GP for EI unavailable: {_e}')
         _fidx = {n: k for k, n in enumerate(list(_fnames))} if _gp_ok else {}
+        # qLogNEI has no best_f, so "|best" would be wrong for it.
+        _acq_label = ('LogNEI' if _gp_ok and _acq_type == 'qLogNEI'
+                      else 'LogEI|best')
 
         # One x-range per parameter, shared by that parameter's diagonal
         # panel and every off-diagonal panel in its row/column. Without this
@@ -515,7 +532,7 @@ class Plotter():
                     ax.set_xlim(*_plot_range[_pname])
                     ax.set_xlabel(nofix_latex[j], fontsize=size)
                     if j == 0:
-                        ax.set_ylabel('LogEI|best', fontsize=size)
+                        ax.set_ylabel(_acq_label, fontsize=size)
                 else:
                     plt.plot(val[nofix_name[j]], val[nofix_name[i]], 'D',
                              color='gray', markersize=4)
@@ -563,8 +580,8 @@ class Plotter():
                 ax.yaxis.set_minor_formatter(NullFormatter())
                 ax.set_xmargin(0.05)
                 ax.set_ymargin(0.1)
-        fig.suptitle('LogEI | others=best (orange) + training (viridis)',
-                     fontsize=size)
+        fig.suptitle(
+            f'{_acq_label} (orange) + training (viridis)', fontsize=size)
         plt.subplots_adjust(hspace=0.4, wspace=0.3)
         axcb = fig.add_axes([0.68, 0.88, 0.25, 0.025])
         cb = mpl.colorbar.ColorbarBase(axcb,
