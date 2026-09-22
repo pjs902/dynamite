@@ -322,13 +322,15 @@ class Plotter():
         """Inter-iteration GP diagnostic as a single corner figure.
 
         Off-diagonal (j<i): evaluated models (viridis_r by Delta-chi2,
-        black-x best) + latest batch as large orange circles sized by true
-        joint EI (one warm family = acquisition). Diagonal: 1-D LogEI slices
-        through best (conditional, labeled LogEI|best) + proposal ticks +
-        training rug. Upper triangle empty. Two colorbars
-        (training Delta-chi2, EI LogEI|best). Saves
+        black-x best) + the plotted iteration's batch as blue circles, with
+        the trust-region box dashed when `par_generator` supplies one.
+        Diagonal: 1-D LogEI slice through the best point (conditional,
+        labeled LogEI|best) + a training rug + the same blue proposal
+        markers. Upper triangle empty. One colorbar (training Delta-chi2).
+        Every panel in a column shares one x-range (and each row one
+        y-range), in plot space -- log10 for logarithmic parameters. Saves
         ``gp_iteration_{iteration}.png``. EI needs torch/BoTorch + a fittable
-        GP; if unavailable the contours degrade gracefully (scatter stands).
+        GP; if unavailable the diagonal degrades to a histogram.
 
         Parameters
         ----------
@@ -374,8 +376,11 @@ class Plotter():
         itmax = int(np.max(self.all_models.table['which_iter']))
         if iteration is None:
             iteration = itmax
+        # Show the batch belonging to the iteration being plotted, not
+        # always the last one -- passing iteration=N used to stamp N into
+        # the filename while drawing iteration itmax's proposals.
         latest = self.all_models.table[
-            self.all_models.table['which_iter'] == itmax]
+            self.all_models.table['which_iter'] == iteration]
         colormap = mpl.colormaps.get_cmap('viridis_r')
         size = 12 + len(nofix_islog)
         fontsize = max(size - 4, 15)
@@ -393,12 +398,13 @@ class Plotter():
                                for p in par_generator.free_params], float)
                 raw_lo = tr[0] * (hi - lo) + lo
                 raw_hi = tr[1] * (hi - lo) + lo
-                tr_phys = {}
-                for j, p in enumerate(par_generator.free_params):
-                    a, b = raw_lo[j], raw_hi[j]
-                    if p.logarithmic:
-                        a, b = np.log10(a), np.log10(b)
-                    tr_phys[p.name] = (a, b)
+                # par_generator_settings lo/hi are RAW bounds, i.e. already
+                # log10 for logarithmic params -- which is plot space. The
+                # denormalized box therefore needs no further conversion; the
+                # log10 that used to be applied here put every log param's
+                # box at log10(log10(x)) and off the visible axis entirely.
+                tr_phys = {p.name: (raw_lo[j], raw_hi[j])
+                           for j, p in enumerate(par_generator.free_params)}
         # GP for 2-D EI contours: reuse live fitted model (no refit); else fit
         _gp_ok = False
         try:
@@ -427,6 +433,23 @@ class Plotter():
             self.logger.warning(f'GP for EI unavailable: {_e}')
         _fidx = {n: k for k, n in enumerate(list(_fnames))} if _gp_ok else {}
 
+        # One x-range per parameter, shared by that parameter's diagonal
+        # panel and every off-diagonal panel in its row/column. Without this
+        # the diagonal scaled itself from the GP training matrix while the
+        # off-diagonals auto-scaled from `val`, so a column's panels did not
+        # line up. `val` is already in plot space (log params log10'd above);
+        # `latest` holds physical values, so it is converted here.
+        _plot_range = {}
+        for _j, _n in enumerate(nofix_name):
+            _v = np.asarray(val[_n], dtype=float)
+            _extra = [float(_r[_n]) for _r in latest]
+            if nofix_islog[_j] and _extra:
+                _extra = list(np.log10(_extra))
+            _v = np.append(_v, _extra)
+            _a, _b = float(np.nanmin(_v)), float(np.nanmax(_v))
+            _pad = 0.05 * (_b - _a) if _b > _a else max(abs(_a), 1.0) * 0.05
+            _plot_range[_n] = (_a - _pad, _b + _pad)
+
         fig = plt.figure(figsize=(size, size))
         for i in range(nnofix):  # row = y param
             for j in range(nnofix):  # col = x param
@@ -448,48 +471,48 @@ class Plotter():
                                 _M[:, None, :],
                                 dtype=_torch2.double)).numpy().ravel()
                         _lo, _hi = float(_lo_raw[_k]), float(_hi_raw[_k])
-                        # Restrict the slice to the data span (training +
-                        # latest proposals), matching the off-diagonal
-                        # boxes' auto-scaled range; EI beyond it is ~flat
-                        # and only stretches the axis misleadingly.
+                        # Everything here is in PLOT space, which for a
+                        # logarithmic parameter is log10 -- and that is
+                        # exactly the GP's raw space (extract_gp_training_data
+                        # log10s log params before normalizing). So the
+                        # denormalized grid needs no further conversion; only
+                        # values read from all_models.table, which are stored
+                        # in physical units, do.
                         _data = _Xa[:, _k] * (_hi - _lo) + _lo
                         for _r in latest:
-                            _data = np.append(_data, float(_r[nofix_name[j]]))
-                        if _islog:
-                            _data = np.log10(_data)  # plot space for log params
-                        _dlo, _dhi = float(_data.min()), float(_data.max())
-                        _pad = 0.05 * (_dhi - _dlo)
-                        _dlo, _dhi = _dlo - _pad, _dhi + _pad
+                            _v = float(_r[_pname])
+                            _data = np.append(
+                                _data, np.log10(_v) if _islog else _v)
+                        _dlo, _dhi = _plot_range[_pname]
                         _xx = _g * (_hi - _lo) + _lo
-                        if _islog:
-                            _xx = np.log10(_xx)
+                        # Restrict the slice to the shared column range; EI
+                        # beyond it is ~flat and only stretches the axis.
                         _in = (_xx >= _dlo) & (_xx <= _dhi)
-                        ax.plot(_xx, _ei[_in], color='darkorange',
+                        ax.plot(_xx[_in], _ei[_in], color='darkorange',
                                 linewidth=2)
-                        _tr = _data
-                        if _islog:
-                            _tr = np.log10(_tr)
-                        ax.plot(_tr, np.zeros_like(_tr), '|', color='gray',
-                                markersize=8)
+                        # Rug in axes-fraction y so it never drives the
+                        # y-range: that axis belongs to LogEI alone.
+                        ax.plot(_data, np.full_like(_data, 0.02), '|',
+                                color='gray', markersize=8,
+                                transform=ax.get_xaxis_transform())
                     else:
                         _xv = np.asarray(val[nofix_name[j]], dtype=float)
                         ax.hist(_xv, bins=20, color='gray', alpha=0.6)
-                    for _pi, _r in enumerate(latest):
-                        _v = _r[_pname]
+                    # Proposals as vertical lines, not points: reading
+                    # _ymax back inside the loop made each marker re-autoscale
+                    # the axis, so the batch climbed off the top of the panel.
+                    # Lines also free the y-axis to scale to the LogEI curve,
+                    # whose structure was invisible when it shared a range
+                    # with markers parked near the top.
+                    for _r in latest:
+                        _v = float(_r[_pname])
                         if _islog:
                             _v = np.log10(_v)
-                        _ymax = ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 1.0
-                        ax.plot(_v, _ymax * 0.95, 'o', markersize=10,
-                                color='dodgerblue', markeredgecolor='white',
-                                markeredgewidth=1.5)
-                    # Clamp the axis to the data span, matching the
-                    # off-diagonal boxes (auto-scaled to training +
-                    # proposals), instead of the full prior bounds.
-                    if _gp_ok:
-                        _dlo2 = float(_data.min())
-                        _dhi2 = float(_data.max())
-                        _pad2 = 0.05 * (_dhi2 - _dlo2)
-                        ax.set_xlim(_dlo2 - _pad2, _dhi2 + _pad2)
+                        ax.axvline(_v, color='dodgerblue', linewidth=1.5,
+                                   alpha=0.8, zorder=0)
+                    # Same shared range as this column's off-diagonal
+                    # panels, so the corner plot's columns line up.
+                    ax.set_xlim(*_plot_range[_pname])
                     ax.set_xlabel(nofix_latex[j], fontsize=size)
                     if j == 0:
                         ax.set_ylabel('LogEI|best', fontsize=size)
@@ -524,6 +547,8 @@ class Plotter():
                         ax.add_patch(_mp.Rectangle(
                             (x0, y0), x1 - x0, y1 - y0, fill=False,
                             edgecolor='black', linestyle='--', linewidth=2))
+                    ax.set_xlim(*_plot_range[nofix_name[j]])
+                    ax.set_ylim(*_plot_range[nofix_name[i]])
                     if i == nnofix - 1:
                         ax.set_xlabel(nofix_latex[j], fontsize=size)
                     else:
