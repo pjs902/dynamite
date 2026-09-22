@@ -1441,10 +1441,17 @@ class BayesOptGenerator(ParameterGenerator):
         self.tr_min_side = float(gen.get("tr_min_side", 0.05))
         self.tr_max_side = float(gen.get("tr_max_side", 0.6))
         self.tr_patience = int(gen.get("tr_patience", 2))
+        # Full-TuRBO per-axis ARD rescaling of the trust region (Eriksson+
+        # 2019), on by default -- see _tr_bounds/_ard_half_widths.
+        self.tr_ard_scaling = bool(gen.get("tr_ard_scaling", True))
         self._tr_side = self.tr_side_init
         self._tr_center = None
         self._tr_stale_batches = 0
         self._tr_best_seen = None
+        # Replayed once, lazily, from all_models.ecsv on the first
+        # specific_generate_method() call (current_models isn't available
+        # yet in __init__) -- see _replay_tr_state.
+        self._tr_state_replayed = False
         self.warmup_mode = gen.get("warmup_mode", "sobol")
         if self.warmup_mode not in ("sobol", "initial_guess"):
             raise ValueError(
@@ -1875,6 +1882,9 @@ class BayesOptGenerator(ParameterGenerator):
             then GP.
         """
         table = self.current_models.table
+        if self.trust_region and not self._tr_state_replayed:
+            self._replay_tr_state(table)
+            self._tr_state_replayed = True
         self._score_new_predictions(table)
         if len(table) == 0:
             n_valid = 0
@@ -2258,24 +2268,94 @@ class BayesOptGenerator(ParameterGenerator):
                     self._tr_stale_batches = 0
         self._tr_best_seen = best
 
+    def _ard_half_widths(self, half_iso):
+        """Per-axis trust-region half-widths.
+
+        DONE (2026-09-22): full-TuRBO per-axis ARD rescaling (Eriksson et al.
+        2019), gated by `tr_ard_scaling` (default True). Side_i is set
+        proportional to the fitted GP's ARD lengthscale_i, normalized so the
+        geometric mean of the per-axis FULL widths equals the isotropic
+        `_tr_side` -- this keeps total box "volume" (in the log-width sense)
+        matched to what `tr_grow`/`tr_shrink`/`tr_min_side`/`tr_max_side`
+        were tuned against, so those knobs stay meaningful, and clamps each
+        axis to [tr_min_side, tr_max_side]. `self._gp_model` is already the
+        GP fit earlier in this same `_gp_acquisition_batch` call (fit-then-
+        bounds ordering already holds in the caller), so no stale-model
+        reuse is needed.
+
+        Falls back to the isotropic half-width (old behaviour) if scaling is
+        off, no GP has been fit yet (first TR-triggering batch), or the
+        kernel doesn't expose per-axis lengthscales (e.g. non-ARD kernel).
+        """
+        d = len(self.free_par_idx)
+        if not self.tr_ard_scaling or self._gp_model is None:
+            return np.full(d, half_iso)
+        try:
+            k = self._gp_model.covar_module
+            k = getattr(k, "base_kernel", k)
+            ls = k.lengthscale.detach().numpy().ravel()
+            if ls.shape[0] != d or not np.all(np.isfinite(ls)) or np.any(ls <= 0):
+                return np.full(d, half_iso)
+        except Exception:  # noqa: BLE001 - unexpected kernel shape -> isotropic
+            return np.full(d, half_iso)
+        gmean_ls = np.exp(np.mean(np.log(ls)))
+        side = (2.0 * half_iso) * (ls / gmean_ls)
+        side = np.clip(side, self.tr_min_side, self.tr_max_side)
+        return side / 2.0
+
+    def _replay_tr_state(self, table):
+        """Recompute TR side/stale-count/best-seen as if the generator had
+        run continuously, by replaying the trigger check + `_maybe_update_tr`
+        over each historical `which_iter` boundary.
+
+        DONE (2026-09-22): TR adaptation state (`_tr_side`, `_tr_stale_batches`,
+        `_tr_best_seen`, `_tr_center`) previously lived only in this object's
+        memory. `BayesOptGenerator` is reconstructed fresh on every resume
+        (see `ModelIterator`/`Configuration`), so `_tr_side` silently reset to
+        `tr_side_init` on every restart -- on the sBH_GP_grid_v2 production
+        run (6 restarts) the shrink schedule effectively never ran (side
+        stayed ~0.3 for 4/5 TR-active batches instead of shrinking after
+        repeated stale batches).
+
+        ponytail: derives state from `all_models.ecsv` at the first
+        `specific_generate_method()` call instead of persisting a state file
+        to disk. Exact as long as generator batches align 1:1 with
+        `which_iter` (true for every driver in this codebase -- `generate()`
+        increments `which_iter` once per call); if a future driver ever
+        calls `specific_generate_method` more than once per `which_iter`,
+        this replay would under-count batches. Add an explicit persisted
+        state file then; not needed now.
+        """
+        if len(table) == 0:
+            return
+        iters = sorted(set(np.asarray(table["which_iter"], dtype=int)))
+        for it in iters:
+            hist = table[np.asarray(table["which_iter"], dtype=int) < it]
+            if len(hist) < 10:
+                continue
+            X_norm, y_train, _, _, _ = extract_gp_training_data(
+                hist, self.par_space, which_chi2=self.chi2
+            )
+            if self._knn_radius(X_norm, y_train) > self.tr_trigger_frac:
+                continue
+            self._maybe_update_tr(hist)
+            self._tr_center = self._best_known_unit(hist)
+        if iters:
+            self.logger.info(
+                f"trust region state replayed from {len(table)} historical "
+                f"row(s) across {len(iters)} iteration(s): side={self._tr_side:.3f}, "
+                f"stale_batches={self._tr_stale_batches}"
+            )
+
     def _tr_bounds(self):
         """Unit-space acquisition box: trust region if active+triggered,
         else None (full box).
 
-        TODO(2026-09-01, higher-dimensional runs): this trust region is
-        ISOTROPIC -- one side length applied identically to every free
-        dimension. That is TuRBO-lite's deliberate simplification versus
-        full TuRBO (Eriksson et al. 2019), which rescales the box per axis
-        using the GP's ARD length scales, so a fast-varying dimension gets
-        a tight box while a slow-varying one gets a wide box. At 3 free
-        params (this system's viewing_grid) the simplification is fine; if
-        this ever runs with ~10 free params (some discussed for a future
-        NGC5139 grid), an isotropic box is very likely wrong for at least
-        some dimensions by construction, since not all 10 will have
-        comparable sensitivity. Revisit ARD-based per-axis scaling before
-        trusting trust_region: true at that dimensionality.
+        DONE (2026-09-22): per-axis ARD-scaled widths, see
+        `_ard_half_widths` (gated by `tr_ard_scaling`, default on). DONE:
+        TR state now survives resumes, see `_replay_tr_state`.
 
-        Also: `tr_trigger_frac=0.1` in `_knn_radius` below was tuned/
+        STILL OPEN: `tr_trigger_frac=0.1` in `_knn_radius` below was tuned/
         eyeballed at low D. Nearest-neighbour distances in a unit cube
         concentrate as dimension count grows (a standard curse-of-
         dimensionality effect), so this same threshold may trigger at the
@@ -2297,7 +2377,7 @@ class BayesOptGenerator(ParameterGenerator):
         if center is None:
             return None
         self._tr_center = center
-        half = self._tr_side / 2.0
+        half = self._ard_half_widths(self._tr_side / 2.0)
         lo = np.clip(center - half, 0.0, 1.0)
         hi = np.clip(center + half, 0.0, 1.0)
         return np.stack([lo, hi])
