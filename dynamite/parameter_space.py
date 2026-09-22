@@ -2134,6 +2134,15 @@ class BayesOptGenerator(ParameterGenerator):
         self._gp_model = model
 
         d = len(self.free_par_idx)
+        # Advance the trust region ONCE per batch, here -- not inside
+        # _tr_bounds, which is also called by the plotter (see
+        # plotter.make_gp_iteration_plot / model_iterator's per-iteration
+        # diagnostic, which hands it the LIVE generator). While the update
+        # lived in _tr_bounds, every diagnostic plot applied a second
+        # grow/shrink and a second _tr_stale_batches increment, so the box
+        # shrank at twice the intended rate and tr_patience effectively
+        # halved. _tr_bounds is now a pure function of (_tr_side, table).
+        self._advance_tr_state()
         tr = self._tr_bounds()
         if tr is not None:
             self.logger.info(
@@ -2295,6 +2304,30 @@ class BayesOptGenerator(ParameterGenerator):
                     self._tr_stale_batches = 0
         self._tr_best_seen = best
 
+    def _advance_tr_state(self):
+        """Grow/shrink the trust region and re-centre it, once per batch.
+
+        Split out of `_tr_bounds` so that computing the box has no side
+        effects: `_tr_bounds` is called both by the acquisition and by the
+        GP diagnostic plot, and only the acquisition may advance the state.
+        Gated by the same trigger conditions as `_tr_bounds`, so the two
+        stay in step.
+        """
+        if not self.trust_region:
+            return
+        table = self.current_models.table
+        X_norm, y_train, _, _, _ = extract_gp_training_data(
+            table, self.par_space, which_chi2=self.chi2
+        )
+        if X_norm.shape[0] < 10:
+            return
+        if self._knn_radius(X_norm, y_train) > self.tr_trigger_frac:
+            return
+        self._maybe_update_tr(table)
+        center = self._best_known_unit(table)
+        if center is not None:
+            self._tr_center = center
+
     def _ard_half_widths(self, half_iso):
         """Per-axis trust-region half-widths.
 
@@ -2366,7 +2399,8 @@ class BayesOptGenerator(ParameterGenerator):
             if self._knn_radius(X_norm, y_train) > self.tr_trigger_frac:
                 continue
             self._maybe_update_tr(hist)
-            self._tr_center = self._best_known_unit(hist)
+            self._tr_center = self._best_known_unit(hist)  # one update per batch,
+            # matching _advance_tr_state's once-per-acquisition contract
         if iters:
             self.logger.info(
                 f"trust region state replayed from {len(table)} historical "
@@ -2399,11 +2433,9 @@ class BayesOptGenerator(ParameterGenerator):
             return None
         if self._knn_radius(X_norm, y_train) > self.tr_trigger_frac:
             return None
-        self._maybe_update_tr(table)
         center = self._best_known_unit(table)
         if center is None:
             return None
-        self._tr_center = center
         half = self._ard_half_widths(self._tr_side / 2.0)
         lo = np.clip(center - half, 0.0, 1.0)
         hi = np.clip(center + half, 0.0, 1.0)

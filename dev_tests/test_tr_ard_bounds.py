@@ -155,6 +155,49 @@ def test_replay_state_reproduces_shrink_after_stale_batches():
     print(f"  test_replay_state_reproduces_shrink_after_stale_batches PASSED (side={gen._tr_side:.4f})")
 
 
+def test_tr_bounds_is_side_effect_free():
+    """Computing the box must not advance the trust region.
+
+    model_iterator hands the LIVE generator to
+    plotter.make_gp_iteration_plot after every iteration, and that plot
+    calls _tr_bounds() to draw the TR rectangle. While _maybe_update_tr
+    lived inside _tr_bounds, each diagnostic plot applied a second
+    grow/shrink and a second _tr_stale_batches increment, so the box
+    shrank at twice the intended rate and tr_patience halved.
+    """
+    a = _mk_param("a", 0.0, 1.0, 0.5)
+    ps_ = make_parspace([a])
+    s = _bo_settings()
+    s["generator_settings"].update({"trust_region": True, "tr_trigger_frac": 1.0,
+                                    "tr_side_init": 0.3, "tr_patience": 1,
+                                    "tr_grow": 1.3, "tr_shrink": 0.7,
+                                    "tr_min_side": 0.05, "tr_max_side": 0.6})
+    gen = ps.BayesOptGenerator(par_space=ps_, parspace_settings=s)
+    am = MockAllModels(["a"])
+    for i in range(12):
+        _add_row(am.table, 0.5 + 0.001 * i, 1.0 + 0.01 * i, it=0)
+    gen.current_models = am
+
+    gen._advance_tr_state()          # one legitimate batch update
+    side_after_batch = gen._tr_side
+    stale_after_batch = gen._tr_stale_batches
+
+    for _ in range(5):               # five diagnostic plots
+        gen._tr_bounds()
+    assert gen._tr_side == side_after_batch, (
+        f"_tr_bounds moved _tr_side {side_after_batch} -> {gen._tr_side}")
+    assert gen._tr_stale_batches == stale_after_batch, (
+        "_tr_bounds moved the stale counter")
+
+    # and the advancing call still does advance it
+    gen._advance_tr_state()
+    assert (gen._tr_side != side_after_batch
+            or gen._tr_stale_batches != stale_after_batch), (
+        "_advance_tr_state must still update the trust region")
+    print("  test_tr_bounds_is_side_effect_free PASSED "
+          f"(side stable at {side_after_batch:.4f} across 5 plot calls)")
+
+
 if __name__ == "__main__":
     test_ard_tighter_along_short_lengthscale()
     test_ard_geomean_matches_isotropic_side()
@@ -162,4 +205,5 @@ if __name__ == "__main__":
     test_ard_disabled_falls_back_isotropic()
     test_ard_no_gp_yet_falls_back_isotropic()
     test_replay_state_reproduces_shrink_after_stale_batches()
+    test_tr_bounds_is_side_effect_free()
     print("ALL TESTS PASSED")
