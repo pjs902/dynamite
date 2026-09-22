@@ -1383,7 +1383,7 @@ class BayesOptGenerator(ParameterGenerator):
         n_orblib_configs : int = 4
         n_ml_per_config : int = 2
         n_initial_random : int = 10
-        acquisition_type : str = 'qLogEI'
+        acquisition_type : str = 'qLogEI'   # or 'qLogNEI' for noisy observations
         max_gp_variance_threshold : float = 1.0
         min_ei_threshold : float = -1.5
 
@@ -1404,7 +1404,21 @@ class BayesOptGenerator(ParameterGenerator):
         self.n_orblib_configs = gen.get("n_orblib_configs", 4)
         self.n_ml_per_config = gen.get("n_ml_per_config", 2)
         self.n_initial_random = gen.get("n_initial_random", 10)
+        # qLogEI  : standard log-EI against best_f = the best OBSERVED chi2.
+        # qLogNEI : log-EI marginalized over observation noise, no best_f.
+        # Use qLogNEI whenever chi2 evaluations are noisy: standard EI takes
+        # the raw incumbent as the target to beat, so a single downward noise
+        # fluctuation sets a target that does not exist and EI collapses to
+        # ~0 everywhere (observed on sBH_GP_grid_v2: qLogEI flat at ~e^-64
+        # across the whole trust region for six consecutive batches, while
+        # the GP's own fitted noise was sigma ~ 4400 against a 15,095 gap
+        # between the incumbent and the runner-up).
         self.acquisition_type = gen.get("acquisition_type", "qLogEI")
+        if self.acquisition_type not in ("qLogEI", "qLogNEI"):
+            raise ValueError(
+                "BayesOptGenerator: acquisition_type must be 'qLogEI' or "
+                f"'qLogNEI', got {self.acquisition_type!r}"
+            )
         self.max_gp_variance_threshold = gen.get("max_gp_variance_threshold", 1.0)
         self.min_ei_threshold = gen.get("min_ei_threshold", -1.5)
         # R1: dimension-scaled exploration schedule (GPry zeta-analogue).
@@ -2099,7 +2113,10 @@ class BayesOptGenerator(ParameterGenerator):
     def _gp_acquisition_batch(self):
         """Fit a GP and maximize qLogEI to produce a batch of models."""
         import torch
-        from botorch.acquisition import qLogExpectedImprovement
+        from botorch.acquisition import (
+            qLogExpectedImprovement,
+            qLogNoisyExpectedImprovement,
+        )
         from botorch.optim import optimize_acqf
 
         table = self.current_models.table
@@ -2128,11 +2145,21 @@ class BayesOptGenerator(ParameterGenerator):
                 [torch.zeros(d, dtype=torch.double), torch.ones(d, dtype=torch.double)]
             )
         eta = self._exploration_eta(self._gp_batches_done)
-        acqf = (
-            qLogExpectedImprovement(model=model, best_f=Y_t.max())
-            if eta is None
-            else qLogExpectedImprovement(model=model, best_f=Y_t.max(), eta=eta)
-        )
+        kw = {} if eta is None else {"eta": eta}
+        if self.acquisition_type == "qLogNEI":
+            # No best_f: improvement is measured against the GP posterior AT
+            # the evaluated points, so noise in any single observation cannot
+            # set an unreachable target. prune_baseline drops baseline points
+            # that cannot plausibly be the incumbent, which keeps the cost
+            # down as the table grows.
+            acqf = qLogNoisyExpectedImprovement(
+                model=model,
+                X_baseline=torch.tensor(X_norm, dtype=torch.double),
+                prune_baseline=True,
+                **kw,
+            )
+        else:
+            acqf = qLogExpectedImprovement(model=model, best_f=Y_t.max(), **kw)
 
         nonlinear, linear = self._make_triaxiality_constraints()
         # TODO(2026-09-01, higher-dimensional runs): num_restarts=10,
