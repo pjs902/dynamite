@@ -1,3 +1,5 @@
+import faulthandler
+import functools
 import os
 import copy
 import json
@@ -1183,6 +1185,44 @@ class LegacyWeightSolver(WeightSolver):
         for i in range(0, len(rows)):
             output.append(lines[rows[i] - 1][cols[i] - 1])
         return output
+
+
+def _solve_watchdog(func):
+    """faulthandler watchdog for weight solves (diagnostic only).
+
+    Arms an 8h delayed traceback dump to a per-PID file under
+    ``<output>/faultlogs/``; the worst legit solve (Gram assembly +
+    ADMM) runs ~2.5h, so a firing timer means a genuine hang, and a
+    segfault dumps immediately with no timer involved. Removed on
+    clean return, so only non-empty files (real events) remain.
+    Zero effect on numerics. The output path is anchored on the config
+    file location so it is immune to worker cwd changes.
+    """
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        outdir = self.config.settings.io_settings["output_directory"]
+        if not os.path.isabs(outdir):
+            base = os.path.dirname(
+                os.path.abspath(self.config.config_file_name))
+            outdir = os.path.join(base, outdir)
+        os.makedirs(outdir + "/faultlogs", exist_ok=True)
+        fpath = outdir + f"/faultlogs/worker_{os.getpid()}.log"
+        fh = open(fpath, "w")
+        fh.write(f"watchdog armed {time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                 f"model={getattr(self, 'direc_with_ml', '?')}\n")
+        fh.flush()
+        faulthandler.dump_traceback_later(8 * 3600, file=fh)
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+            fh.close()
+            try:
+                if os.path.getsize(fpath) == 0:
+                    os.remove(fpath)
+            except OSError:
+                pass  # watchdog file removed externally; nothing to clean
+    return wrapper
 
 
 class NNLS(WeightSolver):
@@ -2712,6 +2752,7 @@ class NNLS(WeightSolver):
             )
         return best_w, resid_full
 
+    @_solve_watchdog
     def solve(self, orblib, ignore_existing_weights=False):
         """Solve for orbit weights
 

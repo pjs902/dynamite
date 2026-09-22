@@ -215,12 +215,25 @@ class AllModels(object):
             if not (row['orblib_done'] or row['weights_done']):
                 self.logger.debug(f'Row {i}: neither orblibs nor weights were '
                                   f'completed for model in {mod.directory}.')
-        # collect failed models to delete (both their directory and table entry)
+        # Collect failed models to delete (both their directory and table
+        # entry). DELETION IS DISABLED for anything the pipeline still owns:
+        # - latest-iteration rows (done, actively building without a marker
+        #   yet, or awaiting reattempt) -- deleting these destroyed 11
+        #   in-flight models + their orblibs on a resume (sBH_GP_grid,
+        #   Sep-16), and the same path ate earlier batches across restarts.
+        # - rows with assigned directories -- run_iteration rebuilds them
+        #   (see stranded-row resurrection there); deleting the directory
+        #   only orphans work, deleting the row loses the parameters.
+        # To retire a model, remove its TABLE ROW; deleting only the
+        # directory triggers a rebuild.
         to_delete = []
+        latest_iter = max(self.table['which_iter']) if len(self.table) else None
         # if we will reattempt weight solving, only delete models with no orblib
         if self.config.settings.weight_solver_settings['reattempt_failures']:
             for i, row in enumerate(self.table):
-                if (not row['orblib_done']) and (not row['all_done']):
+                if (not row['orblib_done']) and (not row['all_done']) \
+                        and row['which_iter'] != latest_iter \
+                        and row['directory'] == '':
                     to_delete.append(i)
                     self.logger.info('No orblibs calculated for model in '
                                      f'{row["directory"]} - removing row {i}.')
@@ -228,7 +241,9 @@ class AllModels(object):
         # or - if an Chi2Ext component exists - has chi2_ext == nan
         else:
             for i, row in enumerate(self.table):
-                if not row['all_done']:
+                if not row['all_done'] \
+                        and row['which_iter'] != latest_iter \
+                        and row['directory'] == '':
                     to_delete.append(i)
                     self.logger.info('No finished model found in '
                                      f'{row["directory"]} - removing row {i}.')

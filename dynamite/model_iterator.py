@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 
 from dynamite import parameter_space
 from dynamite import weight_solvers as ws
+from dynamite import constants as dyn_constants
 from dynamite import plotter
 
 
@@ -401,6 +402,23 @@ class ModelIterator(object):
         return mod.chi2, mod.kinchi2, mod.kinmapchi2, mod.chi2_ext, time
 
 
+def _is_stranded_row(table, idx):
+    """Whether a table row is stranded: directory assigned, but the orblib
+    was never completed (no ``tube_box_done`` marker) and no weights file
+    exists, and the row is not done. Empty-directory rows (normal new
+    models) and completed rows are never stranded. Paths resolve against
+    the caller's cwd (the grid directory), mirroring run_iteration.
+    """
+    row = table[idx]
+    if row['directory'] == '' or row['all_done']:
+        return False
+    d = row['directory']
+    noml = d[:d[:-1].rindex('/') + 1]
+    marker = os.path.isfile(noml + 'datfil/tube_box_done')
+    wfile = os.path.isfile(d + dyn_constants.weight_file)
+    return (not marker) and (not wfile)
+
+
 class ModelInnerIterator(object):
     """Class to run all models in a single iteration.
 
@@ -542,6 +560,21 @@ class ModelInnerIterator(object):
         self.par_generator.generate(current_models=self.all_models)
         self.all_models.save() # save all_models table once parameters are added
         if not self.par_generator.status['stop']:
+            # Resurrect stranded rows (see _is_stranded_row): clearing the
+            # directory re-enters them into the normal new-model flow
+            # (fresh dirs, full rebuild; stale chunks are ignored by
+            # tag-scoped merging, the claim lock retakes builds, the
+            # parset-hash guard validates any reuse).
+            n_resurrected = 0
+            for i in range(len(self.all_models.table)):
+                if _is_stranded_row(self.all_models.table, i):
+                    self.all_models.table[i]['directory'] = ''
+                    n_resurrected += 1
+            if n_resurrected:
+                self.logger.info(
+                    f'Resurrecting {n_resurrected} stranded model(s) for '
+                    'rebuild.')
+                self.all_models.save()
             # find new models which are those with an empty directory string
             # and always correspond to either iteration 0+1 or
             # the current iteration if iteration > 1

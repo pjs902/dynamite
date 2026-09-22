@@ -448,11 +448,25 @@ class Plotter():
                                 _M[:, None, :],
                                 dtype=_torch2.double)).numpy().ravel()
                         _lo, _hi = float(_lo_raw[_k]), float(_hi_raw[_k])
+                        # Restrict the slice to the data span (training +
+                        # latest proposals), matching the off-diagonal
+                        # boxes' auto-scaled range; EI beyond it is ~flat
+                        # and only stretches the axis misleadingly.
+                        _data = _Xa[:, _k] * (_hi - _lo) + _lo
+                        for _r in latest:
+                            _data = np.append(_data, float(_r[nofix_name[j]]))
+                        if _islog:
+                            _data = np.log10(_data)  # plot space for log params
+                        _dlo, _dhi = float(_data.min()), float(_data.max())
+                        _pad = 0.05 * (_dhi - _dlo)
+                        _dlo, _dhi = _dlo - _pad, _dhi + _pad
                         _xx = _g * (_hi - _lo) + _lo
                         if _islog:
                             _xx = np.log10(_xx)
-                        ax.plot(_xx, _ei, color='darkorange', linewidth=2)
-                        _tr = _Xa[:, _k] * (_hi - _lo) + _lo
+                        _in = (_xx >= _dlo) & (_xx <= _dhi)
+                        ax.plot(_xx, _ei[_in], color='darkorange',
+                                linewidth=2)
+                        _tr = _data
                         if _islog:
                             _tr = np.log10(_tr)
                         ax.plot(_tr, np.zeros_like(_tr), '|', color='gray',
@@ -468,6 +482,14 @@ class Plotter():
                         ax.plot(_v, _ymax * 0.95, 'o', markersize=10,
                                 color='dodgerblue', markeredgecolor='white',
                                 markeredgewidth=1.5)
+                    # Clamp the axis to the data span, matching the
+                    # off-diagonal boxes (auto-scaled to training +
+                    # proposals), instead of the full prior bounds.
+                    if _gp_ok:
+                        _dlo2 = float(_data.min())
+                        _dhi2 = float(_data.max())
+                        _pad2 = 0.05 * (_dhi2 - _dlo2)
+                        ax.set_xlim(_dlo2 - _pad2, _dhi2 + _pad2)
                     ax.set_xlabel(nofix_latex[j], fontsize=size)
                     if j == 0:
                         ax.set_ylabel('LogEI|best', fontsize=size)
