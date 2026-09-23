@@ -797,19 +797,21 @@ class ModelInnerIterator(object):
             msg = 'get_chi2_ext cannot be used with get_orblib or get_weights.'
             self.logger.error(msg)
             raise ValueError(msg)
-        # Post-fork BLAS threads: the driver stays OMP=1 so fork() never
-        # inherits live threads; each worker raises its own limit here
-        # (fresh threads owned by this process) for compute-heavy phases
-        # (dsyrk in Gram assembly, ADMM). Env override, default 8.
-        try:
-            from threadpoolctl import threadpool_limits
-            # Default 1 (single-threaded): 8-thread OpenBLAS dsyrk
-            # segfaulted production workers 2026-09-16 (see V2_CHANGES).
-            # Raise ONLY deliberately per experiment, never by default.
-            _blas_threads = int(os.environ.get("DYNAMITE_BLAS_THREADS", "1"))
-            threadpool_limits(limits=_blas_threads)
-        except Exception:  # noqa: BLE001 - threadpoolctl missing: stay single-threaded
-            pass
+        # Default 1: leave BLAS threads alone. Do NOT raise above 1 with
+        # scipy's bundled OpenBLAS: its wheels use BUFFERSIZE=20 (32 MiB),
+        # and threaded dsyrk packs (Q+min_l)*div_n doubles into it with no
+        # bounds check, overrunning at omega Cen sizes (n=45000). Result:
+        # silently wrong Gram matrices, or a segfault once the overrun leaves
+        # the (contiguous) per-thread buffers - the 2026-09-16 crashes. See
+        # PM_grid/HANDOFF_2026-09-23_blas_threading.md. Also, threadpoolctl's
+        # post-fork scan can SIGABRT a child if the parent (botorch) used it.
+        _blas_threads = int(os.environ.get("DYNAMITE_BLAS_THREADS", "1"))
+        if _blas_threads != 1:
+            try:
+                from threadpoolctl import threadpool_limits
+                threadpool_limits(limits=_blas_threads)
+            except ImportError:  # threadpoolctl missing: stay single-threaded
+                pass
         mod = self.all_models.get_model_from_row(row)
         msg = 'get_orblib' if get_orblib else ''
         msg += ' get_weights' if get_weights else ''
