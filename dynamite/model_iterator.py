@@ -163,6 +163,37 @@ def pool_map(pool, func, iterable, logger=None, poll=10.0, manager=None,
             manager.shutdown()
 
 
+def check_blas_threading(logger):
+    """Log the BLAS setup; refuse multi-threaded OpenBLAS.
+
+    OpenBLAS as bundled in pip scipy/numpy wheels is built with
+    BUFFERSIZE=20 (32 MiB per thread); threaded ?syrk packs past it with no
+    bounds check at omega Cen sizes (n~45000), giving silently wrong Gram
+    matrices or segfaults (2026-09-16 crashes). Multi-threaded runs need an
+    MKL-backed numpy/scipy (e.g. ENV_mkl, MKL_NUM_THREADS=8). See
+    PM_grid/BLAS_THREADING_FINDINGS_2026-09-23.md.
+    """
+    try:
+        import scipy.linalg  # noqa: F401 - loads scipy's BLAS so it is listed
+        from threadpoolctl import threadpool_info
+    except ImportError:
+        return
+    for lib in threadpool_info():
+        if lib['user_api'] != 'blas':
+            continue
+        logger.info(f"BLAS: {lib['internal_api']} {lib.get('version')}, "
+                    f"{lib['num_threads']} threads "
+                    f"({os.path.basename(lib['filepath'])})")
+        if lib['internal_api'] == 'openblas' and lib['num_threads'] > 1:
+            msg = (f"Multi-threaded OpenBLAS ({lib['filepath']}, "
+                   f"{lib['num_threads']} threads) gives wrong results or "
+                   "segfaults at production sizes. Use an MKL-backed env "
+                   "with MKL_NUM_THREADS, or set OPENBLAS_NUM_THREADS=1. "
+                   "See PM_grid/BLAS_THREADING_FINDINGS_2026-09-23.md.")
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+
 class ModelIterator(object):
     """Iterator for models
 
@@ -199,6 +230,7 @@ class ModelIterator(object):
             self.logger.error(text)
             raise ValueError(text)
         self.config = config
+        check_blas_threading(self.logger)
         parameter_space_settings = config.settings.parameter_space_settings
         stopping_crit = parameter_space_settings['stopping_criteria']
         # get specified parameter generator
@@ -797,21 +829,9 @@ class ModelInnerIterator(object):
             msg = 'get_chi2_ext cannot be used with get_orblib or get_weights.'
             self.logger.error(msg)
             raise ValueError(msg)
-        # Default 1: leave BLAS threads alone. Do NOT raise above 1 with
-        # scipy's bundled OpenBLAS: its wheels use BUFFERSIZE=20 (32 MiB),
-        # and threaded dsyrk packs (Q+min_l)*div_n doubles into it with no
-        # bounds check, overrunning at omega Cen sizes (n=45000). Result:
-        # silently wrong Gram matrices, or a segfault once the overrun leaves
-        # the (contiguous) per-thread buffers - the 2026-09-16 crashes. See
-        # PM_grid/HANDOFF_2026-09-23_blas_threading.md. Also, threadpoolctl's
-        # post-fork scan can SIGABRT a child if the parent (botorch) used it.
-        _blas_threads = int(os.environ.get("DYNAMITE_BLAS_THREADS", "1"))
-        if _blas_threads != 1:
-            try:
-                from threadpoolctl import threadpool_limits
-                threadpool_limits(limits=_blas_threads)
-            except ImportError:  # threadpoolctl missing: stay single-threaded
-                pass
+        # BLAS threads are set once at launch (MKL_NUM_THREADS) and inherited;
+        # workers do not touch threadpoolctl (its post-fork scan can SIGABRT a
+        # child once the parent, e.g. botorch, has used it).
         mod = self.all_models.get_model_from_row(row)
         msg = 'get_orblib' if get_orblib else ''
         msg += ' get_weights' if get_weights else ''
