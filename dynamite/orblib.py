@@ -1985,6 +1985,32 @@ class LegacyOrbitLibrary(OrbitLibrary):
         except OSError:
             pass
 
+    def _qgrid_cache_load(self, fname, norb):
+        """Return cached (orbtypes, density_3D) for the qgrid file ``fname``
+        (relative to the model dir, cwd) if a valid ``fname + '.dens.npz'``
+        exists, else None. Validated on norb and source file size."""
+        try:
+            z = np.load(fname + ".dens.npz")
+            if (int(z["norb"]) == norb
+                    and int(z["fsize"]) == os.path.getsize(fname)):
+                return z["orbtypes"], z["density_3D"]
+        except (OSError, KeyError, ValueError):
+            pass
+        return None
+
+    def _qgrid_cache_save(self, fname, norb, orbtypes, density_3D):
+        """Persist (orbtypes, density_3D) to ``fname + '.dens.npz'`` (written
+        to a temp name then renamed, so concurrent readers never see a
+        partial file). Best-effort."""
+        path = self.mod_dir + fname + ".dens.npz"
+        tmp = f"{path}.{os.getpid()}.tmp.npz"
+        try:
+            np.savez(tmp, norb=norb, fsize=os.path.getsize(self.mod_dir + fname),
+                     orbtypes=orbtypes, density_3D=density_3D)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
     def _read_individual_orbit(self, fort_file, quad_light_grid_sizes):
         """Read individual orbit parameters from file
 
@@ -2121,51 +2147,63 @@ class LegacyOrbitLibrary(OrbitLibrary):
             else:
                 orblib_file = f"datfil/{fileroot}_qgrid.dat.bz2"
                 tmpfname = f"datfil/{fileroot}_qgrid_{ml}.dat"
-            # unzip orblib to a temporary file with ml value attached
-            # ml value is needed to prevent different processes clashing
-            self._decompress(orblib_file, tmpfname)
-            # read the fortran file
-            orblib_in = FortranFile(tmpfname, "r")
-            # read size of orbit library
-            # from integrator_setup_write, lines 506 - 5129:
-            norb_read, _, _, _, ndith = orblib_in.read_ints(np.int32)
-            if norb_read != norb:
-                error_msg = f"Number of orbits in {self.mod_dir}{orblib_file} is {norb_read}, but expected {norb}."
-                self.logger.error(error_msg)
-                orblib_in.close()
-                os.remove(tmpfname)
+            # density/orbtypes depend only on the (ml-independent) qgrid
+            # file; a cached copy skips the multi-GB decompression
+            cached = None
+            if not legacy_file and not return_intrinsic_moments:
+                cached = self._qgrid_cache_load(orblib_file, norb)
+            if cached is not None:
+                orbtypes, density_3D = cached
                 os.chdir(cur_dir)
-                raise ValueError(error_msg)
-            # from qgrid_setup_write, lines 2339-1350:
-            quad_light_grid_sizes = orblib_in.read_ints(np.int32)
-            size_ql, size_qph, size_qth, size_qlr = quad_light_grid_sizes
-            quad_lr = orblib_in.read_reals(float)
-            quad_lth = orblib_in.read_reals(float)
-            quad_lph = orblib_in.read_reals(float)
-            if return_intrinsic_moments:
-                intrinsic_moms = np.zeros((norb, size_qlr, size_qth, size_qph, 16))
-                intrinsic_grid = [quad_lr, quad_lth, quad_lph]
-            orbtypes = np.zeros((norb, ndith**3), dtype=int)
-            density_3D = np.zeros((norb, size_qlr, size_qth, size_qph))
-
-            if not legacy_file:  # finish reading orblib_qgrid.dat.bz2
+            else:
+                # unzip orblib to a temporary file with ml value attached
+                # ml value is needed to prevent different processes clashing
+                self._decompress(orblib_file, tmpfname)
+                # read the fortran file
+                orblib_in = FortranFile(tmpfname, "r")
+                # read size of orbit library
+                # from integrator_setup_write, lines 506 - 5129:
+                norb_read, _, _, _, ndith = orblib_in.read_ints(np.int32)
+                if norb_read != norb:
+                    error_msg = f"Number of orbits in {self.mod_dir}{orblib_file} is {norb_read}, but expected {norb}."
+                    self.logger.error(error_msg)
+                    orblib_in.close()
+                    os.remove(tmpfname)
+                    os.chdir(cur_dir)
+                    raise ValueError(error_msg)
+                # from qgrid_setup_write, lines 2339-1350:
+                quad_light_grid_sizes = orblib_in.read_ints(np.int32)
+                size_ql, size_qph, size_qth, size_qlr = quad_light_grid_sizes
+                quad_lr = orblib_in.read_reals(float)
+                quad_lth = orblib_in.read_reals(float)
+                quad_lph = orblib_in.read_reals(float)
                 if return_intrinsic_moments:
-                    for j in range(norb):
-                        _, _, intrinsic_moms[j] = self._read_individual_orbit(
-                            orblib_in, quad_light_grid_sizes
-                        )
-                else:
-                    for j in range(norb):
-                        orbtypes[j, :], density_3D[j], _ = self._read_individual_orbit(
-                            orblib_in, quad_light_grid_sizes
-                        )
-                # done with orblib_qgrid.dat.bz2
-                orblib_in.close()
-                # remove temporary file
-                os.remove(tmpfname)
-                os.chdir(cur_dir)
-                if return_intrinsic_moments:  # in that case, we are done
-                    return intrinsic_moms, intrinsic_grid  ####################
+                    intrinsic_moms = np.zeros((norb, size_qlr, size_qth, size_qph, 16))
+                    intrinsic_grid = [quad_lr, quad_lth, quad_lph]
+                orbtypes = np.zeros((norb, ndith**3), dtype=int)
+                density_3D = np.zeros((norb, size_qlr, size_qth, size_qph))
+
+                if not legacy_file:  # finish reading orblib_qgrid.dat.bz2
+                    if return_intrinsic_moments:
+                        for j in range(norb):
+                            _, _, intrinsic_moms[j] = self._read_individual_orbit(
+                                orblib_in, quad_light_grid_sizes
+                            )
+                    else:
+                        for j in range(norb):
+                            orbtypes[j, :], density_3D[j], _ = self._read_individual_orbit(
+                                orblib_in, quad_light_grid_sizes
+                            )
+                    # done with orblib_qgrid.dat.bz2
+                    orblib_in.close()
+                    # remove temporary file
+                    os.remove(tmpfname)
+                    if not return_intrinsic_moments:
+                        self._qgrid_cache_save(orblib_file, norb, orbtypes,
+                                               density_3D)
+                    os.chdir(cur_dir)
+                    if return_intrinsic_moments:  # in that case, we are done
+                        return intrinsic_moms, intrinsic_grid  ####################
         else:
             density_3D = None
             tmpfname = f"datfil/{fileroot}_qgrid_skipped_{ml}.dat"
