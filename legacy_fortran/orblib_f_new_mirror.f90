@@ -1009,6 +1009,7 @@ contains
         integer(kind=i4b), intent(in)                          :: type, n
         !----------------------------------------------------------------------
         real(kind=dp)                          :: t1, t2, t3, theta, phi
+        real(kind=dp), dimension(size(pos, 1)) :: pmx, pmy
 
         real (kind=dp),dimension(3,8,5) ::vsgn          ! (BT)
         real (kind=dp),dimension(3,8) ::psgn            ! (BT)
@@ -1106,6 +1107,15 @@ contains
         t2 = -cos(theta)*sin(phi)*vsgn(2, n, type)
         t3 = sin(theta)*vsgn(3, n, type)
         vel2d(:, 2) = t1*vel(:, 1) + t2*vel(:, 2) + t3*vel(:, 3)
+
+        ! Rotate the PMs by pi/2 - psi_proj, the same sky-plane rotation the
+        ! positions get in aperture_boxed_find (minus the aperture's own
+        ! ap_box_rot, which the data prep applies to the observed PMs).
+        ! Without this, model PMs are misrotated by psi-90 w.r.t. positions.
+        pmx = vel2d(:, 1)
+        pmy = vel2d(:, 2)
+        vel2d(:, 1) = sin(psi_proj)*pmx - cos(psi_proj)*pmy
+        vel2d(:, 2) = cos(psi_proj)*pmx + sin(psi_proj)*pmy
 
         ! ! v_radial and v_tangential START
         ! ! r'
