@@ -10,6 +10,64 @@ import h5py
 
 from dynamite import data
 
+def cdf_regrid_matrix(src_edges, dst_edges, kind='spline'):
+    """Matrix that moves histogram bin masses from one velocity grid to another
+
+    Returns ``R`` of shape (n_dst, n_src) such that
+    ``dst_masses = R @ src_masses``, for bin masses (not densities) on the
+    source edges ``src_edges`` and the destination edges ``dst_edges``. It is
+    used when an orbit library is rescaled by ml, which stretches the library
+    velocity bins so that they no longer line up with the data bins.
+
+    The regrid interpolates the cumulative distribution at the source edges
+    and differences it at the destination edges, so total mass inside the
+    common window is conserved exactly. Mass outside the source window is
+    unknown and is not invented; destination bins outside it get none.
+
+    kind='spline' (default) interpolates the cumulative distribution with a
+    not-a-knot cubic spline. This reproduces the second moment of smooth
+    distributions to ~1e-4, so rescaling by s changes the variance by s**2
+    as it should.
+
+    kind='linear' interpolates it linearly, i.e. assumes a uniform density
+    inside each source bin. That is dynamite's former behaviour. It smears
+    every histogram by about dv**2/6 per axis (+3% variance at dv = 0.5 sigma
+    for a stretch of 1.04), which lowers the chi2 of ml-rescaled models
+    artificially. Kept for comparison only.
+
+    Both are linear in the source masses, so the same matrix can be applied
+    to every orbit and aperture, and to weighted sums of orbits alike.
+
+    Parameters
+    ----------
+    src_edges : array of shape (n_src+1,)
+        increasing bin edges of the histogram to be regridded
+    dst_edges : array of shape (n_dst+1,)
+        increasing bin edges of the target grid
+    kind : {'spline', 'linear'}
+
+    Returns
+    -------
+    array of shape (n_dst, n_src)
+
+    """
+    src = np.asarray(src_edges, dtype=float)
+    dst = np.asarray(dst_edges, dtype=float)
+    n = len(src) - 1
+    # cumulative distribution at the source edges, F[0] = 0
+    cum = np.tril(np.ones((n + 1, n)), -1)
+    at_dst = np.clip(dst, src[0], src[-1])  # F is 0 / total outside the window
+    if kind == 'spline':
+        from scipy.interpolate import CubicSpline
+        interp = CubicSpline(src, np.eye(n + 1), bc_type='not-a-knot')(at_dst)
+    elif kind == 'linear':
+        interp = np.stack([np.interp(at_dst, src, e) for e in np.eye(n + 1)],
+                          axis=1)
+    else:
+        raise ValueError(f"cdf_regrid_matrix: unknown kind {kind!r}")
+    return np.diff(interp @ cum, axis=0)
+
+
 class Kinematics(data.Data):
     """
     Abstract class for Kinematics
@@ -1602,8 +1660,9 @@ class BayesLOSVD(Kinematics, data.Integrated):
     def rebin_orblib_to_observations(self, losvd_histograms):
         """Rebin orblib to velocity spacing of observations
 
-        Creates a matrix ``f``, the fraction of the j'th orblib vbin in the i'th
-        data vbin. Multiplies orblib losvd_histograms by f to rebin.
+        Creates a matrix ``f`` with ``cdf_regrid_matrix``, taking orblib vbin
+        masses to data vbin masses. Multiplies orblib losvd_histograms by f to
+        rebin.
 
         Parameters
         ----------
@@ -1620,22 +1679,9 @@ class BayesLOSVD(Kinematics, data.Integrated):
         v_edg = np.concatenate(((v_cent-dv/2.), [v_cent[-1]+dv/2.]))
         dx = losvd_histograms.dx[0]
         assert np.allclose(losvd_histograms.dx, dx), 'vbins must be uniform'
-        # construct matrix to re-bin orbits to the data velocity spacing
-        na = np.newaxis
-        # the boudaries of the i'th data vbin:
-        v_i = v_edg[:-1,na]
-        v_ip1 = v_edg[1:,na]
-        # the boudaries of the j'th orblib vbin:
-        x_j = losvd_histograms.xedg[na,:-1]
-        x_jp1 = losvd_histograms.xedg[na,1:]
-        # f = the fraction of the j'th orblib vbin in the i'th data vbin:
-        f1 = (x_jp1 - v_i)/dx
-        f2 = (v_ip1 - x_j)/dx
-        f1[f1>1] = 1
-        f1[f1<0] = 0
-        f2[f2>1] = 1
-        f2[f2<0] = 0
-        f = np.minimum(f1, f2)
+        # matrix to re-bin orbits to the data velocity spacing (see
+        # cdf_regrid_matrix for why this is not the area-overlap fraction)
+        f = cdf_regrid_matrix(losvd_histograms.xedg, v_edg)
         # This contraction is a gemm over the velocity axis, so how it is
         # spelled matters a lot. Measured on a 549 MiB stand-in for y:
         #
@@ -1961,8 +2007,8 @@ class ProperMotions(Kinematics, data.Integrated):
 
         Due to ml scaling, the velocity ranges of model proper motion velocity
         distributions may be different from those in the input data. This
-        method rescales model velocity distributions so their velocity bins
-        match the input data.
+        method regrids the model velocity distributions so their velocity bins
+        match the input data, using ``cdf_regrid_matrix`` along each axis.
 
         Parameters
         ----------
@@ -1977,46 +2023,22 @@ class ProperMotions(Kinematics, data.Integrated):
 
         """
         h2d = self.as_histogram2d()
-        xedg = h2d.xedg
-        rebinned_y = np.zeros_like(vel_hist.y)
-        bins_x, bins_y = (range(len(x)) for x in h2d.x)
-        for i_x, i_y in [(i, j) for i in bins_x for j in bins_y
-                         if np.sum(vel_hist.y[:, i, j, :]) > 0]:
-            xmin, ymin = vel_hist.xedg[0][i_x], vel_hist.xedg[1][i_y]
-            xmax, ymax = vel_hist.xedg[0][i_x + 1], vel_hist.xedg[1][i_y + 1]
-            overlapping_bins = \
-                [(i, j) for i in bins_x for j in bins_y
-                 if xedg[0][i + 1] > xmin and xedg[0][i] <= xmax and
-                    xedg[1][j + 1] > ymin and xedg[1][j] <= ymax]
-            if len(overlapping_bins) == 0:
-                continue  ####################
-            bin_area = (xmax - xmin) * (ymax - ymin)
-            for i_x_rebin, i_y_rebin in overlapping_bins:
-                dx = min(xmax, xedg[0][i_x_rebin + 1]) \
-                        - max(xmin, xedg[0][i_x_rebin])
-                dy = min(ymax, xedg[1][i_y_rebin + 1]) \
-                        - max(ymin, xedg[1][i_y_rebin])
-                if dx < 0 or dy < 0:
-                    txt = f'Rebinning error: {dx=}, {dy=} must be >= 0.'
-                    self.logger.error(txt)
-                    raise ValueError(txt)
-                overlap = dx * dy / bin_area
-                rebinned_y[:, i_x_rebin, i_y_rebin, :] += \
-                    overlap * vel_hist.y[:, i_x, i_y, :]
+        # separable: one regrid matrix per velocity axis (cdf_regrid_matrix)
+        y = vel_hist.y
+        n_orb, _, _, n_ap = y.shape
+        rx, ry = (cdf_regrid_matrix(src, dst).astype(y.dtype, copy=False)
+                  for src, dst in zip(vel_hist.xedg, h2d.xedg))
+        rebinned_y = np.empty((n_orb, rx.shape[0], ry.shape[0], n_ap),
+                              dtype=y.dtype)
+        # chunk over orbits: y is the largest array in the run, so keep the
+        # temporaries of the two tensordots bounded
+        chunk = max(1, (64 << 20) // max(1, y[0].size * y.itemsize))
+        for start in range(0, n_orb, chunk):
+            end = min(start + chunk, n_orb)
+            t = np.tensordot(rx, y[start:end], axes=(1, 1))  # (x', o, y, a)
+            t = np.tensordot(ry, t, axes=(1, 2))             # (y', x', o, a)
+            rebinned_y[start:end] = t.transpose(2, 1, 0, 3)
         return rebinned_y
-
-        # r_n_orb, r_n_ap = (range(n) for n in vel_hist.y.shape[::3])
-        # new_bins = np.stack(np.meshgrid(r_n_orb,
-        #                                 *self.as_histogram2d().x,
-        #                                 r_n_ap,
-        #                                 indexing='ij'),
-        #                     axis=-1)
-        # interp = RegularGridInterpolator((r_n_orb, *vel_hist.x, r_n_ap),
-        #                                  vel_hist.y,
-        #                                  method='linear',
-        #                                  bounds_error=False,
-        #                                  fill_value=0)
-        # return interp(new_bins)
 
     def transform_orblib_to_observables(self,
                                         vel_histograms,
