@@ -704,6 +704,11 @@ class Plotter():
             self.logger.info(f'Plotting kinematic maps for {n_kin} kin_sets.')
             figures = []
             for i in range(n_kin):
+                if isinstance(stars.kinematic_data[i], kinematics.ProperMotions):
+                    self.logger.info(f'Skipping kinematic map for '
+                                     f'{stars.kinematic_data[i].name}: '
+                                     'ProperMotions not yet implemented.')
+                    continue
                 fig = self.plot_kinematic_maps(model=model,
                                                kin_set=i,
                                                cbar_lims=cbar_lims,
@@ -1076,7 +1081,7 @@ class Plotter():
         else:
             flux = stars.mge_lum.get_projected_masses()
         ap_idx_range_start = \
-            sum([stars.kinematic_data[i].n_apertures for i in range(kin_set)])
+            sum([stars.kinematic_data[i].n_spatial_bins for i in range(kin_set)])
         ap_idx_range_end = ap_idx_range_start + len(kinematics_data)
         flux = flux[ap_idx_range_start:ap_idx_range_end]
 
@@ -1122,6 +1127,18 @@ class Plotter():
                 hmin[i], hmax[i] = -0.15, 0.15
         else:
             self.logger.error(f'Unknown choice of `cbar_lims`: {cbar_lims}.')
+
+        # Guard against degenerate (constant-valued) ranges, e.g. a fixed
+        # sigma for kinematic sets that don't fit dispersion: vmin==vmax
+        # gives matplotlib's tick locator a zero-width axis and it blows up
+        # trying to subdivide it.
+        if vmax == 0:
+            vmax = 1.
+        if smin == smax:
+            smin, smax = smin - 1., smax + 1.
+        for i in gh_plot:
+            if hmin[i] == hmax[i]:
+                hmin[i], hmax[i] = hmin[i] - 1., hmax[i] + 1.
 
         # get aperture and bin data
 
