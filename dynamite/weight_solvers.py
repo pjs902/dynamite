@@ -93,6 +93,8 @@ class GramProblem(NamedTuple):
     b_mass: np.ndarray  # (n_intrinsic+n_apertures,)
     row0_vec: np.ndarray  # (n_orbs,) == A[0], i.e. ones/econ[0]
     b0: float  # rhs[0] = total_mass/total_mass_error
+    # {accumulator tag: sum of squared residuals}, only from a chi2_w build
+    chi2_by_tag: dict = None
 
 
 #: Multiple of the working epsilon used as the per-row round-off floor for
@@ -337,15 +339,26 @@ class NormalEquationAccumulator:
     # temporary to n_orbs * _MIRROR_BLOCK elements
     _MIRROR_BLOCK = 4096
 
-    def __init__(self, n_orbs, dtype=np.float64, profiler=None):
+    def __init__(self, n_orbs, dtype=np.float64, profiler=None,
+                 rhs_only=False, chi2_w=None):
         self.n_orbs = n_orbs
         self.dtype = dtype
         # set by construct_gram_and_rhs_blockwise so the dsyrk and the
         # cross-term matvec can be timed apart from block construction
         self.profiler = profiler
         self.tag = ""
+        # rhs_only: no Gram matrix (G stays None), only v / b sums; used to
+        # rebuild the right-hand side against a P that is kept fixed.
+        # chi2_w: also sum (A w - b)^2 per tag into self.chi2.
+        # skip_zero_blocks: an all-zero A block adds nothing to G or v, so
+        # skip its dsyrk (a relative PM set's pass-0 rows, see NNLS).
+        self.rhs_only = rhs_only
+        self.chi2_w = chi2_w
+        self.chi2 = {}
+        self.skip_zero_blocks = False
         # symmetric: only the upper triangle is filled until finalize()
-        self.G = np.zeros((n_orbs, n_orbs), dtype=dtype, order="F")
+        self.G = None if rhs_only else np.zeros((n_orbs, n_orbs), dtype=dtype,
+                                                order="F")
         self.v = np.zeros(n_orbs, dtype=np.float64)
         self.b_sq_sum = 0.0
         self.b_max = 0.0
@@ -356,11 +369,21 @@ class NormalEquationAccumulator:
         A_block = np.asarray(A_block, dtype=self.dtype)
         assert A_block.shape[1] == self.n_orbs, A_block.shape
         prof = self.profiler
+        if self.chi2_w is not None:
+            r = A_block @ self.chi2_w - np.asarray(b_block, dtype=np.float64)
+            self.chi2[self.tag] = self.chi2.get(self.tag, 0.0) + float(r @ r)
+        if self.skip_zero_blocks and not A_block.any():
+            b_block = np.asarray(b_block, dtype=np.float64)
+            self.b_sq_sum += float(np.dot(b_block, b_block))
+            self.b_max = max(self.b_max, float(np.abs(b_block).max(initial=0.0)))
+            return
         # dsyrk does the rank-k update in place: no (n_orbs, n_orbs) temporary
-        with _maybe_phase(prof, f"{self.tag}dsyrk"):
-            self.G = dsyrk(
-                1.0, A_block, beta=1.0, c=self.G, trans=1, lower=0, overwrite_c=1
-            )
+        if not self.rhs_only:
+            with _maybe_phase(prof, f"{self.tag}dsyrk"):
+                self.G = dsyrk(
+                    1.0, A_block, beta=1.0, c=self.G, trans=1, lower=0,
+                    overwrite_c=1
+                )
         b_block = np.asarray(b_block, dtype=np.float64)
         with _maybe_phase(prof, f"{self.tag}cross_matvec"):
             self.v += A_block.T @ b_block
@@ -1837,7 +1860,8 @@ class NNLS(WeightSolver):
         )
         return block
 
-    def construct_gram_and_rhs_blockwise(self, orblib, in_place=False):
+    def construct_gram_and_rhs_blockwise(self, orblib, in_place=False,
+                                         rhs_only=False, chi2_w=None):
         """Assemble cvxopt/ADMM's normal equations ``P``, ``q`` directly
         from the orbit library, one constraint block at a time — ``A``
         never exists.
@@ -1882,6 +1906,16 @@ class NNLS(WeightSolver):
         needed), and ``chi2_mass = ||A_mass @ w - b_mass||^2`` is a cheap
         direct matvec since ``A_mass`` is small.
 
+        Rows of relative ProperMotions sets' :class:`RotationRows` are added
+        after the kinematic sets (tag ``rot_<set name>/``).
+
+        ``rhs_only`` (relative-PM driver): no Gram matrix is formed; the
+        returned problem has ``P``/``q``/``col_norm``/``G`` = None and only
+        ``v``/``b_sq_rest``/``b_max`` plus the mass block. ``chi2_w``: also
+        return the squared residuals at these weights per accumulator tag
+        (``set<i>/`` includes that set's projected-mass rows) in
+        ``chi2_by_tag``.
+
         Returns a :class:`GramProblem`.
         """
         dtype = self.nnls_dtype
@@ -1924,7 +1958,9 @@ class NNLS(WeightSolver):
         # rows too, so it must run after the loop fills them in - moved to
         # just before the accumulator is finalized, below.
 
-        acc = NormalEquationAccumulator(n_orbs, dtype=np.float64, profiler=prof)
+        acc = NormalEquationAccumulator(n_orbs, dtype=np.float64, profiler=prof,
+                                        rhs_only=rhs_only, chi2_w=chi2_w)
+        acc.skip_zero_blocks = getattr(self, "_pm_moments_only", False)
         n_mass_rest = self.n_intrinsic + self.n_apertures
         A_mass = np.empty((n_mass_rest, n_orbs), dtype=np.float64, order="C")
 
@@ -2221,6 +2257,12 @@ class NNLS(WeightSolver):
             # NB: vel_histograms[si] was already released before the chunk
             # loop above (O6a); nothing left to free here.
 
+        if any(getattr(k, "rotation_rows", None) is not None
+               for k in stars.kinematic_data):
+            for name, A_rot, b_rot in self._rotation_blocks():
+                acc.tag = f"rot_{name}/"
+                acc.add(np.asfortranarray(A_rot), b_rot)
+
         # guard #1, now that con/econ are fully populated: zero-error rows
         # with nonzero constraints must never happen (guard #2, the
         # per-block matrix-coefficient check, already ran inside the loop
@@ -2246,6 +2288,12 @@ class NNLS(WeightSolver):
         )
 
         acc.tag = ""
+        if rhs_only:
+            return GramProblem(
+                P=None, q=None, col_norm=None, b_max=acc.b_max, G=None,
+                v=acc.v, b_sq_rest=acc.b_sq_sum, A_mass=A_mass, b_mass=b_mass,
+                row0_vec=row0_vec, b0=float(b0), chi2_by_tag=acc.chi2,
+            )
         with _maybe_phase(prof, "finalize"):
             P, q, col_norm, b_max = acc.finalize(in_place=in_place)
         if prof is not None:
@@ -2262,6 +2310,7 @@ class NNLS(WeightSolver):
             b_mass=b_mass,
             row0_vec=row0_vec,
             b0=float(b0),
+            chi2_by_tag=acc.chi2 if chi2_w is not None else None,
         )
 
     def _prepare_kinematic_block(self, kins, orb_veldist, tmp, prj_mass_i,
@@ -2328,22 +2377,39 @@ class NNLS(WeightSolver):
            chi2 then ignores any shift of aperture a's mean (to first order).
 
         Returns ``(obs, err, orb)`` in the shapes received, err = 1.
+
+        Driver state (``NNLS._solve_relative``): with ``_pm_moments_only``
+        only step 1 runs and the rows come back as zeros (pass 0); with
+        ``_pm_freeze`` the whitened basis ``G`` and errors ``e`` stored by
+        the previous projecting call are reused, so the orbit rows are
+        bitwise those of that call and only the data rows change. Every
+        projecting call also stores, per aperture, ``ghat`` = pinv(G) @ the
+        unprojected whitened orbit rows (n_orbs, 2) and ``dhat`` = pinv(G) @
+        the whitened data, so m-hat_a(w) = w @ ghat[:, a] - dhat[a].
         """
         n_orbs, n_ap, nvx, nvy = orb.shape
         vx, vy = kins.as_histogram2d().x
-        if ap0 == 0:
+        moments_only = getattr(self, "_pm_moments_only", False)
+        freeze = getattr(self, "_pm_freeze", False)
+        if ap0 == 0 and not freeze:
             n_all = kins.n_spatial_bins
             self.pm_moments[kins.name] = {
                 "n": np.zeros((n_orbs, n_all)),
                 "mu": np.zeros((n_orbs, n_all, 2)),
+                "G": np.zeros((n_all, nvx * nvy, 2)),
+                "e": np.ones((n_all, nvx * nvy)),
+                "ghat": np.zeros((n_orbs, n_all, 2)),
+                "dhat": np.zeros((n_all, 2)),
             }
         mom = self.pm_moments[kins.name]
         obs = np.reshape(obs, (n_ap, nvx, nvy))
         err = np.reshape(err, (n_ap, nvx, nvy))
-        obs_out = np.empty((n_ap, nvx * nvy))
+        # pass 0 returns zero rows (np.zeros pages stay unbacked until used)
+        alloc = np.zeros if moments_only else np.empty
+        obs_out = alloc((n_ap, nvx * nvy))
         # new array (orb may be a view of the orbit library); keep its dtype
         dt = orb.dtype
-        orb_out = np.empty((n_orbs, n_ap, nvx * nvy), dtype=dt)
+        orb_out = alloc((n_orbs, n_ap, nvx * nvy), dtype=dt)
         # One aperture at a time, so every array op sees the same shapes and
         # layout however the caller grouped the apertures: numpy reductions
         # and BLAS are not bitwise stable across shapes, and the five read
@@ -2355,17 +2421,285 @@ class NNLS(WeightSolver):
             mom["n"][:, ap0 + a] = sx.sum(axis=1)
             mom["mu"][:, ap0 + a, 0] = sx @ vx
             mom["mu"][:, ap0 + a, 1] = sy @ vy
-            e = err[a].ravel()
-            G = dyn_kin.pm_shift_basis(obs[a][None], vx, vy)[0]
-            G = G.reshape(-1, 2) / e[:, None]
+            if moments_only:
+                continue
+            if freeze:
+                e, G = mom["e"][ap0 + a], mom["G"][ap0 + a]
+            else:
+                e = err[a].ravel()
+                G = dyn_kin.pm_shift_basis(obs[a][None], vx, vy)[0]
+                G = G.reshape(-1, 2) / e[:, None]
+                mom["e"][ap0 + a], mom["G"][ap0 + a] = e, G
             G_pinv = np.linalg.pinv(G)  # (2, k); rank-safe (G'G)^-1 G'
             d = obs[a].ravel() / e
-            obs_out[a] = d - G @ (G_pinv @ d)
+            gd = G_pinv @ d
+            mom["dhat"][ap0 + a] = gd
+            obs_out[a] = d - G @ gd
             h = h.reshape(n_orbs, -1) / e.astype(dt)
-            h -= (h @ G_pinv.T.astype(dt)) @ G.T.astype(dt)
+            gh = h @ G_pinv.T.astype(dt)
+            mom["ghat"][:, ap0 + a] = gh
+            h -= gh @ G.T.astype(dt)
             orb_out[:, a] = h
         return obs_out, np.ones_like(obs_out), orb_out.reshape(
             n_orbs, n_ap, nvx, nvy)
+
+    def _rotation_blocks(self):
+        """``[(set name, A, b)]``: whitened :class:`RotationRows` rows of the
+        relative PM sets. Uses ``self.pm_moments``, so it must run after the
+        sets' reads in the same build."""
+        out = []
+        ap0 = 0
+        stars = self.system.get_unique_triaxial_visible_component()
+        for kins in stars.kinematic_data:
+            n_ap = kins.n_spatial_bins
+            rot = getattr(kins, "rotation_rows", None)
+            if rot is not None:
+                A, b = rot.rows(self.pm_moments[kins.name]["mu"],
+                                self.projected_masses[ap0:ap0 + n_ap])
+                out.append((kins.name, A, b))
+            ap0 += n_ap
+        return out
+
+    def _pm_model_mean(self, name, w):
+        """m_a(w) = w @ mu_a / w @ n_a, (n_ap, 2); 0 where w @ n_a = 0"""
+        mom = self.pm_moments[name]
+        num = np.einsum("o,oak->ak", w, mom["mu"])
+        den = (w @ mom["n"])[:, None]
+        return np.divide(num, den, out=np.zeros_like(num), where=den > 0)
+
+    @staticmethod
+    def _pm_dsq_over_sigsq(kins, delta):
+        """delta' C^-1 delta per aperture, C = covariance of the set's
+        current (shifted) data histogram; for an isotropic C, |delta|^2 /
+        sigma^2. The shift's second-order bias on sigma^2 is ~delta^2."""
+        h = np.clip(np.asarray(kins.data["PM_2dhist"], dtype=float), 0, None)
+        vx, vy = kins.as_histogram2d().x
+        v = np.stack(np.meshgrid(vx, vy, indexing="ij"), -1)
+        n = h.sum(axis=(1, 2))
+        n = np.where(n > 0, n, 1.0)
+        mu = np.einsum("axy,xyk->ak", h, v) / n[:, None]
+        dv = v[None] - mu[:, None, None]
+        cov = np.einsum("axy,axyk,axyl->akl", h, dv, dv) / n[:, None, None]
+        return np.einsum("ak,akl,al->a", delta, np.linalg.pinv(cov), delta)
+
+    def _relative_build(self, orblib, gram, rhs_from=None):
+        """One build of the relative-PM problem (plus rotation rows).
+
+        Returns a dict: ``A``/``b`` (materialized path) and/or ``P``/``q``/
+        ``col``/``b_max`` (QP solvers), ``gp`` (Gram path). With
+        ``rhs_from`` (a previous build, under ``_pm_freeze``) only the
+        right-hand side is rebuilt; ``P``, ``col`` and ``b_max`` are reused,
+        so the QP matrix is unchanged.
+        """
+        if gram:
+            gp = self.construct_gram_and_rhs_blockwise(
+                orblib, rhs_only=rhs_from is not None)
+            if rhs_from is None:
+                self._ridge_shift = _apply_diagonal_ridge(gp.P,
+                                                          self.ridge_lambda)
+                return dict(gp=gp, P=gp.P, q=gp.q, col=gp.col_norm,
+                            b_max=gp.b_max)
+            col, b_max = rhs_from["col"], rhs_from["b_max"]
+            q = -gp.v / (col * b_max)
+            return dict(rhs_from, q=q, gp=rhs_from["gp"]._replace(
+                q=q, v=gp.v, b_sq_rest=gp.b_sq_rest))
+        A, b = self.construct_nnls_matrix_and_rhs(orblib)
+        rot = self._rotation_blocks()
+        if rot:
+            A = np.vstack([A] + [r[1] for r in rot])
+            b = np.concatenate([b] + [r[2] for r in rot])
+        prob = dict(A=A, b=b)
+        if self.nnls_solver == "scipy":
+            return prob
+        # QP from the materialized A, scaled as in solve()
+        if rhs_from is None:
+            col = np.linalg.norm(A[1:], axis=0)
+            col[col == 0] = 1.0
+            b_max = np.max(np.abs(b[1:])) or 1.0
+            An = A[1:] / col
+            P = An.T @ An
+            self._ridge_shift = _apply_diagonal_ridge(P, self.ridge_lambda)
+        else:
+            P, col, b_max = (rhs_from[k] for k in ("P", "col", "b_max"))
+        q = -((A[1:] / col).T @ (b[1:] / b_max))
+        return dict(prob, P=P, q=q, col=col, b_max=b_max)
+
+    def _relative_qp(self, prob, warm=None):
+        """Solve one built problem; returns ``(weights, solver or None)``.
+
+        ``warm``: the solver of the previous pass. ADMM restarts from its
+        (z, u); scipy's nnls and cvxopt's coneqp take no warm start here and
+        re-solve from scratch.
+        """
+        if "P" not in prob:  # scipy, as in solve()
+            A, b = prob["A"], prob["b"]
+            A_max = np.max(np.abs(A), axis=0)
+            b_max = np.max(np.abs(b))
+            x, _ = optimize.nnls(A / A_max, b / b_max)
+            return x * b_max / A_max, None
+        eq = dict(eq_coeff=prob["b_max"] / prob["col"],
+                  eq_rhs=self.total_mass, logger=self.logger)
+        if self.nnls_solver == "admm":
+            solver = AdmmNonNegSolver(
+                prob["P"], prob["q"], rho=self.admm_rho, alpha=self.admm_alpha,
+                max_iters=self.admm_max_iters, tol=self.admm_tol,
+                precision=self.admm_precision,
+                z0=None if warm is None else warm.z_exit,
+                u0=None if warm is None else warm.u_exit, **eq)
+        else:  # cvxopt: untested here (not installed in the dev env)
+            solver = CvxoptNonNegSolver(
+                prob["P"], prob["q"], tol=self.cvxopt_tol,
+                maxiters=self.cvxopt_maxiters, kktsolver=self.cvxopt_kktsolver,
+                show_progress=self.cvxopt_show_progress,
+                log_every=self.cvxopt_log_every, **eq)
+        if not solver.success:
+            self.logger.warning(f"{self.nnls_solver} QP did NOT converge "
+                                f"(status '{solver.status}').")
+        return solver.beta * prob["b_max"] / prob["col"], solver
+
+    def _relative_chi2(self, orblib, prob, gram, w):
+        """chi2 per dataset at ``w``: ``[(name, chi2, N)]``.
+
+        Datasets are 'mass' (total, intrinsic and projected masses), each
+        kinematic set, and 'rot_<set>' per RotationRows. A relative set has
+        N - 2 per aperture (the projected-out shift). The Gram path re-reads
+        the library once (rhs-only build with residuals, no dsyrk).
+        """
+        stars = self.system.get_unique_triaxial_visible_component()
+        kin = stars.kinematic_data
+        n_rows = [np.size(k.get_observed_values_and_uncertainties(
+            self.settings)[0]) for k in kin]
+        n_dof = [n - (2 * k.n_spatial_bins if getattr(k, "relative", False)
+                      else 0) for k, n in zip(kin, n_rows)]
+        rot = {f"rot_{k.name}": len(k.rotation_rows) for k in kin
+               if getattr(k, "rotation_rows", None) is not None}
+        n_mass = self.n_mass_constraints
+        if not gram:
+            r2 = (prob["A"] @ w - prob["b"]) ** 2
+            edges = np.cumsum([n_mass] + n_rows + list(rot.values()))
+            parts = np.split(r2, edges[:-1])
+            names = ["mass"] + [k.name for k in kin] + list(rot)
+            return [(nm, float(p.sum()), n) for nm, p, n in
+                    zip(names, parts, [n_mass] + n_dof + list(rot.values()))]
+        gp = self.construct_gram_and_rhs_blockwise(orblib, rhs_only=True,
+                                                   chi2_w=w)
+        tags = gp.chi2_by_tag
+        mass_r2 = (gp.A_mass @ w - gp.b_mass) ** 2
+        out = [("mass", float((gp.row0_vec @ w - gp.b0) ** 2 + mass_r2.sum()),
+                n_mass)]
+        ap0 = self.n_intrinsic
+        for si, k in enumerate(kin):
+            prj = mass_r2[ap0:ap0 + k.n_spatial_bins].sum()
+            out.append((k.name, tags.get(f"set{si}/", 0.0) - prj, n_dof[si]))
+            ap0 += k.n_spatial_bins
+        out += [(nm, tags.get(f"{nm}/", 0.0), n) for nm, n in rot.items()]
+        return out
+
+    def _solve_relative(self, orblib):
+        """Pass 0 / pass 1 / delta-check driver for relative PM sets.
+
+        Design: docs plan 2026-10-16-relative-pm-point-symmetrize §11.2.
+
+        0. Build without the relative sets' rows (their read still runs, to
+           fill ``pm_moments``) but with the rotation rows; solve -> w0.
+           m_ref,a = w0 @ mu_a / w0 @ n_a.
+        1. Shift each relative set's data to mean m_ref (into the model's
+           absolute frame), build with the projected rows, solve -> w1.
+        2. delta_a = m_a(w1) - m_ref,a. If delta' C^-1 delta >
+           ``pm_recentre_delta_tol`` (default 0.01) in more than
+           ``pm_recentre_frac_tol`` (default 0.05) of a set's apertures,
+           shift the data to m_ref + delta and re-solve with G, e and P from
+           pass 1 frozen: only the right-hand side is rebuilt.
+
+        Writes ``recentre_shifts.npz`` to the model directory, in each set's
+        own histogram frame and units:
+
+        - ``extra_pass`` (bool); ``chi2_names``, ``chi2``, ``chi2_n``
+          (n_datasets,): chi2 and N per dataset, see :meth:`_relative_chi2`
+        - per relative set ``<name>_``: ``m_ref_pass1`` (n_ap, 2), the pass-0
+          model mean; ``m_ref`` (n_ap, 2), the mean the data were shifted to
+          in the final pass; ``m_model`` (n_ap, 2), m_a(w); ``mhat`` (n_ap,
+          2) = pinv(G)(A_a w - d_a) in whitened space, to first order
+          m_ref - m_model (the residual shift the projection absorbed);
+          ``dsq_over_sigsq_pass1`` and ``dsq_over_sigsq`` (n_ap,), delta' C^-1
+          delta after pass 1 and for the final weights; ``mass_ratio``
+          (n_ap,) = w @ n_a / M_a, the rotation-row normalisation check.
+
+        The relative sets' data are restored to their unshifted values on
+        exit. Returns
+        ``(weights, chi2_tot, chi2_kin, chi2_by_dataset)``.
+        """
+        if self.nnls_solver == "adelie":
+            txt = ("relative ProperMotions sets need nnls_solver scipy, admm "
+                   "or cvxopt, not adelie")
+            self.logger.error(txt)
+            raise NotImplementedError(txt)
+        stars = self.system.get_unique_triaxial_visible_component()
+        rel = [k for k in stars.kinematic_data if getattr(k, "relative", False)]
+        gram = self.gram_blockwise and self.nnls_solver in ("cvxopt", "admm")
+        d_tol = float(self.settings.get("pm_recentre_delta_tol", 0.01))
+        f_tol = float(self.settings.get("pm_recentre_frac_tol", 0.05))
+        self.pm_moments = {}
+        try:
+            self._pm_moments_only, self._pm_freeze = True, False
+            prob = self._relative_build(orblib, gram)
+            self._pm_moments_only = False
+            w, _ = self._relative_qp(prob)
+            m_ref = {k.name: self._pm_model_mean(k.name, w) for k in rel}
+            for k in rel:
+                k.shift_data(-m_ref[k.name])  # shift_data(m) moves by -m
+            prob = self._relative_build(orblib, gram)
+            w, solver = self._relative_qp(prob)
+            self._pm_freeze = True
+            ratio1 = {k.name: self._pm_dsq_over_sigsq(
+                k, self._pm_model_mean(k.name, w) - m_ref[k.name]) for k in rel}
+            frac = {n: float(np.mean(r > d_tol)) for n, r in ratio1.items()}
+            extra = any(f > f_tol for f in frac.values())
+            self.logger.info(f"relative PM: fraction of apertures with "
+                             f"delta^2/sigma^2 > {d_tol}: {frac}; extra pass: "
+                             f"{extra}")
+            m_used = m_ref
+            if extra:
+                m_used = {k.name: self._pm_model_mean(k.name, w) for k in rel}
+                for k in rel:
+                    k.shift_data(-m_used[k.name])
+                prob = self._relative_build(orblib, gram, rhs_from=prob)
+                w, _ = self._relative_qp(prob, warm=solver)
+            chi2 = self._relative_chi2(orblib, prob, gram, w)
+            for name, c2, n in chi2:
+                self.logger.info(f"chi2/N {name}: {c2:.6g}/{n} = "
+                                 f"{c2 / max(n, 1):.4g}")
+            diag = dict(extra_pass=extra,
+                        chi2_names=np.array([c[0] for c in chi2]),
+                        chi2=np.array([c[1] for c in chi2]),
+                        chi2_n=np.array([c[2] for c in chi2]))
+            ap0 = 0
+            for k in stars.kinematic_data:
+                n_ap = k.n_spatial_bins
+                if k in rel:
+                    mom, nm = self.pm_moments[k.name], k.name
+                    m_model = self._pm_model_mean(nm, w)
+                    diag[f"{nm}_m_ref_pass1"] = m_ref[nm]
+                    diag[f"{nm}_m_ref"] = m_used[nm]
+                    diag[f"{nm}_m_model"] = m_model
+                    diag[f"{nm}_mhat"] = (np.einsum("o,oak->ak", w, mom["ghat"])
+                                          - mom["dhat"])
+                    diag[f"{nm}_dsq_over_sigsq_pass1"] = ratio1[nm]
+                    diag[f"{nm}_dsq_over_sigsq"] = self._pm_dsq_over_sigsq(
+                        k, m_model - m_used[nm])
+                    diag[f"{nm}_mass_ratio"] = (
+                        (w @ mom["n"]) / self.projected_masses[ap0:ap0 + n_ap])
+                ap0 += n_ap
+            np.savez(f"{self.direc_with_ml}recentre_shifts.npz", **diag)
+        finally:
+            self._pm_moments_only = self._pm_freeze = False
+            for k in rel:
+                if k.data_unshifted is not None:
+                    for key, val in k.data_unshifted.items():
+                        k.data[key] = val.copy()
+        chi2_tot = sum(c[1] for c in chi2)
+        chi2_kin = chi2_tot - chi2[0][1]
+        return w, chi2_tot, chi2_kin, chi2
 
     def apply_CR_cut(self, kins, orb_losvd, orb_gh):
         r"""apply `CRcut`
@@ -2855,6 +3189,29 @@ class NNLS(WeightSolver):
             chi2_tot = results.meta["chi2_tot"]
             chi2_kin = results.meta["chi2_kin"]
             chi2_kinmap = results.meta["chi2_kinmap"]
+        elif any(getattr(k, "relative", False) for k in
+                 self.system.get_unique_triaxial_visible_component(
+                 ).kinematic_data):
+            # relative PM sets: multi-pass driver (_solve_relative)
+            if not (self.stream_reads and self.gram_blockwise
+                    and self.nnls_solver in ("cvxopt", "admm")):
+                orblib.read_vel_histograms()
+                _downcast_orblib(orblib, self.nnls_dtype)
+            try:
+                weights, chi2_tot, chi2_kin, _ = self._solve_relative(orblib)
+            except Exception as e:
+                weights = _nan_weights_after_solver_error(
+                    e, orblib, f"relative-PM {self.nnls_solver}", self.logger)
+                chi2_tot = chi2_kin = chi2_kinmap = np.nan
+            else:
+                chi2_kinmap = self.chi2_kinmap(weights)  # nan: PM sets
+                results = table.Table()
+                results["weights"] = weights
+                results.meta = {"chi2_tot": chi2_tot, "chi2_kin": chi2_kin,
+                                "chi2_kinmap": chi2_kinmap}
+                results.write(self.weight_file, format="ascii.ecsv",
+                              overwrite=True)
+            self.config.copy_config_file(self.direc_with_ml)
         else:
             # On the fused+streaming path the constructor drives per-set reads
             # itself (freeing each set after use), so no eager full read here.

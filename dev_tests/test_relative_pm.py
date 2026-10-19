@@ -165,7 +165,7 @@ def _fake_nnls(kin_sets, n_ap_total, stream=False, gap=0, dtype=np.float64):
     for name in ("construct_nnls_matrix_and_rhs",
                  "construct_adelie_matrix_and_rhs",
                  "construct_gram_and_rhs_blockwise", "_econ_divide_block",
-                 "apply_CR_cut", "_relative_pm_block"):
+                 "apply_CR_cut", "_relative_pm_block", "_rotation_blocks"):
         setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
 
     def recording_prepare(self, kins, hist, tmp, prj, ap0=0):
@@ -326,3 +326,263 @@ def test_five_read_paths_agree_bitwise(tmp_path, dtype):
             assert same(a, b), (path, stream, gap, name)
         for k in ("n", "mu"):
             assert same(ref[3][k], res[3][k]), (path, stream, gap, k)
+
+
+# ================================================================ C3 / C4
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from astropy.table import Table  # noqa: E402
+
+from dynamite import weight_solvers as ws_new  # noqa: E402
+
+DRIVER = ("_rotation_blocks", "_relative_build", "_relative_qp",
+          "_relative_chi2", "_pm_model_mean", "_solve_relative", "solve")
+
+
+def write_rotation_files(tmp_path, superbins, components, mu, dmu, members):
+    Table({"superbin": superbins, "component": components, "mu": mu,
+           "dmu": dmu}).write(tmp_path / "rot.ecsv", format="ascii.ecsv",
+                              overwrite=True)
+    sb, ap, c = zip(*members)
+    Table({"superbin": sb, "aperture": ap, "c": c}).write(
+        tmp_path / "rotw.ecsv", format="ascii.ecsv", overwrite=True)
+    return dict(datafile="rot.ecsv", weightfile="rotw.ecsv")
+
+
+def test_rotation_rows_recover_a_known_linear_combination(tmp_path):
+    rng = np.random.default_rng(3)
+    n_orbs, n_ap = 7, 4
+    members = [(10, 0, 0.25), (10, 1, 0.75), (20, 3, 1.0), (20, 1, 0.5)]
+    cfg = write_rotation_files(tmp_path, [10, 20, 20], ["pm1", "pm2", "pm1"],
+                               [0.1, -0.2, 0.3], [0.5, 0.25, 2.0], members)
+    rot = dyn_kin.RotationRows(input_directory=str(tmp_path) + "/", **cfg)
+    mu = rng.normal(size=(n_orbs, n_ap, 2))
+    M = rng.uniform(1, 3, n_ap)
+    w = rng.uniform(0, 1, n_orbs)
+    A, b = rot.rows(mu, M)
+    m = (w @ mu.reshape(n_orbs, -1)).reshape(n_ap, 2)  # sum_o w_o mu_oa
+    expect = np.array([0.25 * m[0, 0] / M[0] + 0.75 * m[1, 0] / M[1],
+                       m[3, 1] / M[3] + 0.5 * m[1, 1] / M[1],
+                       m[3, 0] / M[3] + 0.5 * m[1, 0] / M[1]])
+    assert np.allclose(A @ w * rot.dmu, expect, rtol=1e-13)
+    assert np.allclose(b, np.array([0.1, -0.2, 0.3]) / rot.dmu)
+    # only allowed on relative sets, and validated
+    with pytest.raises(ValueError):
+        dyn_kin.RotationRows(input_directory=str(tmp_path) + "/",
+                             **write_rotation_files(tmp_path, [1], ["pmT"],
+                                                    [0.], [1.], [(1, 0, 1.)]))
+
+
+class ConsistentLOS(FakeLOS):
+    """FakeLOS whose data are those of given weights on the toy library."""
+
+    def __init__(self, obs, err):
+        self.obs, self.err = obs, err
+
+    def get_observed_values_and_uncertainties(self, settings):
+        return self.obs, self.err
+
+
+def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
+         d_tol=0.01, f_tol=0.05):
+    """Relative PM toy with a known truth.
+
+    Library: _orblib(rebin=False) (orbit means depend on o in x, on a in y).
+    Truth w_true; masses, LOS data and rotation rows consistent with it. The
+    PM data are the true model histograms recentred to mean 0 (relative).
+    Returns (fake, lib, pm, w_true, m_true).
+    """
+    w_true = np.array([1.3, 0.4, 0.9, 1.6, 0.2, 1.1])
+    probe = make_pm(tmp_path, [(0, 0)] * 3, name="probe")
+    lib = _orblib(probe, rebin=False)
+    y = lib.full[1].y                                    # (o, vx, vy, a)
+    M_pm = w_true @ y.sum(axis=(1, 2))                   # aperture masses
+    H = np.einsum("o,oxya->axy", w_true, y) / M_pm[:, None, None]
+    m_true = np.stack([H.sum(2) @ CEN, H.sum(1) @ CEN], -1)
+    rel = dyn_kin.ProperMotions.shift_histograms(H, (EDG, EDG), m_true)
+    hist = rel  # the data are relative either way
+    sigma = 0.002 + 0.02 * hist.clip(0)
+    np.savez(tmp_path / "hst.npz", PM_2dhist=hist, PM_2dhist_sigma=sigma,
+             vxrange=VR, vyrange=VR)
+    kw = {}
+    if relative:
+        kw["relative"] = True
+        if rotation:
+            kw["rotation_rows"] = write_rotation_files(
+                tmp_path, [0, 0, 1, 1], ["pm1", "pm2", "pm1", "pm2"],
+                [0.5 * (m_true[0, 0] + m_true[1, 0]),
+                 0.5 * (m_true[0, 1] + m_true[1, 1]),
+                 m_true[2, 0], m_true[2, 1]], [0.01] * 4,
+                [(0, 0, 0.5), (0, 1, 0.5), (1, 2, 1.0)])
+    pm = dyn_kin.ProperMotions(name="hst", datafile="hst.npz",
+                               input_directory=str(tmp_path) + "/",
+                               type="ProperMotions", **kw)
+    M_los = w_true @ lib.projected_masses[0]
+    los_obs = (np.einsum("o,oja->aj", w_true, lib.full[0].y[:, :4, :])
+               / M_los[:, None])
+    los = ConsistentLOS(los_obs, 0.01 * np.abs(los_obs) + 1e-3)
+    fake = _fake_nnls([los, pm], 5, dtype=np.float64)
+    fake.lib = lib
+    fake.total_mass = float(w_true.sum())
+    fake.intrinsic_masses = w_true @ lib.intrinsic_masses
+    fake.projected_masses = np.concatenate([M_los, M_pm])
+    fake.nnls_solver = solver
+    fake.gram_blockwise = gram
+    fake.ridge_lambda = 0.0
+    fake.admm_rho, fake.admm_alpha, fake.admm_precision = None, 1.0, "float64"
+    fake.admm_max_iters, fake.admm_tol, fake.admm_free_p = 20000, 1e-12, False
+    fake.settings = {"pm_recentre_delta_tol": d_tol,
+                     "pm_recentre_frac_tol": f_tol}
+    fake.direc_with_ml = str(tmp_path) + "/"
+    fake._pm_dsq_over_sigsq = NNLS._pm_dsq_over_sigsq
+    for name in DRIVER:
+        setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
+    return fake, lib, pm, w_true, m_true
+
+
+def _model_mean(lib, w):
+    y = lib.full[1].y
+    H = np.einsum("o,oxya->axy", w, y)
+    return np.stack([H.sum(2) @ CEN, H.sum(1) @ CEN], -1) / H.sum(
+        axis=(1, 2))[:, None]
+
+
+def test_recentring_recovers_the_true_moments_better_than_no_shift(tmp_path):
+    fake, lib, pm, w_true, m_true = _toy(tmp_path)
+    h_rel = pm.data["PM_2dhist"].copy()
+    w, chi2_tot, chi2_kin, chi2 = fake._solve_relative(lib)
+    err_driver = np.abs(_model_mean(lib, w) - m_true).max()
+    # data restored to relative on exit
+    assert np.array_equal(pm.data["PM_2dhist"], h_rel)
+    # no shift: the same relative data treated as absolute
+    (tmp_path / "plain").mkdir()
+    fake0, lib0, *_ = _toy(tmp_path / "plain", relative=False)
+    A, b = fake0.construct_nnls_matrix_and_rhs(lib0)
+    A_max = np.abs(A).max(axis=0)
+    x, _ = ws_new.optimize.nnls(A / A_max, b / np.abs(b).max())
+    w_plain = x * np.abs(b).max() / A_max
+    err_plain = np.abs(_model_mean(lib0, w_plain) - m_true).max()
+    assert err_driver < 0.1 * err_plain, (err_driver, err_plain)
+    assert err_driver < 0.02, err_driver
+    names = [c[0] for c in chi2]
+    assert names == ["mass", "los", "hst", "rot_hst"]
+    assert dict((c[0], c[2]) for c in chi2)["hst"] == 3 * NB * NB - 6
+    assert np.isclose(chi2_tot, sum(c[1] for c in chi2))
+
+
+@pytest.mark.parametrize("solver,gram,stream,gap", [
+    ("scipy", False, False, 0), ("admm", False, False, 0),
+    ("admm", True, False, 0), ("admm", True, False, 2),
+    ("admm", True, True, 2)])
+def test_extra_pass_changes_only_the_right_hand_side(tmp_path, solver, gram,
+                                                     stream, gap):
+    # d_tol < 0 forces the extra pass
+    fake, lib, pm, w_true, m_true = _toy(tmp_path, solver=solver, gram=gram,
+                                         d_tol=-1.0, f_tol=0.0)
+    fake.stream_reads, fake.gram_aperture_group = stream, gap
+    builds = []
+
+    def spy(self, orblib, gram_, rhs_from=None):
+        prob = NNLS._relative_build(self, orblib, gram_, rhs_from)
+        if rhs_from is not None:
+            # a full rebuild under the frozen basis gives the same matrix
+            full = NNLS._relative_build(self, orblib, gram_)
+            if "P" in prob:
+                assert prob["P"] is rhs_from["P"]
+                assert np.array_equal(full["P"], rhs_from["P"])
+                assert np.allclose(full["q"], prob["q"], rtol=1e-10,
+                                   atol=1e-12 * np.abs(prob["q"]).max())
+            if "A" in prob:
+                assert np.array_equal(prob["A"], rhs_from["A"])
+                assert not np.array_equal(prob["b"], rhs_from["b"])
+        builds.append(rhs_from is not None)
+        return prob
+    fake._relative_build = types.MethodType(spy, fake)
+    w, *_ = fake._solve_relative(lib)
+    assert builds == [False, False, True]
+    z = np.load(tmp_path / "recentre_shifts.npz")
+    assert bool(z["extra_pass"])
+    assert not np.array_equal(z["hst_m_ref"], z["hst_m_ref_pass1"])
+    assert np.abs(_model_mean(lib, w) - m_true).max() < 0.05
+
+
+def test_recentre_shifts_npz_keys_and_shapes(tmp_path):
+    fake, lib, pm, w_true, m_true = _toy(tmp_path)
+    w, *_ = fake._solve_relative(lib)
+    z = np.load(tmp_path / "recentre_shifts.npz")
+    n_ap = pm.n_spatial_bins
+    shapes = {f"hst_{k}": (n_ap, 2) for k in
+              ("m_ref_pass1", "m_ref", "m_model", "mhat")}
+    shapes.update({f"hst_{k}": (n_ap,) for k in
+                   ("dsq_over_sigsq_pass1", "dsq_over_sigsq", "mass_ratio")})
+    shapes.update(extra_pass=(), chi2_names=(4,), chi2=(4,), chi2_n=(4,))
+    assert set(z.files) == set(shapes)
+    for k, s in shapes.items():
+        assert z[k].shape == s, k
+    assert np.allclose(z["hst_m_model"], _model_mean(lib, w))
+    assert np.allclose(z["hst_mass_ratio"], 1.0, atol=1e-3)
+    # converged: mhat ~ m_ref - m_model ~ 0 and the delta check is quiet
+    assert np.abs(z["hst_mhat"]).max() < 0.05
+    assert z["hst_dsq_over_sigsq"].max() < 0.01
+
+
+# -------------------------------------------- non-relative: bit-identical
+def _load_parent_weight_solvers():
+    """weight_solvers.py as of the commit before C3/C4, as a module."""
+    root = Path(__file__).resolve().parents[1]
+    try:
+        src = subprocess.run(
+            ["git", "-C", str(root), "show", "420afb8:dynamite/weight_solvers.py"],
+            capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("git history with 420afb8 not available")
+    mod = types.ModuleType("weight_solvers_parent")
+    mod.__file__ = "weight_solvers_parent.py"
+    sys.modules["weight_solvers_parent"] = mod
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+@pytest.mark.parametrize("solver,gram", [("scipy", False), ("admm", True),
+                                         ("admm", False)])
+def test_non_relative_solve_is_bit_identical_to_before(tmp_path, solver, gram):
+    parent = _load_parent_weight_solvers()
+    out = {}
+    for tag, cls in (("new", NNLS), ("old", parent.NNLS)):
+        d = tmp_path / tag
+        d.mkdir()
+        fake, lib, *_ = _toy(d, relative=False, solver=solver, gram=gram)
+        for name in ("construct_nnls_matrix_and_rhs",
+                     "construct_gram_and_rhs_blockwise",
+                     "_prepare_kinematic_block", "_econ_divide_block",
+                     "apply_CR_cut", "solve") + (
+                         ("_relative_pm_block", "_rotation_blocks")
+                         if cls is NNLS else ()):
+            setattr(fake, name, types.MethodType(getattr(cls, name), fake))
+        fake.stream_reads = False
+        fake.adelie_mu = 1e7
+        fake.weight_file = str(d / "w.ecsv")
+        fake.weight_file_exists = lambda: False
+        fake.config = types.SimpleNamespace(
+            copy_config_file=lambda _: None, config_file_name=str(d / "c.yaml"),
+            settings=types.SimpleNamespace(io_settings={"output_directory": str(d)}))
+        fake.chi2_kinmap = lambda w, orblib=None: float("nan")
+        fake.cvxopt_tol = 1e-11
+        fake._ridge_shift = 0.0
+        lib.read_vel_histograms = lambda *a, **k: None
+        out[tag] = fake.solve(lib, ignore_existing_weights=True)
+    for a, b in zip(out["new"], out["old"]):
+        assert np.array_equal(np.asarray(a), np.asarray(b), equal_nan=True)
+
+
+def test_mhat_measures_the_residual_shift(tmp_path):
+    """Data put at m_ref = m_true + s: m-hat(w_true) ~ m_ref - m_model = s."""
+    fake, lib, pm, w_true, m_true = _toy(tmp_path)
+    s = np.array([0.3, -0.2])
+    pm.shift_data(-(m_true + s))  # shift_data(m) moves the mean by -m
+    fake.construct_nnls_matrix_and_rhs(lib)
+    mom = fake.pm_moments["hst"]
+    mhat = np.einsum("o,oak->ak", w_true, mom["ghat"]) - mom["dhat"]
+    assert np.allclose(mhat, s, atol=0.03), mhat

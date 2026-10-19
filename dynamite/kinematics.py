@@ -1836,11 +1836,23 @@ class ProperMotions(Kinematics, data.Integrated):
     the set's rows (``NNLS._prepare_kinematic_block``), and ``shift_data``
     moves the data to a reference mean.
 
+    A relative set may carry ``rotation_rows`` (a dict with ``datafile`` and
+    ``weightfile``), linear constraints on its model mean field; see
+    :class:`RotationRows`.
+
     """
-    def __init__(self, relative=False, **kwargs):
+    def __init__(self, relative=False, rotation_rows=None, **kwargs):
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
         self.relative = bool(relative)
         self.data_unshifted = None  # set by the first shift_data call
+        if rotation_rows is not None and not self.relative:
+            txt = 'rotation_rows need a relative ProperMotions set ' \
+                  '(relative: True).'
+            self.logger.error(txt)
+            raise ValueError(txt)
+        self.rotation_rows = None if rotation_rows is None else RotationRows(
+            input_directory=kwargs.get('input_directory') or '',
+            **rotation_rows)
         # 2d histogram metadata is always determined by the data
         for attr in ['hist_width', 'hist_center', 'hist_bins']:
             if attr in kwargs:
@@ -2188,3 +2200,84 @@ class ProperMotions(Kinematics, data.Integrated):
         # vel_histograms.y.shape is (n_orbits, n_vxbins, n_vybins, n_apertures)
         # weight solver expects (n_orbits, n_apertures, n_vxbins, n_vybins)
         return np.moveaxis(rebinned_vd, 3, 1)
+
+
+class RotationRows:
+    """Linear rows on the model mean proper motion of a relative PM set
+
+    Each row ties a weighted union ("super-bin") k of the set's apertures to
+    a measured mean along one histogram axis j (``pm1`` = histogram x,
+    ``pm2`` = histogram y, i.e. the set's own frame and units):
+
+        sum_o w_o sum_a c_ka mu_oa[j] / M_a = mu_k +- dmu_k
+
+    with mu_oa the first moment of orbit o's rebinned, unshifted histogram in
+    aperture a (``NNLS.pm_moments``) and M_a the MGE projected mass of a, the
+    same quantity DYNAMITE fits as a mass constraint. So each row is linear
+    in the weights and is exact if the model's aperture mass equals M_a.
+
+    Configured inside the relative ``ProperMotions`` entry::
+
+        rotation_rows:
+            datafile: rot_rows.ecsv      # superbin, component, mu, dmu
+            weightfile: rot_weights.ecsv # superbin, aperture, c
+
+    ``component`` is 'pm1' or 'pm2'; ``aperture`` is the 0-based index into
+    the set's apertures (the first axis of ``PM_2dhist``); ``c`` is the
+    member weight c_ka (e.g. star-count fractions, summing to 1 over k).
+
+    """
+    def __init__(self, datafile, weightfile, input_directory=''):
+        self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+        rows = table.Table.read(input_directory + datafile,
+                                format='ascii.ecsv')
+        memb = table.Table.read(input_directory + weightfile,
+                                format='ascii.ecsv')
+        comp = np.asarray(rows['component']).astype(str)
+        self.superbin = np.asarray(rows['superbin'], dtype=int)
+        self.mu = np.asarray(rows['mu'], dtype=float)
+        self.dmu = np.asarray(rows['dmu'], dtype=float)
+        self.comp = (comp == 'pm2').astype(int)
+        self.memb_superbin = np.asarray(memb['superbin'], dtype=int)
+        self.memb_aperture = np.asarray(memb['aperture'], dtype=int)
+        self.memb_c = np.asarray(memb['c'], dtype=float)
+        bad = []
+        if not np.isin(comp, ('pm1', 'pm2')).all():
+            bad.append("component must be 'pm1' or 'pm2'")
+        if not (np.all(np.isfinite(self.mu)) and np.all(self.dmu > 0)):
+            bad.append('mu must be finite and dmu > 0')
+        if not np.isin(self.superbin, self.memb_superbin).all():
+            bad.append(f'{weightfile} lacks members for some super-bins')
+        if np.any(self.memb_aperture < 0):
+            bad.append('aperture indices must be >= 0')
+        if bad:
+            txt = f'RotationRows {datafile}: ' + '; '.join(bad)
+            self.logger.error(txt)
+            raise ValueError(txt)
+
+    def __len__(self):
+        return len(self.mu)
+
+    def coefficients(self, n_ap):
+        """``C`` (n_rows, n_ap) with C[r, a] = c_ka for row r's super-bin k"""
+        if self.memb_aperture.max(initial=-1) >= n_ap:
+            txt = f'RotationRows: aperture index >= {n_ap} apertures'
+            self.logger.error(txt)
+            raise ValueError(txt)
+        C = np.zeros((len(self.mu), n_ap))
+        for r, k in enumerate(self.superbin):
+            sel = self.memb_superbin == k
+            np.add.at(C[r], self.memb_aperture[sel], self.memb_c[sel])
+        return C
+
+    def rows(self, mu, prj_mass):
+        """Whitened rows ``(A, b)``: A (n_rows, n_orbs), b (n_rows,)
+
+        mu : (n_orbs, n_ap, 2) orbit first moments; prj_mass : (n_ap,)
+        """
+        C = self.coefficients(mu.shape[1]) / prj_mass
+        A = np.empty((len(self.mu), mu.shape[0]))
+        for j in (0, 1):
+            s = self.comp == j
+            A[s] = C[s] @ mu[:, :, j].T
+        return A / self.dmu[:, None], self.mu / self.dmu
