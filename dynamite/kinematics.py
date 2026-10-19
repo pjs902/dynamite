@@ -68,6 +68,49 @@ def cdf_regrid_matrix(src_edges, dst_edges, kind='spline'):
     return np.diff(interp @ cum, axis=0)
 
 
+def pm_shift_basis(hist, vx, vy):
+    """Smooth shift derivatives of 2D velocity histograms, per aperture
+
+    Returns ``G`` with ``G[..., 0] = d hist / d vx`` and
+    ``G[..., 1] = d hist / d vy`` for a bivariate Gaussian with the mean, 2x2
+    covariance and total mass of each histogram (moments over the cell
+    centres, negative cells clipped to zero), evaluated at the cell centres
+    and rescaled so the Gaussian's cell masses sum to the histogram's mass.
+    So a small shift ``m`` of the distribution changes the cell masses by
+    ``-G @ m`` to first order.
+
+    Used instead of central differences of the data itself: noise in a
+    finite-difference G is correlated with the data noise (errors in
+    variables), which biased the recovered mean in the mock.
+
+    Parameters
+    ----------
+    hist : array (n_apertures, n_vx, n_vy)
+        cell masses
+    vx, vy : arrays (n_vx,), (n_vy,)
+        cell centres
+
+    Returns
+    -------
+    array (n_apertures, n_vx, n_vy, 2)
+        zero for apertures with no positive mass
+
+    """
+    h = np.clip(np.asarray(hist, dtype=float), 0, None)
+    v = np.stack(np.meshgrid(vx, vy, indexing='ij'), axis=-1)  # (x, y, 2)
+    mass = h.sum(axis=(1, 2))
+    norm = np.where(mass > 0, mass, 1.0)
+    mu = np.einsum('axy,xyk->ak', h, v) / norm[:, None]
+    dv = v[None] - mu[:, None, None, :]                      # (a, x, y, 2)
+    cov = np.einsum('axy,axyk,axyl->akl', h, dv, dv) / norm[:, None, None]
+    icov = np.linalg.pinv(cov)  # pinv: one-cell / degenerate apertures
+    idv = np.einsum('akl,axyl->axyk', icov, dv)
+    gauss = np.exp(-0.5 * np.einsum('axyk,axyk->axy', dv, idv))
+    gsum = gauss.sum(axis=(1, 2))
+    scale = np.where((mass > 0) & (gsum > 0), mass / np.where(gsum > 0, gsum, 1.0), 0.0)
+    return -(scale[:, None, None] * gauss)[..., None] * idv
+
+
 class Kinematics(data.Data):
     """
     Abstract class for Kinematics
@@ -1787,9 +1830,17 @@ class ProperMotions(Kinematics, data.Integrated):
     set to the scaling factor used for this normalisation and has
     shape=(n_apertures,).
 
+    The optional config key ``relative`` (default False) flags a set whose
+    histograms carry relative proper motions, i.e. each aperture's mean is
+    unknown. The weight solver then projects a free per-aperture shift out of
+    the set's rows (``NNLS._prepare_kinematic_block``), and ``shift_data``
+    moves the data to a reference mean.
+
     """
-    def __init__(self, **kwargs):
+    def __init__(self, relative=False, **kwargs):
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+        self.relative = bool(relative)
+        self.data_unshifted = None  # set by the first shift_data call
         # 2d histogram metadata is always determined by the data
         for attr in ['hist_width', 'hist_center', 'hist_bins']:
             if attr in kwargs:
@@ -2001,6 +2052,75 @@ class ProperMotions(Kinematics, data.Integrated):
         uncertainties = np.reshape(self.data['PM_2dhist_sigma'],
                                    (self.n_spatial_bins, -1))
         return observed_values, uncertainties
+
+    @staticmethod
+    def shift_histograms(hist, xedg, m):
+        """Shift 2D histograms by -m per aperture, by exact cdf regrid
+
+        Each aperture's distribution of v becomes that of v - m: the bin
+        masses on the edges ``xedg - m`` are regridded onto ``xedg`` with
+        ``cdf_regrid_matrix``, separably per axis. Each regrid-matrix column
+        is renormalised to 1, so the mass of a source bin that is partly
+        pushed out of the window lands in the edge bins instead of being lost.
+
+        Parameters
+        ----------
+        hist : array (n_apertures, n_vx, n_vy)
+        xedg : tuple of two arrays, the vx and vy bin edges
+        m : array (n_apertures, 2)
+            shift per aperture, in the units of ``xedg``
+
+        Returns
+        -------
+        array (n_apertures, n_vx, n_vy)
+
+        """
+        def shift_matrix(edg, mi):
+            r = cdf_regrid_matrix(edg - mi, edg)
+            col = r.sum(axis=0)
+            return np.divide(r, col, out=r, where=col > 0)
+        out = np.empty(hist.shape, dtype=float)
+        for a, (mx, my) in enumerate(m):
+            out[a] = shift_matrix(xedg[0], mx) @ hist[a] \
+                     @ shift_matrix(xedg[1], my).T
+        return out
+
+    def shift_data(self, m_ref):
+        """Shift the data histograms and their errors by -m_ref per aperture
+
+        Always shifts from the data as first shifted (kept in
+        ``self.data_unshifted``), so repeated calls do not compound. The
+        histogram mass of each aperture is conserved exactly. Errors are moved
+        the same way and floored at the aperture's smallest original error,
+        so bins the shift uncovers get a finite error.
+
+        Parameters
+        ----------
+        m_ref : array (n_apertures, 2)
+            reference shift (vx, vy) per aperture, in the data's units
+
+        """
+        m_ref = np.asarray(m_ref, dtype=float)
+        if m_ref.shape != (self.n_spatial_bins, 2):
+            txt = f'{self.name}: m_ref must have shape ' \
+                  f'({self.n_spatial_bins}, 2), not {m_ref.shape}.'
+            self.logger.error(txt)
+            raise ValueError(txt)
+        if self.data_unshifted is None:
+            self.data_unshifted = {k: self.data[k].copy()
+                                   for k in ('PM_2dhist', 'PM_2dhist_sigma')}
+        hist = self.data_unshifted['PM_2dhist']
+        sigma = self.data_unshifted['PM_2dhist_sigma']
+        xedg = self.as_histogram2d().xedg
+        new_hist = self.shift_histograms(hist, xedg, m_ref)
+        # a column wholly outside the window still loses its mass; put it back
+        old_mass, new_mass = hist.sum(axis=(1, 2)), new_hist.sum(axis=(1, 2))
+        new_hist *= np.divide(old_mass, new_mass, out=np.ones_like(old_mass),
+                              where=new_mass > 0)[:, None, None]
+        new_sigma = np.maximum(self.shift_histograms(sigma, xedg, m_ref),
+                               sigma.min(axis=(1, 2), keepdims=True))
+        self.data['PM_2dhist'] = new_hist.astype(hist.dtype, copy=False)
+        self.data['PM_2dhist_sigma'] = new_sigma.astype(sigma.dtype, copy=False)
 
     def rebin_orblib_to_observations(self, vel_hist):
         """Rebin orblib to velocity spacing of observations

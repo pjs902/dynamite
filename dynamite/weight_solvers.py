@@ -1265,6 +1265,9 @@ class NNLS(WeightSolver):
             "Unknown nnls_solver"
         )
         self.nnls_solver = nnls_solver
+        # per relative ProperMotions set name: {'n': (n_orbs, n_ap),
+        # 'mu': (n_orbs, n_ap, 2)}, filled by _prepare_kinematic_block
+        self.pm_moments = {}
         # ALM settings for the adelie solver. On NGC6278, where scipy provides
         # a verified optimum, mu between 1e5 and 1e7 reproduces it; 1e7 gave the
         # lowest KKT violation (7e-11) and a monotone gap, whereas 1e6
@@ -1997,7 +2000,7 @@ class NNLS(WeightSolver):
                             self._prepare_kinematic_block(
                                 kins, ghist, (obs_full[g0:g1],
                                               err_full[g0:g1]),
-                                prj_mass_i[g0:g1],
+                                prj_mass_i[g0:g1], ap0=g0,
                             )
                     n_cons_ap = obs_full.shape[1]
                     row_lo = idx_row + g0 * n_cons_ap
@@ -2079,7 +2082,7 @@ class NNLS(WeightSolver):
                             self._prepare_kinematic_block(
                                 kins, ghist, (obs_full[g0:g1],
                                               err_full[g0:g1]),
-                                prj_mass_i[g0:g1],
+                                prj_mass_i[g0:g1], ap0=g0,
                             )
                     n_cons_ap = obs_full.shape[1]
                     row_lo = idx_row + g0 * n_cons_ap
@@ -2261,7 +2264,8 @@ class NNLS(WeightSolver):
             b0=float(b0),
         )
 
-    def _prepare_kinematic_block(self, kins, orb_veldist, tmp, prj_mass_i):
+    def _prepare_kinematic_block(self, kins, orb_veldist, tmp, prj_mass_i,
+                                 ap0=0):
         """Shared by all NNLS constructors.
 
         Scales the observed kinematics and their errors by this set's
@@ -2276,6 +2280,10 @@ class NNLS(WeightSolver):
         exactly as it was received lets callers reuse it instead of paying
         for a second full read, which is by far the most expensive operation
         in a model.
+
+        For a ``relative`` ProperMotions set, see
+        :meth:`_relative_pm_block`; ``ap0`` is the index of the first aperture
+        in this (possibly aperture-sliced) call.
         """
         hist_dim = len(orb_veldist.y[0, ..., 0].shape)  # 1D or 2D vel hists
         obs_kins, obs_kins_err = tmp
@@ -2301,7 +2309,63 @@ class NNLS(WeightSolver):
         for hist_y, first, last in edges_restore:
             hist_y[:, 0, :] = first
             hist_y[:, -1, :] = last
+        if getattr(kins, "relative", False):
+            obs_kins, obs_kins_err, orb_kins = self._relative_pm_block(
+                kins, obs_kins, obs_kins_err, orb_kins, ap0)
         return np.ravel(obs_kins), np.ravel(obs_kins_err), orb_kins
+
+    def _relative_pm_block(self, kins, obs, err, orb, ap0):
+        """Project a free per-aperture mean shift out of a relative PM set.
+
+        1. Stores the per-orbit, per-aperture moments of the rebinned,
+           UNSHIFTED orbit histograms in ``self.pm_moments[kins.name]``:
+           ``n`` = sum of H_oa, ``mu`` = sum of v H_oa (2D), so the model mean
+           is m_a(w) = w @ mu[:, a] / w @ n[:, a]. ``ap0`` places this call's
+           apertures; a call with ap0 == 0 starts a new set.
+        2. Whitens data and orbit rows by the errors and applies
+           P_a = I - G (G'G)^-1 G' per aperture, G_a = smooth shift basis of
+           the (shifted) data (``kinematics.pm_shift_basis``) / errors. The
+           chi2 then ignores any shift of aperture a's mean (to first order).
+
+        Returns ``(obs, err, orb)`` in the shapes received, err = 1.
+        """
+        n_orbs, n_ap, nvx, nvy = orb.shape
+        vx, vy = kins.as_histogram2d().x
+        if ap0 == 0:
+            n_all = kins.n_spatial_bins
+            self.pm_moments[kins.name] = {
+                "n": np.zeros((n_orbs, n_all)),
+                "mu": np.zeros((n_orbs, n_all, 2)),
+            }
+        mom = self.pm_moments[kins.name]
+        obs = np.reshape(obs, (n_ap, nvx, nvy))
+        err = np.reshape(err, (n_ap, nvx, nvy))
+        obs_out = np.empty((n_ap, nvx * nvy))
+        # new array (orb may be a view of the orbit library); keep its dtype
+        dt = orb.dtype
+        orb_out = np.empty((n_orbs, n_ap, nvx * nvy), dtype=dt)
+        # One aperture at a time, so every array op sees the same shapes and
+        # layout however the caller grouped the apertures: numpy reductions
+        # and BLAS are not bitwise stable across shapes, and the five read
+        # paths must agree exactly.
+        for a in range(n_ap):
+            h = np.ascontiguousarray(orb[:, a])  # (o, vx, vy), unshifted
+            sx = h.sum(axis=2, dtype=np.float64)  # (o, vx)
+            sy = h.sum(axis=1, dtype=np.float64)  # (o, vy)
+            mom["n"][:, ap0 + a] = sx.sum(axis=1)
+            mom["mu"][:, ap0 + a, 0] = sx @ vx
+            mom["mu"][:, ap0 + a, 1] = sy @ vy
+            e = err[a].ravel()
+            G = dyn_kin.pm_shift_basis(obs[a][None], vx, vy)[0]
+            G = G.reshape(-1, 2) / e[:, None]
+            G_pinv = np.linalg.pinv(G)  # (2, k); rank-safe (G'G)^-1 G'
+            d = obs[a].ravel() / e
+            obs_out[a] = d - G @ (G_pinv @ d)
+            h = h.reshape(n_orbs, -1) / e.astype(dt)
+            h -= (h @ G_pinv.T.astype(dt)) @ G.T.astype(dt)
+            orb_out[:, a] = h
+        return obs_out, np.ones_like(obs_out), orb_out.reshape(
+            n_orbs, n_ap, nvx, nvy)
 
     def apply_CR_cut(self, kins, orb_losvd, orb_gh):
         r"""apply `CRcut`
