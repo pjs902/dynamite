@@ -36,6 +36,7 @@ import sys
 import textwrap
 
 import numpy as np
+import pytest
 
 from dynamite.weight_solvers import NormalEquationAccumulator
 
@@ -234,6 +235,9 @@ _MEMORY_SUBPROCESS = textwrap.dedent(
 )
 
 
+# Peaks at ~25 GB per subprocess; it took a 36 GB laptop down on 2026-10-19.
+@pytest.mark.skipif(not os.environ.get("DYNAMITE_RUN_MEMORY_TESTS"),
+                    reason="~25 GB peak; set DYNAMITE_RUN_MEMORY_TESTS=1 to run")
 def test_peak_memory_is_materially_lower_blockwise():
     """VmHWM (peak resident set), not current RSS: the materialized path's
     peak happens transiently while building A and reducing it to P, which a
