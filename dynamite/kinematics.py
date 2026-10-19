@@ -2211,6 +2211,13 @@ class RotationRows:
 
         sum_o w_o sum_a c_ka mu_oa[j] / M_a = mu_k +- dmu_k
 
+    or, when the weight file carries the optional columns ``c_pm1`` and
+    ``c_pm2``, along a per-aperture direction mixing both axes (e.g. a 1D
+    ring of tangential means, c_pm1 = c (t.a), c_pm2 = c (t.b)):
+
+        sum_o w_o sum_a (c_pm1 mu_oa[pm1] + c_pm2 mu_oa[pm2]) / M_a
+            = mu_k +- dmu_k
+
     with mu_oa the first moment of orbit o's rebinned, unshifted histogram in
     aperture a (``NNLS.pm_moments``) and M_a the MGE projected mass of a, the
     same quantity DYNAMITE fits as a mass constraint. So each row is linear
@@ -2225,6 +2232,8 @@ class RotationRows:
     ``component`` is 'pm1' or 'pm2'; ``aperture`` is the 0-based index into
     the set's apertures (the first axis of ``PM_2dhist``); ``c`` is the
     member weight c_ka (e.g. star-count fractions, summing to 1 over k).
+    With ``c_pm1``/``c_pm2`` present, ``component`` is ignored (by
+    convention 'pmT'); 'pmT' without those columns is an error.
 
     """
     def __init__(self, datafile, weightfile, input_directory=''):
@@ -2241,9 +2250,19 @@ class RotationRows:
         self.memb_superbin = np.asarray(memb['superbin'], dtype=int)
         self.memb_aperture = np.asarray(memb['aperture'], dtype=int)
         self.memb_c = np.asarray(memb['c'], dtype=float)
+        # (n_memb, 2) per-axis weights, or None: c on the row's own component
+        self.memb_c12 = None
+        if 'c_pm1' in memb.colnames and 'c_pm2' in memb.colnames:
+            self.memb_c12 = np.stack([np.asarray(memb['c_pm1'], dtype=float),
+                                      np.asarray(memb['c_pm2'], dtype=float)],
+                                     axis=1)
         bad = []
-        if not np.isin(comp, ('pm1', 'pm2')).all():
-            bad.append("component must be 'pm1' or 'pm2'")
+        if self.memb_c12 is None and not np.isin(comp, ('pm1', 'pm2')).all():
+            bad.append("component must be 'pm1' or 'pm2' (or the weight file "
+                       "needs c_pm1 and c_pm2 columns)")
+        if self.memb_c12 is not None and not np.all(np.isfinite(
+                self.memb_c12)):
+            bad.append('c_pm1, c_pm2 must be finite')
         if not (np.all(np.isfinite(self.mu)) and np.all(self.dmu > 0)):
             bad.append('mu must be finite and dmu > 0')
         if not np.isin(self.superbin, self.memb_superbin).all():
@@ -2259,15 +2278,19 @@ class RotationRows:
         return len(self.mu)
 
     def coefficients(self, n_ap):
-        """``C`` (n_rows, n_ap) with C[r, a] = c_ka for row r's super-bin k"""
+        """``C`` (n_rows, n_ap, 2): C[r, a, j] multiplies mu_oa[j] in row r"""
         if self.memb_aperture.max(initial=-1) >= n_ap:
             txt = f'RotationRows: aperture index >= {n_ap} apertures'
             self.logger.error(txt)
             raise ValueError(txt)
-        C = np.zeros((len(self.mu), n_ap))
+        C = np.zeros((len(self.mu), n_ap, 2))
         for r, k in enumerate(self.superbin):
             sel = self.memb_superbin == k
-            np.add.at(C[r], self.memb_aperture[sel], self.memb_c[sel])
+            if self.memb_c12 is None:
+                np.add.at(C[r, :, self.comp[r]], self.memb_aperture[sel],
+                          self.memb_c[sel])
+            else:
+                np.add.at(C[r], self.memb_aperture[sel], self.memb_c12[sel])
         return C
 
     def rows(self, mu, prj_mass):
@@ -2275,9 +2298,6 @@ class RotationRows:
 
         mu : (n_orbs, n_ap, 2) orbit first moments; prj_mass : (n_ap,)
         """
-        C = self.coefficients(mu.shape[1]) / prj_mass
-        A = np.empty((len(self.mu), mu.shape[0]))
-        for j in (0, 1):
-            s = self.comp == j
-            A[s] = C[s] @ mu[:, :, j].T
+        C = self.coefficients(mu.shape[1]) / prj_mass[:, None]
+        A = C[:, :, 0] @ mu[:, :, 0].T + C[:, :, 1] @ mu[:, :, 1].T
         return A / self.dmu[:, None], self.mu / self.dmu

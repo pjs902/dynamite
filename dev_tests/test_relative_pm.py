@@ -375,6 +375,29 @@ def test_rotation_rows_recover_a_known_linear_combination(tmp_path):
                                                     [0.], [1.], [(1, 0, 1.)]))
 
 
+def test_rotation_rows_tangential_mix_both_axes(tmp_path):
+    """c_pm1/c_pm2 columns: one row mixes both axes per aperture (1D pmT rings)."""
+    rng = np.random.default_rng(4)
+    n_orbs, n_ap = 6, 5
+    Table({"superbin": [0, 1], "component": ["pmT", "pmT"], "mu": [-1., 2.],
+           "dmu": [0.5, 2.0]}).write(tmp_path / "rot.ecsv", format="ascii.ecsv")
+    Table({"superbin": [0, 0, 1, 1], "aperture": [0, 2, 1, 4],
+           "c": [0.4, 0.6, 0.5, 0.5], "c_pm1": [0.3, -0.1, 0.2, 0.5],
+           "c_pm2": [0.1, 0.6, -0.4, 0.0]}).write(tmp_path / "rotw.ecsv",
+                                                 format="ascii.ecsv")
+    rot = dyn_kin.RotationRows(input_directory=str(tmp_path) + "/",
+                               datafile="rot.ecsv", weightfile="rotw.ecsv")
+    mu = rng.normal(size=(n_orbs, n_ap, 2))
+    M = rng.uniform(1, 3, n_ap)
+    w = rng.uniform(0, 1, n_orbs)
+    A, b = rot.rows(mu, M)
+    m = np.einsum("o,oak->ak", w, mu) / M[:, None]
+    expect = np.array([0.3 * m[0, 0] + 0.1 * m[0, 1] - 0.1 * m[2, 0] + 0.6 * m[2, 1],
+                       0.2 * m[1, 0] - 0.4 * m[1, 1] + 0.5 * m[4, 0]])
+    assert np.allclose(A @ w * rot.dmu, expect, rtol=1e-13)
+    assert np.allclose(b, np.array([-1., 2.]) / rot.dmu)
+
+
 class ConsistentLOS(FakeLOS):
     """FakeLOS whose data are those of given weights on the toy library."""
 
