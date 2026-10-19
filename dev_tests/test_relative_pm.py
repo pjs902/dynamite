@@ -165,7 +165,8 @@ def _fake_nnls(kin_sets, n_ap_total, stream=False, gap=0, dtype=np.float64):
     for name in ("construct_nnls_matrix_and_rhs",
                  "construct_adelie_matrix_and_rhs",
                  "construct_gram_and_rhs_blockwise", "_econ_divide_block",
-                 "apply_CR_cut", "_relative_pm_block", "_rotation_blocks"):
+                 "apply_CR_cut", "_relative_pm_block", "_rotation_blocks",
+                 "_rotation_mass"):
         setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
 
     def recording_prepare(self, kins, hist, tmp, prj, ap0=0):
@@ -409,13 +410,15 @@ class ConsistentLOS(FakeLOS):
 
 
 def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
-         d_tol=0.01, f_tol=0.05):
+         d_tol=0.01, f_tol=0.05, norm=None, mge_scale=None):
     """Relative PM toy with a known truth.
 
     Library: _orblib(rebin=False) (orbit means depend on o in x, on a in y).
     Truth w_true; masses, LOS data and rotation rows consistent with it. The
     PM data are the true model histograms recentred to mean 0 (relative).
-    Returns (fake, lib, pm, w_true, m_true).
+    ``norm`` sets the rotation rows' normalisation; ``mge_scale`` (n_ap,)
+    multiplies the PM set's MGE projected masses (a library that cannot
+    match the MGE). Returns (fake, lib, pm, w_true, m_true).
     """
     w_true = np.array([1.3, 0.4, 0.9, 1.6, 0.2, 1.1])
     probe = make_pm(tmp_path, [(0, 0)] * 3, name="probe")
@@ -439,6 +442,8 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
                  0.5 * (m_true[0, 1] + m_true[1, 1]),
                  m_true[2, 0], m_true[2, 1]], [0.01] * 4,
                 [(0, 0, 0.5), (0, 1, 0.5), (1, 2, 1.0)])
+            if norm is not None:
+                kw["rotation_rows"]["normalisation"] = norm
     pm = dyn_kin.ProperMotions(name="hst", datafile="hst.npz",
                                input_directory=str(tmp_path) + "/",
                                type="ProperMotions", **kw)
@@ -450,7 +455,8 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
     fake.lib = lib
     fake.total_mass = float(w_true.sum())
     fake.intrinsic_masses = w_true @ lib.intrinsic_masses
-    fake.projected_masses = np.concatenate([M_los, M_pm])
+    fake.projected_masses = np.concatenate(
+        [M_los, M_pm * (1 if mge_scale is None else np.asarray(mge_scale))])
     fake.nnls_solver = solver
     fake.gram_blockwise = gram
     fake.ridge_lambda = 0.0
@@ -539,8 +545,10 @@ def test_recentre_shifts_npz_keys_and_shapes(tmp_path):
     shapes = {f"hst_{k}": (n_ap, 2) for k in
               ("m_ref_pass1", "m_ref", "m_model", "mhat")}
     shapes.update({f"hst_{k}": (n_ap,) for k in
-                   ("dsq_over_sigsq_pass1", "dsq_over_sigsq", "mass_ratio")})
-    shapes.update(extra_pass=(), chi2_names=(4,), chi2=(4,), chi2_n=(4,))
+                   ("dsq_over_sigsq_pass1", "dsq_over_sigsq", "mass_ratio",
+                    "mass_mge", "mass_pass0", "rot_mass")})
+    shapes.update(extra_pass=(), chi2_names=(4,), chi2=(4,), chi2_n=(4,),
+                  hst_rot_normalisation=())
     assert set(z.files) == set(shapes)
     for k, s in shapes.items():
         assert z[k].shape == s, k
@@ -549,6 +557,45 @@ def test_recentre_shifts_npz_keys_and_shapes(tmp_path):
     # converged: mhat ~ m_ref - m_model ~ 0 and the delta check is quiet
     assert np.abs(z["hst_mhat"]).max() < 0.05
     assert z["hst_dsq_over_sigsq"].max() < 0.01
+
+
+def test_pass0_normalisation_beats_an_mge_the_library_cannot_match(
+        tmp_path):
+    """MGE aperture masses off by -40..+50%: 'mge' rows are inconsistent at
+    any weights that fit the data; 'pass0' rows (M_a = w0 @ n_a, frozen)
+    share m_ref's denominator. The PM data are also scaled by the MGE mass,
+    so pass 1 still drifts from w0's masses and the gain is partial."""
+    scale = [1.5, 0.6, 1.3]
+    err, rot, z = {}, {}, {}
+    for norm in ("mge", "pass0"):
+        d = tmp_path / norm
+        d.mkdir()
+        fake, lib, pm, w_true, m_true = _toy(d, norm=norm, mge_scale=scale)
+        w, *_, chi2 = fake._solve_relative(lib)
+        err[norm] = np.abs(_model_mean(lib, w) - m_true).max()
+        rot[norm] = {c[0]: c[1] / c[2] for c in chi2}["rot_hst"]
+        z[norm] = np.load(d / "recentre_shifts.npz")
+    zp, zm = z["pass0"], z["mge"]
+    assert str(zp["hst_rot_normalisation"]) == "pass0"
+    assert np.array_equal(zp["hst_rot_mass"], zp["hst_mass_pass0"])
+    assert not np.allclose(zp["hst_mass_pass0"], zp["hst_mass_mge"], rtol=0.1)
+    assert np.array_equal(zm["hst_rot_mass"], zm["hst_mass_mge"])
+    assert rot["pass0"] < 0.5 * rot["mge"], rot
+    assert err["pass0"] < err["mge"], err
+
+
+def test_rotation_rows_reject_bad_normalisation_and_zero_mass(tmp_path):
+    cfg = write_rotation_files(tmp_path, [0], ["pm1"], [0.], [1.],
+                               [(0, 1, 1.0)])
+    with pytest.raises(ValueError):
+        dyn_kin.RotationRows(input_directory=str(tmp_path) + "/",
+                             normalisation="pass1", **cfg)
+    rot = dyn_kin.RotationRows(input_directory=str(tmp_path) + "/", **cfg)
+    assert rot.normalisation == "pass0"
+    mu = np.ones((3, 2, 2))
+    rot.rows(mu, np.array([0.0, 1.0]))  # aperture 0 is not a member
+    with pytest.raises(ValueError):
+        rot.rows(mu, np.array([1.0, 0.0]))
 
 
 # -------------------------------------------- non-relative: bit-identical

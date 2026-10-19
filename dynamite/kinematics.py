@@ -2219,15 +2219,26 @@ class RotationRows:
             = mu_k +- dmu_k
 
     with mu_oa the first moment of orbit o's rebinned, unshifted histogram in
-    aperture a (``NNLS.pm_moments``) and M_a the MGE projected mass of a, the
-    same quantity DYNAMITE fits as a mass constraint. So each row is linear
-    in the weights and is exact if the model's aperture mass equals M_a.
+    aperture a (``NNLS.pm_moments``) and M_a a fixed aperture mass, so each
+    row is linear in the weights and is exact if the model's aperture mass
+    equals M_a. ``normalisation`` chooses M_a:
+
+    - ``pass0`` (default): the pass-0 model mass M_a = sum_o w0_o n_oa,
+      frozen for pass 1 and any extra pass (``NNLS._solve_relative``). This
+      is the denominator of m_ref, so rows and recentring agree. Pass 0
+      itself has no model yet and uses the MGE mass; see
+      ``NNLS._solve_relative`` for why it is not iterated.
+    - ``mge``: the MGE projected mass of a in every pass, the quantity
+      DYNAMITE fits as a mass constraint. On a small library the fitted
+      aperture masses can miss it by tens of per cent, and the rows then
+      disagree with the model mean even at the true weights.
 
     Configured inside the relative ``ProperMotions`` entry::
 
         rotation_rows:
             datafile: rot_rows.ecsv      # superbin, component, mu, dmu
             weightfile: rot_weights.ecsv # superbin, aperture, c
+            normalisation: pass0         # or mge
 
     ``component`` is 'pm1' or 'pm2'; ``aperture`` is the 0-based index into
     the set's apertures (the first axis of ``PM_2dhist``); ``c`` is the
@@ -2236,8 +2247,10 @@ class RotationRows:
     convention 'pmT'); 'pmT' without those columns is an error.
 
     """
-    def __init__(self, datafile, weightfile, input_directory=''):
+    def __init__(self, datafile, weightfile, input_directory='',
+                 normalisation='pass0'):
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
+        self.normalisation = normalisation
         rows = table.Table.read(input_directory + datafile,
                                 format='ascii.ecsv')
         memb = table.Table.read(input_directory + weightfile,
@@ -2257,6 +2270,8 @@ class RotationRows:
                                       np.asarray(memb['c_pm2'], dtype=float)],
                                      axis=1)
         bad = []
+        if normalisation not in ('pass0', 'mge'):
+            bad.append("normalisation must be 'pass0' or 'mge'")
         if self.memb_c12 is None and not np.isin(comp, ('pm1', 'pm2')).all():
             bad.append("component must be 'pm1' or 'pm2' (or the weight file "
                        "needs c_pm1 and c_pm2 columns)")
@@ -2298,6 +2313,12 @@ class RotationRows:
 
         mu : (n_orbs, n_ap, 2) orbit first moments; prj_mass : (n_ap,)
         """
-        C = self.coefficients(mu.shape[1]) / prj_mass[:, None]
+        C = self.coefficients(mu.shape[1])
+        if np.any(prj_mass[np.any(C != 0, axis=(0, 2))] <= 0):
+            txt = 'RotationRows: zero aperture mass in a row member'
+            self.logger.error(txt)
+            raise ValueError(txt)
+        C = np.divide(C, prj_mass[:, None], out=np.zeros_like(C),
+                      where=C != 0)
         A = C[:, :, 0] @ mu[:, :, 0].T + C[:, :, 1] @ mu[:, :, 1].T
         return A / self.dmu[:, None], self.mu / self.dmu

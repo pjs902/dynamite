@@ -1291,6 +1291,9 @@ class NNLS(WeightSolver):
         # per relative ProperMotions set name: {'n': (n_orbs, n_ap),
         # 'mu': (n_orbs, n_ap, 2)}, filled by _prepare_kinematic_block
         self.pm_moments = {}
+        # per set name: frozen pass-0 aperture masses for RotationRows
+        # (normalisation 'pass0'), set by _solve_relative
+        self._rot_mass = {}
         # ALM settings for the adelie solver. On NGC6278, where scipy provides
         # a verified optimum, mu between 1e5 and 1e7 reproduces it; 1e7 gave the
         # lowest KKT violation (7e-11) and a monotone gap, whereas 1e6
@@ -2455,10 +2458,19 @@ class NNLS(WeightSolver):
             rot = getattr(kins, "rotation_rows", None)
             if rot is not None:
                 A, b = rot.rows(self.pm_moments[kins.name]["mu"],
-                                self.projected_masses[ap0:ap0 + n_ap])
+                                self._rotation_mass(kins, ap0))
                 out.append((kins.name, A, b))
             ap0 += n_ap
         return out
+
+    def _rotation_mass(self, kins, ap0):
+        """M_a (n_ap,) normalising ``kins.rotation_rows``: the frozen pass-0
+        model mass once ``_solve_relative`` has set it (normalisation
+        'pass0'), else the MGE projected mass (pass 0, or 'mge')."""
+        m = getattr(self, "_rot_mass", {}).get(kins.name)
+        if m is None or kins.rotation_rows.normalisation == "mge":
+            m = self.projected_masses[ap0:ap0 + kins.n_spatial_bins]
+        return m
 
     def _pm_model_mean(self, name, w):
         """m_a(w) = w @ mu_a / w @ n_a, (n_ap, 2); 0 where w @ n_a = 0"""
@@ -2602,7 +2614,15 @@ class NNLS(WeightSolver):
 
         0. Build without the relative sets' rows (their read still runs, to
            fill ``pm_moments``) but with the rotation rows; solve -> w0.
-           m_ref,a = w0 @ mu_a / w0 @ n_a.
+           m_ref,a = w0 @ mu_a / w0 @ n_a. Rotation rows with normalisation
+           'pass0' then take M_a = w0 @ n_a, frozen for every later pass
+           (the extra pass reuses the QP matrix, so its rows must not move).
+           Pass 0 itself uses the MGE mass, the only one available, and is
+           not iterated: w0 enters later passes only through M_a and m_ref,
+           both pinned to w0's own aperture masses whatever normalised its
+           rows, and any residual error in m_ref is what the delta check
+           below measures and the extra pass removes. An iterated pass 0
+           would cost another library read and solve for no such guarantee.
         1. Shift each relative set's data to mean m_ref (into the model's
            absolute frame), build with the projected rows, solve -> w1.
         2. delta_a = m_a(w1) - m_ref,a. If delta' C^-1 delta >
@@ -2623,7 +2643,10 @@ class NNLS(WeightSolver):
           m_ref - m_model (the residual shift the projection absorbed);
           ``dsq_over_sigsq_pass1`` and ``dsq_over_sigsq`` (n_ap,), delta' C^-1
           delta after pass 1 and for the final weights; ``mass_ratio``
-          (n_ap,) = w @ n_a / M_a, the rotation-row normalisation check.
+          (n_ap,) = w @ n_a / M_a(MGE); ``mass_mge`` and ``mass_pass0``
+          (n_ap,), the MGE and pass-0 model (w0 @ n_a) aperture masses;
+          with rotation rows, ``rot_mass`` (n_ap,), the M_a the final rows
+          used, and ``rot_normalisation`` ('pass0' or 'mge').
 
         The relative sets' data are restored to their unshifted values on
         exit. Returns
@@ -2639,13 +2662,15 @@ class NNLS(WeightSolver):
         gram = self.gram_blockwise and self.nnls_solver in ("cvxopt", "admm")
         d_tol = float(self.settings.get("pm_recentre_delta_tol", 0.01))
         f_tol = float(self.settings.get("pm_recentre_frac_tol", 0.05))
-        self.pm_moments = {}
+        self.pm_moments, self._rot_mass = {}, {}
         try:
             self._pm_moments_only, self._pm_freeze = True, False
             prob = self._relative_build(orblib, gram)
             self._pm_moments_only = False
             w, _ = self._relative_qp(prob)
             m_ref = {k.name: self._pm_model_mean(k.name, w) for k in rel}
+            mass0 = {k.name: w @ self.pm_moments[k.name]["n"] for k in rel}
+            self._rot_mass = dict(mass0)
             for k in rel:
                 k.shift_data(-m_ref[k.name])  # shift_data(m) moves by -m
             prob = self._relative_build(orblib, gram)
@@ -2687,12 +2712,19 @@ class NNLS(WeightSolver):
                     diag[f"{nm}_dsq_over_sigsq_pass1"] = ratio1[nm]
                     diag[f"{nm}_dsq_over_sigsq"] = self._pm_dsq_over_sigsq(
                         k, m_model - m_used[nm])
-                    diag[f"{nm}_mass_ratio"] = (
-                        (w @ mom["n"]) / self.projected_masses[ap0:ap0 + n_ap])
+                    mge = self.projected_masses[ap0:ap0 + n_ap]
+                    diag[f"{nm}_mass_ratio"] = (w @ mom["n"]) / mge
+                    diag[f"{nm}_mass_mge"] = mge
+                    diag[f"{nm}_mass_pass0"] = mass0[nm]
+                    if k.rotation_rows is not None:
+                        diag[f"{nm}_rot_mass"] = self._rotation_mass(k, ap0)
+                        diag[f"{nm}_rot_normalisation"] = (
+                            k.rotation_rows.normalisation)
                 ap0 += n_ap
             np.savez(f"{self.direc_with_ml}recentre_shifts.npz", **diag)
         finally:
             self._pm_moments_only = self._pm_freeze = False
+            self._rot_mass = {}
             for k in rel:
                 if k.data_unshifted is not None:
                     for key, val in k.data_unshifted.items():
