@@ -1,6 +1,7 @@
 import functools
 import hashlib
 import os
+import contextlib
 import pathlib
 import re
 import subprocess
@@ -149,6 +150,8 @@ class LegacyOrbitLibrary(OrbitLibrary):
         self.n_chunks = config.settings.multiprocessing_settings["orblib_chunks"]
         # populated by removes_decompressed_files around the read methods
         self._decompressed = []
+        # {src .bz2: decompressed file} kept for reuse inside hold_decompressed
+        self._held = None
         self.stars = self.system.get_unique_triaxial_visible_component()
         self.n_hist1d = len(
             [
@@ -1571,6 +1574,48 @@ class LegacyOrbitLibrary(OrbitLibrary):
             self.logger.error(err_msg)
             raise RuntimeError(err_msg)
 
+    def _decompress_held(self, src, dest):
+        """:meth:`_decompress`, reusing the file inside :meth:`hold_decompressed`.
+
+        Outside it this is plain ``_decompress``. Inside, the first call
+        decompresses and registers the file as held; later calls for the same
+        ``src`` return at once.
+        """
+        if self._held is not None and src in self._held:
+            return
+        self._decompress(src, dest)
+        if self._held is not None:
+            # now owned by hold_decompressed, not by the read method's cleanup
+            self._decompressed.remove(os.path.abspath(dest))
+            self._held[src] = os.path.abspath(dest)
+
+    def _remove_unless_held(self, fname):
+        if self._held is None or os.path.abspath(fname) not in self._held.values():
+            os.remove(fname)
+
+    @contextlib.contextmanager
+    def hold_decompressed(self):
+        """Keep decompressed ``*_pm_hist`` / ``*_losvd_hist`` files until exit.
+
+        A streamed solve reads the same multi-GB archives once per aperture
+        group; inside this context each is decompressed once and the file
+        reused (the temp name is process-unique). All held files are removed
+        on exit, whether or not the body raised.
+        """
+        if self._held is not None:  # nested: the outer context owns the files
+            yield
+            return
+        self._held = {}
+        try:
+            yield
+        finally:
+            held, self._held = self._held, None
+            for f_name in held.values():
+                try:
+                    os.remove(f_name)
+                except FileNotFoundError:
+                    pass
+
     def _walk_losvd_records(self, buf, n_pairs):
         """Locate every losvd histogram payload in a raw file buffer.
 
@@ -2266,13 +2311,13 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 if need_1d:
                     orblib_file = f"datfil/{fileroot}_losvd_hist.dat.bz2"
                     tmpfname = _pid_tmp(f"datfil/{fileroot}_losvd_hist_{ml}.dat")
-                    self._decompress(orblib_file, tmpfname)
+                    self._decompress_held(orblib_file, tmpfname)
                     # read the fortran file
                     orblib_in = FortranFile(tmpfname, "r")
                 if need_2d:
                     orblib_file = f"datfil/{fileroot}_pm_hist.dat.bz2"
                     tmpfname_pm = _pid_tmp(f"datfil/{fileroot}_pm_hist_{ml}.dat")
-                    self._decompress(orblib_file, tmpfname_pm)
+                    self._decompress_held(orblib_file, tmpfname_pm)
                     orblib_in_pm = FortranFile(tmpfname_pm, "r")
             # read the losvd and pm histogram data
             # from histogram_setup_write, lines 1917-1926: (losvd only)
@@ -2297,10 +2342,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 self.logger.error(error_msg)
                 if legacy_file or need_1d:
                     orblib_in.close()
-                    os.remove(tmpfname)
+                    self._remove_unless_held(tmpfname)
                 if need_2d:
                     orblib_in_pm.close()
-                    os.remove(tmpfname_pm)
+                    self._remove_unless_held(tmpfname_pm)
                 os.chdir(cur_dir)
                 raise ValueError(error_msg)
             self.logger.debug(f"...{self.mod_dir}{tmpfname}: checks ok.")
@@ -2463,10 +2508,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
 
             if legacy_file or need_1d:
                 orblib_in.close()
-                os.remove(tmpfname)
+                self._remove_unless_held(tmpfname)
             if need_2d:
                 orblib_in_pm.close()
-                os.remove(tmpfname_pm)
+                self._remove_unless_held(tmpfname_pm)
             os.chdir(cur_dir)
             if return_intrinsic_moments:
                 return intrinsic_moms, intrinsic_grid  #######################

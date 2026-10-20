@@ -1975,62 +1975,65 @@ class NNLS(WeightSolver):
             # group rather than once whole-set.
             if split and self.stream_reads and si > 0:
                 obs_full, err_full = obs_values[si]
-                for g0 in range(0, n_ap, gap):
-                    g1 = min(g0 + gap, n_ap)
-                    with _maybe_phase(prof, f"set{si}/read_group{g0}"):
-                        orblib.read_vel_histograms(
-                            kin_sets=[si], skip_density=True,
-                            dtype=self.nnls_dtype, ap_group=(g0, g1))
-                    ghist = orblib.vel_histograms[si]
-                    assert ghist is not None, f"group read gave no hist (set {si}, {g0}:{g1})"
-                    with _maybe_phase(prof, f"set{si}/prj_group{g0}"):
-                        prj_block = np.asarray(
-                            np.sum(ghist.y, axis=(1, 2)),
-                            dtype=np.float64).T  # (g1-g0, n_orbs)
-                        self._econ_divide_block(
-                            prj_block, econ_prj_i[g0:g1],
-                            row_offset=row0_prj + g0)
-                    A_mass[mass_lo + g0 : mass_lo + g1, :] = prj_block
-                    acc.add(prj_block, b_prj_i[g0:g1])
-                    with _maybe_phase(prof, f"set{si}/prepare_group{g0}"):
-                        obs_kins, obs_kins_err, orb_kins = \
-                            self._prepare_kinematic_block(
-                                kins, ghist, (obs_full[g0:g1],
-                                              err_full[g0:g1]),
-                                prj_mass_i[g0:g1],
-                            )
-                    n_cons_ap = obs_full.shape[1]
-                    row_lo = idx_row + g0 * n_cons_ap
-                    row_hi = idx_row + g1 * n_cons_ap
-                    con[row_lo:row_hi] = obs_kins
-                    econ[row_lo:row_hi] = obs_kins_err
-                    econ_kin_i = econ[row_lo:row_hi]
-                    con_kin_i = con[row_lo:row_hi]
-                    b_kin_i = np.zeros(obs_kins.size, dtype=np.float64)
-                    np.divide(con_kin_i, econ_kin_i, out=b_kin_i,
-                              where=econ_kin_i != 0)
-                    src = orb_kins.reshape(n_orbs, -1)  # group-sized
-                    n_set_rows = src.shape[1]
-                    step = self.gram_chunk_rows or n_set_rows
-                    block_bufs = {}
-                    for r0 in range(0, n_set_rows, step):
-                        r1 = min(r0 + step, n_set_rows)
-                        m = r1 - r0
-                        kin_block = block_bufs.get(m)
-                        if kin_block is None:
-                            kin_block = block_bufs[m] = np.empty(
-                                (m, n_orbs), dtype=np.float64, order="F")
-                        np.copyto(kin_block, src[:, r0:r1].T)
-                        self._econ_divide_block(
-                            kin_block, econ_kin_i[r0:r1],
-                            row_offset=row_lo + r0)
-                        acc.add(kin_block, b_kin_i[r0:r1])
-                    block_bufs.clear()
-                    # O6 lesson: drop EVERY reference before the next group
-                    # read, else the buffer stays resident and the transient
-                    # drifts back up.
-                    orblib.vel_histograms[si] = None
-                    del orb_kins, src, ghist, prj_block, kin_block
+                # decompress each pm file once for all groups, not once per group
+                # (getattr: test fakes of the orblib have no such method)
+                with getattr(orblib, "hold_decompressed", contextlib.nullcontext)():
+                    for g0 in range(0, n_ap, gap):
+                        g1 = min(g0 + gap, n_ap)
+                        with _maybe_phase(prof, f"set{si}/read_group{g0}"):
+                            orblib.read_vel_histograms(
+                                kin_sets=[si], skip_density=True,
+                                dtype=self.nnls_dtype, ap_group=(g0, g1))
+                        ghist = orblib.vel_histograms[si]
+                        assert ghist is not None, f"group read gave no hist (set {si}, {g0}:{g1})"
+                        with _maybe_phase(prof, f"set{si}/prj_group{g0}"):
+                            prj_block = np.asarray(
+                                np.sum(ghist.y, axis=(1, 2)),
+                                dtype=np.float64).T  # (g1-g0, n_orbs)
+                            self._econ_divide_block(
+                                prj_block, econ_prj_i[g0:g1],
+                                row_offset=row0_prj + g0)
+                        A_mass[mass_lo + g0 : mass_lo + g1, :] = prj_block
+                        acc.add(prj_block, b_prj_i[g0:g1])
+                        with _maybe_phase(prof, f"set{si}/prepare_group{g0}"):
+                            obs_kins, obs_kins_err, orb_kins = \
+                                self._prepare_kinematic_block(
+                                    kins, ghist, (obs_full[g0:g1],
+                                                  err_full[g0:g1]),
+                                    prj_mass_i[g0:g1],
+                                )
+                        n_cons_ap = obs_full.shape[1]
+                        row_lo = idx_row + g0 * n_cons_ap
+                        row_hi = idx_row + g1 * n_cons_ap
+                        con[row_lo:row_hi] = obs_kins
+                        econ[row_lo:row_hi] = obs_kins_err
+                        econ_kin_i = econ[row_lo:row_hi]
+                        con_kin_i = con[row_lo:row_hi]
+                        b_kin_i = np.zeros(obs_kins.size, dtype=np.float64)
+                        np.divide(con_kin_i, econ_kin_i, out=b_kin_i,
+                                  where=econ_kin_i != 0)
+                        src = orb_kins.reshape(n_orbs, -1)  # group-sized
+                        n_set_rows = src.shape[1]
+                        step = self.gram_chunk_rows or n_set_rows
+                        block_bufs = {}
+                        for r0 in range(0, n_set_rows, step):
+                            r1 = min(r0 + step, n_set_rows)
+                            m = r1 - r0
+                            kin_block = block_bufs.get(m)
+                            if kin_block is None:
+                                kin_block = block_bufs[m] = np.empty(
+                                    (m, n_orbs), dtype=np.float64, order="F")
+                            np.copyto(kin_block, src[:, r0:r1].T)
+                            self._econ_divide_block(
+                                kin_block, econ_kin_i[r0:r1],
+                                row_offset=row_lo + r0)
+                            acc.add(kin_block, b_kin_i[r0:r1])
+                        block_bufs.clear()
+                        # O6 lesson: drop EVERY reference before the next group
+                        # read, else the buffer stays resident and the transient
+                        # drifts back up.
+                        orblib.vel_histograms[si] = None
+                        del orb_kins, src, ghist, prj_block, kin_block
                 idx_row = idx_row + n_ap * n_cons_ap
                 idx_ap_start += n_ap
                 continue
