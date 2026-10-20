@@ -656,3 +656,58 @@ def test_mhat_measures_the_residual_shift(tmp_path):
     mom = fake.pm_moments["hst"]
     mhat = np.einsum("o,oak->ak", w_true, mom["ghat"]) - mom["dhat"]
     assert np.allclose(mhat, s, atol=0.03), mhat
+
+
+def test_node_settings_ridge_applied_once_and_free_p_ignored(tmp_path,
+                                                              caplog):
+    # node config: ridge_lambda 0.03, admm_free_p True, alpha 1.9; d_tol < 0
+    # forces the extra pass, which reuses P: the ridge must be on P once
+    fake, lib, pm, w_true, m_true = _toy(tmp_path, solver="admm", gram=True,
+                                         d_tol=-1.0, f_tol=0.0)
+    fake.stream_reads, fake.gram_aperture_group = False, 0
+    fake.ridge_lambda, fake.admm_free_p, fake.admm_alpha = 0.03, True, 1.9
+    seen = []
+
+    def spy(self, orblib, gram_, rhs_from=None):
+        prob = NNLS._relative_build(self, orblib, gram_, rhs_from)
+        seen.append((rhs_from is not None, prob["P"], prob["P"].diagonal().copy(),
+                     self._ridge_shift))
+        return prob
+    fake._relative_build = types.MethodType(spy, fake)
+    with caplog.at_level(logging.INFO, logger="test_relative_pm"):
+        w, *_ = fake._solve_relative(lib)
+    assert "admm_free_p ignored" in caplog.text
+    assert [s[0] for s in seen] == [False, False, True]
+    (_, P1, d1, shift1), (_, P2, d2, _) = seen[1], seen[2]
+    assert P2 is P1 and np.array_equal(d1, d2)  # extra pass: same P, no re-ridge
+    raw = NNLS._relative_build(fake, lib, True)  # fresh build, ridged once
+    p = raw["P"].shape[0]
+    unridged = raw["P"].diagonal() - fake._ridge_shift
+    assert np.isclose(fake._ridge_shift, 0.03 * unridged.sum() / p)
+    assert np.allclose(d1, unridged + shift1, rtol=1e-12)
+    assert np.abs(_model_mean(lib, w) - m_true).max() < 0.05
+
+
+def test_float32_projection_matches_float64(tmp_path):
+    # nnls_dtype float32: projected orbit rows and ghat agree with float64 to
+    # single precision, and the projected rows stay orthogonal to G
+    pm = make_pm(tmp_path, [(0.3, -0.2), (1.0, 0.5), (-0.7, 0.1)])
+    lib = _orblib(pm, rebin=False)
+    out = {}
+    for dt in (np.float64, np.float32):
+        fake = _fake_nnls([pm], 3, dtype=dt)
+        obs, err = pm.get_observed_values_and_uncertainties(None)
+        orb = pm.transform_orblib_to_observables(lib.full[1]).astype(dt)
+        o, e, h = NNLS._relative_pm_block(fake, pm, obs.copy(), err.copy(),
+                                          orb, 0)
+        out[dt] = (h.astype(np.float64), fake.pm_moments["hst"])
+    h64, m64 = out[np.float64]
+    h32, m32 = out[np.float32]
+    scale = np.abs(h64).max()
+    assert np.abs(h32 - h64).max() < 1e-5 * scale
+    assert np.allclose(m32["ghat"], m64["ghat"], rtol=1e-5,
+                       atol=1e-6 * np.abs(m64["ghat"]).max())
+    for a in range(3):
+        G = m64["G"][a]
+        resid = h32[:, a].reshape(h32.shape[0], -1) @ G
+        assert np.abs(resid).max() < 1e-5 * scale * np.linalg.norm(G, axis=0).max()

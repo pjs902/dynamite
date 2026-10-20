@@ -2662,6 +2662,10 @@ class NNLS(WeightSolver):
         gram = self.gram_blockwise and self.nnls_solver in ("cvxopt", "admm")
         d_tol = float(self.settings.get("pm_recentre_delta_tol", 0.01))
         f_tol = float(self.settings.get("pm_recentre_frac_tol", 0.05))
+        if self.nnls_solver == "admm" and getattr(self, "admm_free_p", False):
+            # the extra pass reuses P, so it must survive the factorization
+            self.logger.info("relative PM: admm_free_p ignored (P is kept "
+                             "for the extra pass)")
         self.pm_moments, self._rot_mass = {}, {}
         try:
             self._pm_moments_only, self._pm_freeze = True, False
