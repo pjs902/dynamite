@@ -19,6 +19,21 @@ from dynamite import orblib_chunks
 from dynamite.constants import PARSEC_KM
 
 
+def _bzip2_cmd(decompress=False):
+    """Shell command that (de)compresses stdin/file arguments to stdout.
+
+    Uses ``lbzip2`` (parallel, output readable by plain ``bunzip2``) when it is
+    on the PATH, else serial ``bzip2``/``bunzip2``. The thread count is 8 by
+    default (the node is shared; tube and box builds and decompressions can
+    overlap) and can be set with the environment variable
+    ``DYNAMITE_BZIP2_THREADS``.
+    """
+    if shutil.which("lbzip2") is None:
+        return "bunzip2 -c" if decompress else "bzip2 -c"
+    n = int(os.environ.get("DYNAMITE_BZIP2_THREADS", "8"))
+    return f"lbzip2 {'-d ' if decompress else ''}-c -n {n}"
+
+
 def restores_cwd(method):
     """Return to the original working directory however the method exits.
 
@@ -1000,7 +1015,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 compressions.append((
                     f_name,
                     subprocess.Popen(
-                        f"bzip2 -c {f_name} > {f_name}.bz2 && mv {f_name}.bz2 {final} && rm -f {f_name}",
+                        f"{_bzip2_cmd()} {f_name} > {f_name}.bz2 && mv {f_name}.bz2 {final} && rm -f {f_name}",
                         shell=True,
                     ),
                 ))
@@ -1371,7 +1386,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
             # rewriting it in place hands them a truncated archive
             txt_file.write(
                 f"test -e {f_name} "
-                f"&& bzip2 -kc {f_name} > {f_name}.staging.$$.bz2 "
+                f"&& {_bzip2_cmd()} {f_name} > {f_name}.staging.$$.bz2 "
                 f"&& mv {f_name}.staging.$$.bz2 {f_name}.bz2\n"
             )
             txt_file.write(f"rm -f {f_name}\n")
@@ -1393,7 +1408,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
             # rewriting it in place hands them a truncated archive
             txt_file.write(
                 f"test -e {f_name} "
-                f"&& bzip2 -kc {f_name} > {f_name}.staging.$$.bz2 "
+                f"&& {_bzip2_cmd()} {f_name} > {f_name}.staging.$$.bz2 "
                 f"&& mv {f_name}.staging.$$.bz2 {f_name}.bz2\n"
             )
             txt_file.write(f"rm -f {f_name}\n")
@@ -1455,7 +1470,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
             f_name = "datfil/orblib_" + f + ".dat"
             txt_file.write(
                 f"test -e {f_name} "
-                f"&& bzip2 -kc {f_name} > {f_name}.staging.$$.bz2 "
+                f"&& {_bzip2_cmd()} {f_name} > {f_name}.staging.$$.bz2 "
                 f"&& mv {f_name}.staging.$$.bz2 {f_name}.bz2\n"
             )
             txt_file.write(f"rm -f {f_name}\n")
@@ -1492,7 +1507,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
             f_name = "datfil/orblibbox_" + f + ".dat"
             txt_file.write(
                 f"test -e {f_name} "
-                f"&& bzip2 -kc {f_name} > {f_name}.staging.$$.bz2 "
+                f"&& {_bzip2_cmd()} {f_name} > {f_name}.staging.$$.bz2 "
                 f"&& mv {f_name}.staging.$$.bz2 {f_name}.bz2\n"
             )
             txt_file.write(f"rm -f {f_name}\n")
@@ -1508,7 +1523,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
     def _decompress(self, src, dest):
         """Decompress an orbit library file, failing loudly if it is damaged.
 
-        ``bunzip2`` exiting non-zero used to be ignored, leaving a truncated
+        ``bunzip2``/``lbzip2`` exiting non-zero used to be ignored, leaving a truncated
         ``dest`` that surfaced much later as an unintelligible ``FortranFile``
         error from somewhere deep in the read. A partly written archive is a
         real possibility whenever models sharing a library are evaluated
@@ -1531,7 +1546,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
         # still being the model directory when it runs
         self._decompressed.append(os.path.abspath(dest))
         p = subprocess.run(
-            f"bunzip2 -c {src} > {dest}", shell=True, stderr=subprocess.PIPE
+            f"{_bzip2_cmd(decompress=True)} {src} > {dest}", shell=True, stderr=subprocess.PIPE
         )
         if p.returncode != 0:
             err_msg = (
