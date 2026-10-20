@@ -2,6 +2,7 @@ import functools
 import hashlib
 import os
 import pathlib
+import re
 import subprocess
 import shutil
 import logging
@@ -32,6 +33,18 @@ def _bzip2_cmd(decompress=False):
         return "bunzip2 -c" if decompress else "bzip2 -c"
     n = int(os.environ.get("DYNAMITE_BZIP2_THREADS", "8"))
     return f"lbzip2 {'-d ' if decompress else ''}-c -n {n}"
+
+
+def _pid_tmp(path):
+    """Process-unique name for a decompressed temporary ``datfil/*_{ml}.dat``,
+    so concurrent readers of one library cannot clash."""
+    return f"{path[:-4]}_p{os.getpid()}.dat"
+
+
+def _walk_cache_path(fname):
+    """Walk-index cache file of a decompressed pm file. Shared by all
+    processes, so it is named without the ``_p<pid>`` of :func:`_pid_tmp`."""
+    return re.sub(r"_p\d+\.dat$", ".dat", fname) + ".walk.npz"
 
 
 def restores_cwd(method):
@@ -1899,7 +1912,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
         # S1 + grid reuse: the walk is a ~46M-iteration Python loop over the
         # raw buffer. S1 grouped reads re-run it once per aperture group, and
         # every grid model reuses the SAME orblib, so cache the walk arrays to
-        # ``fname + '.walk.npz'`` and run the walk once per file ever instead
+        # ``_walk_cache_path(fname)`` and run the walk once per file ever instead
         # of once per group/model. fszie + norb + n_ap_file validate the cache
         # against the file; a changed/truncated file recomputes the walk (and
         # re-arms the truncation error below). Cache is an optimization only:
@@ -1970,11 +1983,11 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 velhist0[kin_id][orb_e[m], row[m], col[m], ap_e[m] - ap_off] = vals[m]
 
     def _pm_walk_load(self, fname, norb, n_ap_file):
-        """Return cached pm walk arrays if a valid ``fname + '.walk.npz'``
+        """Return cached pm walk arrays if a valid ``_walk_cache_path(fname)``
         exists, else None. Validated on norb, n_ap_file and source file size
         so a rebuilt/truncated file recomputes instead of reusing stale
         offsets."""
-        path = fname + ".walk.npz"
+        path = _walk_cache_path(fname)
         try:
             z = np.load(path)
             ok = (
@@ -1991,10 +2004,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
 
     def _pm_walk_save(self, fname, norb, n_ap_file, start, ivmin0, ivmin1,
                       n0, nv):
-        """Persist the pm walk arrays to ``fname + '.walk.npz'``. Best-effort:
+        """Persist the pm walk arrays to ``_walk_cache_path(fname)``. Best-effort:
         a read-only datfil silently falls back to recomputing each time."""
         try:
-            np.savez(fname + ".walk.npz", norb=norb, n_ap_file=n_ap_file,
+            np.savez(_walk_cache_path(fname), norb=norb, n_ap_file=n_ap_file,
                      fsize=os.path.getsize(fname), start=start,
                      ivmin0=ivmin0, ivmin1=ivmin1, n0=n0, nv=nv)
         except OSError:
@@ -2160,10 +2173,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
             os.chdir(self.mod_dir)
             if legacy_file:
                 orblib_file = f"datfil/{fileroot}.dat.bz2"
-                tmpfname = f"datfil/{fileroot}_{ml}.dat"
+                tmpfname = _pid_tmp(f"datfil/{fileroot}_{ml}.dat")
             else:
                 orblib_file = f"datfil/{fileroot}_qgrid.dat.bz2"
-                tmpfname = f"datfil/{fileroot}_qgrid_{ml}.dat"
+                tmpfname = _pid_tmp(f"datfil/{fileroot}_qgrid_{ml}.dat")
             # density/orbtypes depend only on the (ml-independent) qgrid
             # file; a cached copy skips the multi-GB decompression
             cached = None
@@ -2223,7 +2236,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
                         return intrinsic_moms, intrinsic_grid  ####################
         else:
             density_3D = None
-            tmpfname = f"datfil/{fileroot}_qgrid_skipped_{ml}.dat"
+            tmpfname = _pid_tmp(f"datfil/{fileroot}_qgrid_skipped_{ml}.dat")
 
         # next, check if we need to read the losvd_hist and the pm_hist files:
         # note: legacy_file=True never has 2d histograms
@@ -2252,13 +2265,13 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 os.chdir(self.mod_dir)
                 if need_1d:
                     orblib_file = f"datfil/{fileroot}_losvd_hist.dat.bz2"
-                    tmpfname = f"datfil/{fileroot}_losvd_hist_{ml}.dat"
+                    tmpfname = _pid_tmp(f"datfil/{fileroot}_losvd_hist_{ml}.dat")
                     self._decompress(orblib_file, tmpfname)
                     # read the fortran file
                     orblib_in = FortranFile(tmpfname, "r")
                 if need_2d:
                     orblib_file = f"datfil/{fileroot}_pm_hist.dat.bz2"
-                    tmpfname_pm = f"datfil/{fileroot}_pm_hist_{ml}.dat"
+                    tmpfname_pm = _pid_tmp(f"datfil/{fileroot}_pm_hist_{ml}.dat")
                     self._decompress(orblib_file, tmpfname_pm)
                     orblib_in_pm = FortranFile(tmpfname_pm, "r")
             # read the losvd and pm histogram data
@@ -2516,7 +2529,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 self.logger.error(error_msg)
                 raise FileNotFoundError(error_msg)
             os.chdir(self.mod_dir)
-            tmpfname = f"datfil/{fileroot}_pops_{ml}.dat"
+            tmpfname = _pid_tmp(f"datfil/{fileroot}_pops_{ml}.dat")
             self._decompress(pops_file, tmpfname)
             # read the fortran file
             orblib_in = FortranFile(tmpfname, "r")
