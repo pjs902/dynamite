@@ -2002,10 +2002,12 @@ class LegacyOrbitLibrary(OrbitLibrary):
         """Persist (orbtypes, density_3D) to ``fname + '.dens.npz'`` (written
         to a temp name then renamed, so concurrent readers never see a
         partial file). Best-effort."""
-        path = self.mod_dir + fname + ".dens.npz"
+        # fname is relative to the cwd (the model dir), as in _qgrid_cache_load;
+        # prefixing mod_dir broke the cache whenever mod_dir is relative
+        path = fname + ".dens.npz"
         tmp = f"{path}.{os.getpid()}.tmp.npz"
         try:
-            np.savez(tmp, norb=norb, fsize=os.path.getsize(self.mod_dir + fname),
+            np.savez(tmp, norb=norb, fsize=os.path.getsize(fname),
                      orbtypes=orbtypes, density_3D=density_3D)
             os.replace(tmp, path)
         except OSError:
