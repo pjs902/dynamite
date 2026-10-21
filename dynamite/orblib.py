@@ -150,7 +150,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
         self.n_chunks = config.settings.multiprocessing_settings["orblib_chunks"]
         # populated by removes_decompressed_files around the read methods
         self._decompressed = []
-        # {src .bz2: decompressed file} kept for reuse inside hold_decompressed
+        # {(src .bz2, decompressed file): decompressed file} kept for reuse inside hold_decompressed
         self._held = None
         self.stars = self.system.get_unique_triaxial_visible_component()
         self.n_hist1d = len(
@@ -1579,15 +1579,17 @@ class LegacyOrbitLibrary(OrbitLibrary):
 
         Outside it this is plain ``_decompress``. Inside, the first call
         decompresses and registers the file as held; later calls for the same
-        ``src`` return at once.
+        ``src`` and ``dest`` return at once; a different ``dest`` (e.g. another
+        ``ml``) for the same ``src`` is decompressed as usual.
         """
-        if self._held is not None and src in self._held:
+        key = (src, os.path.abspath(dest))
+        if self._held is not None and key in self._held:
             return
         self._decompress(src, dest)
         if self._held is not None:
             # now owned by hold_decompressed, not by the read method's cleanup
             self._decompressed.remove(os.path.abspath(dest))
-            self._held[src] = os.path.abspath(dest)
+            self._held[key] = key[1]
 
     def _remove_unless_held(self, fname):
         if self._held is None or os.path.abspath(fname) not in self._held.values():
