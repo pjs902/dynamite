@@ -2670,7 +2670,14 @@ class NNLS(WeightSolver):
             self.logger.info("relative PM: admm_free_p ignored (P is kept "
                              "for the extra pass)")
         self.pm_moments, self._rot_mass = {}, {}
+        hold = contextlib.ExitStack()
         try:
+            # decompress each pm/losvd archive once for all passes and the
+            # chi2 read, not once per pass (~11.6 GB of datfil per model; the
+            # files are removed in the finally below). getattr: test fakes
+            # of the orblib have no such method
+            hold.enter_context(
+                getattr(orblib, "hold_decompressed", contextlib.nullcontext)())
             self._pm_moments_only, self._pm_freeze = True, False
             prob = self._relative_build(orblib, gram)
             self._pm_moments_only = False
@@ -2730,6 +2737,7 @@ class NNLS(WeightSolver):
                 ap0 += n_ap
             np.savez(f"{self.direc_with_ml}recentre_shifts.npz", **diag)
         finally:
+            hold.close()
             self._pm_moments_only = self._pm_freeze = False
             self._rot_mass = {}
             for k in rel:
