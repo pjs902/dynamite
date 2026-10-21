@@ -117,3 +117,18 @@ def test_hold_decompresses_once_and_cleans_up(lib, monkeypatch):
             raise KeyError('boom')
     assert not temps(lib)
     assert lib._held is None
+
+
+def test_hold_keys_on_destination_too(lib, monkeypatch, tmp_path):
+    import dynamite as dyn
+    calls = []
+    monkeypatch.setattr(dyn.orblib.LegacyOrbitLibrary, '_decompress',
+                        lambda self, s, d: (calls.append((s, d)),
+                                            self._decompressed.append(os.path.abspath(d)))[0])
+    a, b = str(tmp_path / 'a.dat'), str(tmp_path / 'b.dat')
+    with lib.hold_decompressed():
+        lib._decompress_held('x.bz2', a)
+        lib._decompress_held('x.bz2', a)
+        lib._decompress_held('x.bz2', b)  # same src, another dest (e.g. ml)
+        assert calls == [('x.bz2', a), ('x.bz2', b)]
+        assert set(lib._held.values()) == {a, b}
