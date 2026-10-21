@@ -297,7 +297,7 @@ def _collect(fake, path):
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32])
-def test_five_read_paths_agree_bitwise(tmp_path, dtype):
+def test_five_read_paths_agree(tmp_path, dtype):
     pm = make_pm(tmp_path, [(0, 0), (0.5, -0.5), (-1, 1), (1, 0.2), (0, -1)])
     n_ap_total = 2 + pm.n_spatial_bins
     paths = [  # (constructor, stream_reads, gram_aperture_group)
@@ -315,12 +315,12 @@ def test_five_read_paths_agree_bitwise(tmp_path, dtype):
             for h in fake.lib.full:
                 h.y = h.y.astype(np.float32)
         results.append(_collect(fake, path))
-    # float32: bitwise is impossible upstream of this change. Master's
-    # ProperMotions.rebin_orblib_to_observations already differs in the last
-    # float32 bit for a one-aperture group (sgemm takes a different kernel),
-    # so float32 is compared to float32 round-off instead.
-    same = (np.array_equal if dtype == np.float64 else
-            lambda a, b: np.allclose(a, b, rtol=1e-5, atol=1e-6 * np.abs(a).max()))
+    # Neither dtype is compared bitwise: BLAS picks its kernel by matrix
+    # shape, so one-aperture groups differ in the last bit (float32 sgemm on
+    # master already; float64 dgemm by ~1.8e-16 relative under MKL, bitwise
+    # on OpenBLAS). Compare to round-off instead.
+    rtol, atol = (1e-12, 0) if dtype == np.float64 else (1e-5, 1e-6)
+    same = lambda a, b: np.allclose(a, b, rtol=rtol, atol=atol * np.abs(a).max())
     ref = results[0]
     for (path, stream, gap), res in zip(paths[1:], results[1:]):
         for name, a, b in zip(("obs", "err", "orb"), ref[:3], res[:3]):
