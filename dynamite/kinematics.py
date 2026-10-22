@@ -1840,8 +1840,15 @@ class ProperMotions(Kinematics, data.Integrated):
     ``weightfile``), linear constraints on its model mean field; see
     :class:`RotationRows`.
 
+    A relative set may carry ``start_mean``, an ecsv file with columns
+    ``pm1`` and ``pm2`` (one row per aperture, in aperture order, in the
+    set's histogram frame and units): the centre the weight solver first
+    shifts the data to, e.g. a Gaia-tied mean field. Without it the solver
+    starts from its pass-0 model mean (``NNLS._solve_relative``).
+
     """
-    def __init__(self, relative=False, rotation_rows=None, **kwargs):
+    def __init__(self, relative=False, rotation_rows=None, start_mean=None,
+                 **kwargs):
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
         self.relative = bool(relative)
         self.data_unshifted = None  # set by the first shift_data call
@@ -1853,6 +1860,18 @@ class ProperMotions(Kinematics, data.Integrated):
         self.rotation_rows = None if rotation_rows is None else RotationRows(
             input_directory=kwargs.get('input_directory') or '',
             **rotation_rows)
+        if start_mean is not None and not self.relative:
+            txt = 'start_mean needs a relative ProperMotions set ' \
+                  '(relative: True).'
+            self.logger.error(txt)
+            raise ValueError(txt)
+        self.start_mean = None
+        if start_mean is not None:
+            t = table.Table.read((kwargs.get('input_directory') or '')
+                                 + start_mean, format='ascii.ecsv')
+            self.start_mean = np.stack([np.asarray(t['pm1'], dtype=float),
+                                        np.asarray(t['pm2'], dtype=float)],
+                                       axis=1)
         # 2d histogram metadata is always determined by the data
         for attr in ['hist_width', 'hist_center', 'hist_bins']:
             if attr in kwargs:
@@ -1870,6 +1889,14 @@ class ProperMotions(Kinematics, data.Integrated):
         if hasattr(self, 'data'):
             self.sanity_check()
             self.normalise()
+            if self.start_mean is not None and (
+                    self.start_mean.shape != (self.n_spatial_bins, 2)
+                    or not np.all(np.isfinite(self.start_mean))):
+                txt = f'{self.name}: start_mean must be finite with ' \
+                      f'{self.n_spatial_bins} rows, not ' \
+                      f'{self.start_mean.shape[0]}.'
+                self.logger.error(txt)
+                raise ValueError(txt)
 
     def update_data(self, weight_solver_settings):
         """Update proper motions errors according to `PM_sys_err_factor`.

@@ -10,6 +10,7 @@ from astropy import table
 from astropy.io import ascii
 import subprocess
 import logging
+from types import SimpleNamespace
 from typing import NamedTuple
 from scipy import optimize
 
@@ -2628,7 +2629,18 @@ class NNLS(WeightSolver):
            would cost another library read and solve for no such guarantee.
         1. Shift each relative set's data to mean m_ref (into the model's
            absolute frame), build with the projected rows, solve -> w1.
-        2. delta_a = m_a(w1) - m_ref,a. If delta' C^-1 delta >
+           With a set's ``start_mean`` (``ProperMotions``), m_ref is that
+           field instead of the pass-0 model mean.
+        2. ``pm_recentre_mode: rebuild``: re-centre on c = m(w), rebuild
+           everything (G, e, P) at c and re-solve, until the rms over
+           apertures and both axes of m(w) - c is below
+           ``pm_recentre_step_tol`` (default 0.05, in the set's units) for
+           every set, or after ``pm_recentre_max_rounds`` (default 6)
+           rebuilt rounds. Freezing G at the pass-1 centre (below) pins the
+           solution near that centre; rebuilding it gives one fixed point
+           whatever the start. A round is a full build.
+        2'. ``pm_recentre_mode: frozen`` (default):
+           delta_a = m_a(w1) - m_ref,a. If delta' C^-1 delta >
            ``pm_recentre_delta_tol`` (default 0.01) in more than
            ``pm_recentre_frac_tol`` (default 0.05) of a set's apertures,
            shift the data to m_ref + delta and re-solve with G, e and P from
@@ -2637,10 +2649,14 @@ class NNLS(WeightSolver):
         Writes ``recentre_shifts.npz`` to the model directory, in each set's
         own histogram frame and units:
 
-        - ``extra_pass`` (bool); ``chi2_names``, ``chi2``, ``chi2_n``
+        - ``extra_pass`` (bool); ``recentre_mode``; ``n_rounds``, the solves
+          after pass 1; ``step_rms`` (n_rounds + 1,), max over sets of the
+          rms of m(w) - m_ref after pass 1 and each later solve;
+          ``converged``, step_rms[-1] < ``pm_recentre_step_tol``;
+          ``chi2_names``, ``chi2``, ``chi2_n``
           (n_datasets,): chi2 and N per dataset, see :meth:`_relative_chi2`
-        - per relative set ``<name>_``: ``m_ref_pass1`` (n_ap, 2), the pass-0
-          model mean; ``m_ref`` (n_ap, 2), the mean the data were shifted to
+        - per relative set ``<name>_``: ``m_ref_pass1`` (n_ap, 2), the pass-1
+          centre (``start_mean``, else the pass-0 model mean); ``m_ref`` (n_ap, 2), the mean the data were shifted to
           in the final pass; ``m_model`` (n_ap, 2), m_a(w); ``mhat`` (n_ap,
           2) = pinv(G)(A_a w - d_a) in whitened space, to first order
           m_ref - m_model (the residual shift the projection absorbed);
@@ -2652,7 +2668,8 @@ class NNLS(WeightSolver):
           used, and ``rot_normalisation`` ('pass0' or 'mge').
 
         The relative sets' data are restored to their unshifted values on
-        exit. Returns
+        exit. ``self.pm_recentre_info`` holds ``recentre_mode``,
+        ``n_rounds`` and ``converged``. Returns
         ``(weights, chi2_tot, chi2_kin, chi2_by_dataset)``.
         """
         if self.nnls_solver == "adelie":
@@ -2665,6 +2682,14 @@ class NNLS(WeightSolver):
         gram = self.gram_blockwise and self.nnls_solver in ("cvxopt", "admm")
         d_tol = float(self.settings.get("pm_recentre_delta_tol", 0.01))
         f_tol = float(self.settings.get("pm_recentre_frac_tol", 0.05))
+        mode = self.settings.get("pm_recentre_mode", "frozen")
+        step_tol = float(self.settings.get("pm_recentre_step_tol", 0.05))
+        max_rounds = int(self.settings.get("pm_recentre_max_rounds", 6))
+        if mode not in ("frozen", "rebuild"):
+            txt = (f"pm_recentre_mode must be 'frozen' or 'rebuild', not "
+                   f"{mode!r}")
+            self.logger.error(txt)
+            raise ValueError(txt)
         if self.nnls_solver == "admm" and getattr(self, "admm_free_p", False):
             # the extra pass reuses P, so it must survive the factorization
             self.logger.info("relative PM: admm_free_p ignored (P is kept "
@@ -2682,7 +2707,8 @@ class NNLS(WeightSolver):
             prob = self._relative_build(orblib, gram)
             self._pm_moments_only = False
             w, _ = self._relative_qp(prob)
-            m_ref = {k.name: self._pm_model_mean(k.name, w) for k in rel}
+            m_ref = {k.name: self._pm_model_mean(k.name, w)
+                     if k.start_mean is None else k.start_mean for k in rel}
             mass0 = {k.name: w @ self.pm_moments[k.name]["n"] for k in rel}
             self._rot_mass = dict(mass0)
             for k in rel:
@@ -2698,17 +2724,55 @@ class NNLS(WeightSolver):
                              f"delta^2/sigma^2 > {d_tol}: {frac}; extra pass: "
                              f"{extra}")
             m_used = m_ref
-            if extra:
+
+            def step(w):  # max over sets of rms(m(w) - centre)
+                return max(float(np.sqrt(np.mean(
+                    (self._pm_model_mean(k.name, w) - m_used[k.name]) ** 2)))
+                    for k in rel)
+            steps = [step(w)]
+            if mode == "rebuild":
+                extra = False
+                for r in range(1, max_rounds + 1):
+                    if steps[-1] < step_tol:
+                        break
+                    m_used = {k.name: self._pm_model_mean(k.name, w)
+                              for k in rel}
+                    for k in rel:
+                        k.shift_data(-m_used[k.name])
+                    # keep only ADMM's (z, u): drop the old P and factor
+                    # (~8 GB each at n ~ 45000) before the next build
+                    warm = (SimpleNamespace(z_exit=solver.z_exit,
+                                            u_exit=solver.u_exit)
+                            if hasattr(solver, "z_exit") else None)
+                    prob = solver = None
+                    self._pm_freeze = False
+                    prob = self._relative_build(orblib, gram)
+                    self._pm_freeze = True
+                    w, solver = self._relative_qp(prob, warm=warm)
+                    steps.append(step(w))
+                    self.logger.info(f"relative PM: rebuilt round {r}: rms "
+                                     f"step {steps[-1]:.4g}")
+            elif extra:
                 m_used = {k.name: self._pm_model_mean(k.name, w) for k in rel}
                 for k in rel:
                     k.shift_data(-m_used[k.name])
                 prob = self._relative_build(orblib, gram, rhs_from=prob)
                 w, _ = self._relative_qp(prob, warm=solver)
+                steps.append(step(w))
+            converged = bool(steps[-1] < step_tol)
+            self.pm_recentre_info = dict(recentre_mode=mode,
+                                         n_rounds=len(steps) - 1,
+                                         converged=converged)
+            if mode == "rebuild" and not converged:
+                self.logger.warning(
+                    f"relative PM: NOT converged after {max_rounds} rebuilt "
+                    f"rounds (rms step {steps[-1]:.4g} >= {step_tol})")
             chi2 = self._relative_chi2(orblib, prob, gram, w)
             for name, c2, n in chi2:
                 self.logger.info(f"chi2/N {name}: {c2:.6g}/{n} = "
                                  f"{c2 / max(n, 1):.4g}")
-            diag = dict(extra_pass=extra,
+            diag = dict(extra_pass=extra, step_rms=np.array(steps),
+                        **self.pm_recentre_info,
                         chi2_names=np.array([c[0] for c in chi2]),
                         chi2=np.array([c[1] for c in chi2]),
                         chi2_n=np.array([c[2] for c in chi2]))
@@ -3255,7 +3319,9 @@ class NNLS(WeightSolver):
                 results = table.Table()
                 results["weights"] = weights
                 results.meta = {"chi2_tot": chi2_tot, "chi2_kin": chi2_kin,
-                                "chi2_kinmap": chi2_kinmap}
+                                "chi2_kinmap": chi2_kinmap,
+                                **{f"pm_{k}": v for k, v in
+                                   self.pm_recentre_info.items()}}
                 results.write(self.weight_file, format="ascii.ecsv",
                               overwrite=True)
             self.config.copy_config_file(self.direc_with_ml)

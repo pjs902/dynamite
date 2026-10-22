@@ -17,6 +17,8 @@ import numpy as np
 import pytest
 from scipy.special import ndtr
 
+from astropy import table
+
 from dynamite import kinematics as dyn_kin
 from dynamite.weight_solvers import NNLS
 
@@ -410,7 +412,8 @@ class ConsistentLOS(FakeLOS):
 
 
 def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
-         d_tol=0.01, f_tol=0.05, norm=None, mge_scale=None):
+         d_tol=0.01, f_tol=0.05, norm=None, mge_scale=None, mode=None,
+         start=None, step_tol=None, max_rounds=None):
     """Relative PM toy with a known truth.
 
     Library: _orblib(rebin=False) (orbit means depend on o in x, on a in y).
@@ -418,7 +421,9 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
     PM data are the true model histograms recentred to mean 0 (relative).
     ``norm`` sets the rotation rows' normalisation; ``mge_scale`` (n_ap,)
     multiplies the PM set's MGE projected masses (a library that cannot
-    match the MGE). Returns (fake, lib, pm, w_true, m_true).
+    match the MGE). ``mode``, ``step_tol``, ``max_rounds``: the
+    pm_recentre_* settings; ``start``: a callable m_true -> start_mean.
+    Returns (fake, lib, pm, w_true, m_true).
     """
     w_true = np.array([1.3, 0.4, 0.9, 1.6, 0.2, 1.1])
     probe = make_pm(tmp_path, [(0, 0)] * 3, name="probe")
@@ -444,6 +449,11 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
                 [(0, 0, 0.5), (0, 1, 0.5), (1, 2, 1.0)])
             if norm is not None:
                 kw["rotation_rows"]["normalisation"] = norm
+        if start is not None:
+            c0 = start(m_true)
+            table.Table({"pm1": c0[:, 0], "pm2": c0[:, 1]}).write(
+                tmp_path / "start.ecsv", format="ascii.ecsv", overwrite=True)
+            kw["start_mean"] = "start.ecsv"
     pm = dyn_kin.ProperMotions(name="hst", datafile="hst.npz",
                                input_directory=str(tmp_path) + "/",
                                type="ProperMotions", **kw)
@@ -464,6 +474,10 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
     fake.admm_max_iters, fake.admm_tol, fake.admm_free_p = 20000, 1e-12, False
     fake.settings = {"pm_recentre_delta_tol": d_tol,
                      "pm_recentre_frac_tol": f_tol}
+    for key, val in (("mode", mode), ("step_tol", step_tol),
+                     ("max_rounds", max_rounds)):
+        if val is not None:
+            fake.settings[f"pm_recentre_{key}"] = val
     fake.direc_with_ml = str(tmp_path) + "/"
     fake._pm_dsq_over_sigsq = NNLS._pm_dsq_over_sigsq
     for name in DRIVER:
@@ -548,7 +562,8 @@ def test_recentre_shifts_npz_keys_and_shapes(tmp_path):
                    ("dsq_over_sigsq_pass1", "dsq_over_sigsq", "mass_ratio",
                     "mass_mge", "mass_pass0", "rot_mass")})
     shapes.update(extra_pass=(), chi2_names=(4,), chi2=(4,), chi2_n=(4,),
-                  hst_rot_normalisation=())
+                  hst_rot_normalisation=(), recentre_mode=(), n_rounds=(),
+                  converged=(), step_rms=(int(z["n_rounds"]) + 1,))
     assert set(z.files) == set(shapes)
     for k, s in shapes.items():
         assert z[k].shape == s, k
@@ -711,3 +726,83 @@ def test_float32_projection_matches_float64(tmp_path):
         G = m64["G"][a]
         resid = h32[:, a].reshape(h32.shape[0], -1) @ G
         assert np.abs(resid).max() < 1e-5 * scale * np.linalg.norm(G, axis=0).max()
+
+
+def _builds_spy(fake):
+    """Record, per _relative_build call, whether it was rhs-only."""
+    builds = []
+
+    def spy(self, orblib, gram_, rhs_from=None):
+        builds.append(rhs_from is not None)
+        return NNLS._relative_build(self, orblib, gram_, rhs_from)
+    fake._relative_build = types.MethodType(spy, fake)
+    return builds
+
+
+@pytest.mark.parametrize("solver,gram", [("scipy", False), ("admm", True)])
+def test_rebuild_mode_rebuilds_every_round_and_converges(tmp_path, solver,
+                                                         gram):
+    # start 2 units off the truth, so at least one rebuilt round is needed
+    fake, lib, pm, w_true, m_true = _toy(
+        tmp_path, solver=solver, gram=gram, mode="rebuild",
+        start=lambda m: m + 2.0, step_tol=1e-3)
+    builds = _builds_spy(fake)
+    w, *_ = fake._solve_relative(lib)
+    z = np.load(tmp_path / "recentre_shifts.npz")
+    assert str(z["recentre_mode"]) == "rebuild" and bool(z["converged"])
+    n = int(z["n_rounds"])
+    assert n >= 1 and z["step_rms"].shape == (n + 1,)
+    assert z["step_rms"][-1] < 1e-3 <= z["step_rms"][0]
+    # pass 0 + pass 1 + n rebuilt rounds, none rhs-only
+    assert builds == [False] * (n + 2)
+    assert np.allclose(z["hst_m_ref_pass1"], m_true + 2.0)
+    assert np.abs(_model_mean(lib, w) - m_true).max() < 0.02
+    assert fake.pm_recentre_info == dict(recentre_mode="rebuild",
+                                         n_rounds=n, converged=True)
+
+
+def test_rebuild_mode_reaches_one_answer_from_different_starts(tmp_path):
+    ends = []
+    for i, off in enumerate((-2.0, 0.0, 2.5)):
+        d = tmp_path / f"s{i}"
+        d.mkdir()
+        fake, lib, pm, w_true, m_true = _toy(
+            d, mode="rebuild", start=lambda m, o=off: m + o, step_tol=1e-4,
+            max_rounds=30)
+        w, *_ = fake._solve_relative(lib)
+        assert fake.pm_recentre_info["converged"]
+        ends.append(_model_mean(lib, w))
+    assert np.abs(ends[0] - ends[1]).max() < 1e-3
+    assert np.abs(ends[2] - ends[1]).max() < 1e-3
+
+
+def test_rebuild_mode_round_cap_flags_not_converged(tmp_path):
+    fake, lib, pm, *_ = _toy(tmp_path, mode="rebuild",
+                             start=lambda m: m + 2.0, step_tol=-1.0,
+                             max_rounds=2)
+    builds = _builds_spy(fake)
+    fake._solve_relative(lib)
+    assert builds == [False] * 4
+    assert fake.pm_recentre_info == dict(recentre_mode="rebuild",
+                                         n_rounds=2, converged=False)
+
+
+def test_bad_recentre_mode_is_rejected(tmp_path):
+    fake, lib, *_ = _toy(tmp_path, mode="sometimes")
+    with pytest.raises(ValueError, match="pm_recentre_mode"):
+        fake._solve_relative(lib)
+
+
+def test_start_mean_needs_a_relative_set_and_one_row_per_aperture(tmp_path):
+    _toy(tmp_path)  # writes hst.npz
+    with pytest.raises(ValueError, match="start_mean needs a relative"):
+        dyn_kin.ProperMotions(name="x", datafile="hst.npz",
+                              input_directory=str(tmp_path) + "/",
+                              type="ProperMotions", start_mean="start.ecsv")
+    table.Table({"pm1": [0.0], "pm2": [0.0]}).write(
+        tmp_path / "start.ecsv", format="ascii.ecsv", overwrite=True)
+    with pytest.raises(ValueError, match="start_mean must be finite"):
+        dyn_kin.ProperMotions(name="x", datafile="hst.npz",
+                              input_directory=str(tmp_path) + "/",
+                              type="ProperMotions", relative=True,
+                              start_mean="start.ecsv")
