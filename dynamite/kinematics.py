@@ -2266,18 +2266,23 @@ class RotationRows:
             datafile: rot_rows.ecsv      # superbin, component, mu, dmu
             weightfile: rot_weights.ecsv # superbin, aperture, c
             normalisation: pass0         # or mge
+            weight: 1.0                  # optional chi2 multiplier
 
     ``component`` is 'pm1' or 'pm2'; ``aperture`` is the 0-based index into
     the set's apertures (the first axis of ``PM_2dhist``); ``c`` is the
     member weight c_ka (e.g. star-count fractions, summing to 1 over k).
     With ``c_pm1``/``c_pm2`` present, ``component`` is ignored (by
     convention 'pmT'); 'pmT' without those columns is an error.
+    ``weight`` (default 1) multiplies the rows' chi2 (rows scaled by
+    sqrt(weight)), e.g. to test how hard the other data resist them; the
+    solver's reported ``rot_<set>`` chi2 includes it.
 
     """
     def __init__(self, datafile, weightfile, input_directory='',
-                 normalisation='pass0'):
+                 normalisation='pass0', weight=1.0):
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
         self.normalisation = normalisation
+        self.weight = float(weight)
         rows = table.Table.read(input_directory + datafile,
                                 format='ascii.ecsv')
         memb = table.Table.read(input_directory + weightfile,
@@ -2305,6 +2310,8 @@ class RotationRows:
         if self.memb_c12 is not None and not np.all(np.isfinite(
                 self.memb_c12)):
             bad.append('c_pm1, c_pm2 must be finite')
+        if not self.weight > 0:
+            bad.append('weight must be > 0')
         if not (np.all(np.isfinite(self.mu)) and np.all(self.dmu > 0)):
             bad.append('mu must be finite and dmu > 0')
         if not np.isin(self.superbin, self.memb_superbin).all():
@@ -2348,4 +2355,5 @@ class RotationRows:
         C = np.divide(C, prj_mass[:, None], out=np.zeros_like(C),
                       where=C != 0)
         A = C[:, :, 0] @ mu[:, :, 0].T + C[:, :, 1] @ mu[:, :, 1].T
-        return A / self.dmu[:, None], self.mu / self.dmu
+        dmu = self.dmu / np.sqrt(self.weight)
+        return A / dmu[:, None], self.mu / dmu

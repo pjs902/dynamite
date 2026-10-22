@@ -857,3 +857,15 @@ def test_rebuild_rounds_keep_the_pass1_errors(tmp_path):
     assert len(seen) >= 3  # pass 1, the round's rhs read, the chi2 read
     for e in seen[1:]:
         assert np.array_equal(e, seen[0])
+
+
+def test_rotation_rows_weight_scales_rows_by_sqrt_weight(tmp_path):
+    kw = write_rotation_files(tmp_path, [0], ["pm1"], [0.5], [0.1],
+                              [(0, 0, 1.0)])
+    kw["input_directory"] = str(tmp_path) + "/"
+    mu = np.random.default_rng(1).normal(size=(4, 2, 2))
+    A1, b1 = dyn_kin.RotationRows(**kw).rows(mu, np.ones(2))
+    A4, b4 = dyn_kin.RotationRows(weight=4.0, **kw).rows(mu, np.ones(2))
+    assert np.allclose(A4, 2 * A1) and np.allclose(b4, 2 * b1)
+    with pytest.raises(ValueError, match="weight must be > 0"):
+        dyn_kin.RotationRows(weight=0.0, **kw)
