@@ -341,7 +341,8 @@ from astropy.table import Table  # noqa: E402
 from dynamite import weight_solvers as ws_new  # noqa: E402
 
 DRIVER = ("_rotation_blocks", "_relative_build", "_relative_qp",
-          "_relative_chi2", "_pm_model_mean", "_solve_relative", "solve")
+          "_relative_chi2", "_pm_model_mean", "_solve_relative", "solve",
+          "_pm_shift_factor", "_relative_rank_update")
 
 
 def write_rotation_files(tmp_path, superbins, components, mu, dmu, members):
@@ -753,8 +754,9 @@ def test_rebuild_mode_rebuilds_every_round_and_converges(tmp_path, solver,
     n = int(z["n_rounds"])
     assert n >= 1 and z["step_rms"].shape == (n + 1,)
     assert z["step_rms"][-1] < 1e-3 <= z["step_rms"][0]
-    # pass 0 + pass 1 + n rebuilt rounds, none rhs-only
-    assert builds == [False] * (n + 2)
+    # pass 0 + pass 1 + n rebuilt rounds, none rhs-only; on the Gram path
+    # the rounds are rank updates (_relative_rank_update), not builds
+    assert builds == [False] * (2 if gram else n + 2)
     assert np.allclose(z["hst_m_ref_pass1"], m_true + 2.0)
     assert np.abs(_model_mean(lib, w) - m_true).max() < 0.02
     assert fake.pm_recentre_info == dict(recentre_mode="rebuild",
@@ -806,3 +808,52 @@ def test_start_mean_needs_a_relative_set_and_one_row_per_aperture(tmp_path):
                               input_directory=str(tmp_path) + "/",
                               type="ProperMotions", relative=True,
                               start_mean="start.ecsv")
+
+
+@pytest.mark.parametrize("stream,gap", [(False, 0), (True, 2)])
+def test_rank_update_round_equals_a_full_rebuild(tmp_path, stream, gap):
+    # same rounds, rank-update Gram vs full rebuild: same P, q and weights
+    out = {}
+    for rank in (True, False):
+        d = tmp_path / f"r{rank}"
+        d.mkdir()
+        fake, lib, pm, w_true, m_true = _toy(
+            d, solver="admm", gram=True, mode="rebuild",
+            start=lambda m: m + 2.0, step_tol=-1.0, max_rounds=2)
+        fake.settings["pm_recentre_rank_update"] = rank
+        fake.stream_reads, fake.gram_aperture_group = stream, gap
+        seen = []
+        orig = fake._relative_qp
+
+        def spy(prob, warm=None, orig=orig, seen=seen):
+            seen.append((prob["P"].copy(), prob["q"].copy()))
+            return orig(prob, warm)
+        fake._relative_qp = spy
+        w, *_ = fake._solve_relative(lib)
+        out[rank] = (seen, w, np.load(d / "recentre_shifts.npz")["chi2"])
+    (s1, w1, c1), (s0, w0, c0) = out[True], out[False]
+    assert len(s1) == len(s0) == 4  # pass 0, pass 1, 2 rounds
+    for (P1, q1), (P0, q0) in zip(s1, s0):
+        assert np.allclose(P1, P0, rtol=0, atol=1e-10 * np.abs(P0).max())
+        assert np.allclose(q1, q0, rtol=0, atol=1e-10 * np.abs(q0).max())
+    assert np.allclose(w1, w0, rtol=1e-6, atol=1e-9 * np.abs(w0).max())
+    assert np.allclose(c1, c0, rtol=1e-6)
+
+
+def test_rebuild_rounds_keep_the_pass1_errors(tmp_path):
+    fake, lib, pm, *_ = _toy(tmp_path, solver="admm", gram=True,
+                             mode="rebuild", start=lambda m: m + 2.0,
+                             step_tol=-1.0, max_rounds=1)
+    seen = []
+    orig = NNLS._relative_pm_block
+
+    def spy(self, kins, obs, err, orb, ap0):
+        r = orig(self, kins, obs, err, orb, ap0)
+        if not self._pm_moments_only:
+            seen.append(self.pm_moments[kins.name]["e"].copy())
+        return r
+    fake._relative_pm_block = types.MethodType(spy, fake)
+    fake._solve_relative(lib)
+    assert len(seen) >= 3  # pass 1, the round's rhs read, the chi2 read
+    for e in seen[1:]:
+        assert np.array_equal(e, seen[0])

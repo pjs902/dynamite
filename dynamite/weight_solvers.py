@@ -2389,7 +2389,9 @@ class NNLS(WeightSolver):
         only step 1 runs and the rows come back as zeros (pass 0); with
         ``_pm_freeze`` the whitened basis ``G`` and errors ``e`` stored by
         the previous projecting call are reused, so the orbit rows are
-        bitwise those of that call and only the data rows change. Every
+        bitwise those of that call and only the data rows change. With
+        ``_pm_freeze_e`` only the errors ``e`` are reused and ``G`` is
+        rebuilt from the current data (rebuild mode). Every
         projecting call also stores, per aperture, ``ghat`` = pinv(G) @ the
         unprojected whitened orbit rows (n_orbs, 2) and ``dhat`` = pinv(G) @
         the whitened data, so m-hat_a(w) = w @ ghat[:, a] - dhat[a].
@@ -2398,7 +2400,8 @@ class NNLS(WeightSolver):
         vx, vy = kins.as_histogram2d().x
         moments_only = getattr(self, "_pm_moments_only", False)
         freeze = getattr(self, "_pm_freeze", False)
-        if ap0 == 0 and not freeze:
+        freeze_e = getattr(self, "_pm_freeze_e", False)
+        if ap0 == 0 and not (freeze or freeze_e):
             n_all = kins.n_spatial_bins
             self.pm_moments[kins.name] = {
                 "n": np.zeros((n_orbs, n_all)),
@@ -2433,7 +2436,7 @@ class NNLS(WeightSolver):
             if freeze:
                 e, G = mom["e"][ap0 + a], mom["G"][ap0 + a]
             else:
-                e = err[a].ravel()
+                e = mom["e"][ap0 + a] if freeze_e else err[a].ravel()
                 G = dyn_kin.pm_shift_basis(obs[a][None], vx, vy)[0]
                 G = G.reshape(-1, 2) / e[:, None]
                 mom["e"][ap0 + a], mom["G"][ap0 + a] = e, G
@@ -2497,6 +2500,47 @@ class NNLS(WeightSolver):
         dv = v[None] - mu[:, None, None]
         cov = np.einsum("axy,axyk,axyl->akl", h, dv, dv) / n[:, None, None]
         return np.einsum("ak,akl,al->a", delta, np.linalg.pinv(cov), delta)
+
+    def _pm_shift_factor(self, rel):
+        """``U'`` (2 n_ap, n_orbs), F-order, over the relative sets ``rel``:
+        U U' = sum_a ghat_a (G_a'G_a) ghat_a' = sum_a h_a' G_a G_a^+ h_a,
+        the part of the unprojected (whitened) Gram that the last projecting
+        build removed (``pm_moments`` ``ghat`` and ``G``)."""
+        parts = []
+        for k in rel:
+            mom = self.pm_moments[k.name]
+            lam, V = np.linalg.eigh(np.einsum("akc,akd->acd", mom["G"],
+                                              mom["G"]))
+            R = V * np.sqrt(np.clip(lam, 0, None))[:, None, :]  # R R' = G'G
+            parts.append(np.einsum("oac,acd->ado", mom["ghat"], R).reshape(
+                -1, mom["ghat"].shape[0]))
+        return np.asfortranarray(np.concatenate(parts))
+
+    def _relative_rank_update(self, orblib, prob, rel):
+        """Gram-path build at a new centre without a new dsyrk over the rows.
+
+        With the relative sets' errors frozen (``_pm_freeze_e``), the
+        unprojected Gram K does not depend on the centre and the projected
+        Gram is K - U U' (:meth:`_pm_shift_factor`). So the new raw Gram is
+        the previous one (``prob``, which must carry ``U``) + U_old U_old' -
+        U_new U_new': two rank-(2 n_ap) updates, done in place in the old raw
+        Gram's buffer. The rows are read once, rhs-only, for v, b and the new
+        G and ghat. ``prob`` is emptied (its P is dropped before the new one
+        is formed). Returns a problem dict as :meth:`_relative_build`.
+        """
+        gp = self.construct_gram_and_rhs_blockwise(orblib, rhs_only=True)
+        U = self._pm_shift_factor(rel)
+        G, U_old = prob["gp"].G, prob["U"]
+        prob.clear()  # drops the old P (the caller holds no other reference)
+        G = dsyrk(1.0, U_old, beta=1.0, c=G, trans=1, lower=0, overwrite_c=1)
+        del U_old
+        G = dsyrk(-1.0, U, beta=1.0, c=G, trans=1, lower=0, overwrite_c=1)
+        acc = NormalEquationAccumulator(G.shape[0], rhs_only=True)
+        acc.G, acc.v, acc.b_max = G, gp.v, gp.b_max
+        P, q, col, b_max = acc.finalize()
+        self._ridge_shift = _apply_diagonal_ridge(P, self.ridge_lambda)
+        gp = gp._replace(P=P, q=q, col_norm=col, b_max=b_max, G=G)
+        return dict(gp=gp, P=P, q=q, col=col, b_max=b_max, U=U)
 
     def _relative_build(self, orblib, gram, rhs_from=None):
         """One build of the relative-PM problem (plus rotation rows).
@@ -2632,13 +2676,17 @@ class NNLS(WeightSolver):
            With a set's ``start_mean`` (``ProperMotions``), m_ref is that
            field instead of the pass-0 model mean.
         2. ``pm_recentre_mode: rebuild``: re-centre on c = m(w), rebuild
-           everything (G, e, P) at c and re-solve, until the rms over
+           G and P at c (errors e stay as placed at the pass-1 centre) and
+           re-solve, until the rms over
            apertures and both axes of m(w) - c is below
            ``pm_recentre_step_tol`` (default 0.05, in the set's units) for
            every set, or after ``pm_recentre_max_rounds`` (default 6)
            rebuilt rounds. Freezing G at the pass-1 centre (below) pins the
            solution near that centre; rebuilding it gives one fixed point
-           whatever the start. A round is a full build.
+           whatever the start. On the Gram path with
+           ``pm_recentre_rank_update`` (default True) a round is one
+           rhs-only read plus two rank-(2 n_ap) updates
+           (:meth:`_relative_rank_update`); otherwise a full build.
         2'. ``pm_recentre_mode: frozen`` (default):
            delta_a = m_a(w1) - m_ref,a. If delta' C^-1 delta >
            ``pm_recentre_delta_tol`` (default 0.01) in more than
@@ -2685,6 +2733,8 @@ class NNLS(WeightSolver):
         mode = self.settings.get("pm_recentre_mode", "frozen")
         step_tol = float(self.settings.get("pm_recentre_step_tol", 0.05))
         max_rounds = int(self.settings.get("pm_recentre_max_rounds", 6))
+        rank = gram and bool(self.settings.get("pm_recentre_rank_update",
+                                               True))
         if mode not in ("frozen", "rebuild"):
             txt = (f"pm_recentre_mode must be 'frozen' or 'rebuild', not "
                    f"{mode!r}")
@@ -2732,6 +2782,8 @@ class NNLS(WeightSolver):
             steps = [step(w)]
             if mode == "rebuild":
                 extra = False
+                if rank:
+                    prob["U"] = self._pm_shift_factor(rel)
                 for r in range(1, max_rounds + 1):
                     if steps[-1] < step_tol:
                         break
@@ -2744,10 +2796,14 @@ class NNLS(WeightSolver):
                     warm = (SimpleNamespace(z_exit=solver.z_exit,
                                             u_exit=solver.u_exit)
                             if hasattr(solver, "z_exit") else None)
-                    prob = solver = None
-                    self._pm_freeze = False
-                    prob = self._relative_build(orblib, gram)
-                    self._pm_freeze = True
+                    solver = None
+                    self._pm_freeze, self._pm_freeze_e = False, True
+                    if rank:
+                        prob = self._relative_rank_update(orblib, prob, rel)
+                    else:
+                        prob = None
+                        prob = self._relative_build(orblib, gram)
+                    self._pm_freeze, self._pm_freeze_e = True, False
                     w, solver = self._relative_qp(prob, warm=warm)
                     steps.append(step(w))
                     self.logger.info(f"relative PM: rebuilt round {r}: rms "
@@ -2803,6 +2859,7 @@ class NNLS(WeightSolver):
         finally:
             hold.close()
             self._pm_moments_only = self._pm_freeze = False
+            self._pm_freeze_e = False
             self._rot_mass = {}
             for k in rel:
                 if k.data_unshifted is not None:
