@@ -2401,6 +2401,9 @@ class NNLS(WeightSolver):
         moments_only = getattr(self, "_pm_moments_only", False)
         freeze = getattr(self, "_pm_freeze", False)
         freeze_e = getattr(self, "_pm_freeze_e", False)
+        profile = getattr(self, "_pm_profile", False)
+        w_prev = getattr(self, "_pm_profile_w", None)
+        xedg = kins.as_histogram2d().xedg
         if ap0 == 0 and not (freeze or freeze_e):
             n_all = kins.n_spatial_bins
             self.pm_moments[kins.name] = {
@@ -2410,6 +2413,7 @@ class NNLS(WeightSolver):
                 "e": np.ones((n_all, nvx * nvy)),
                 "ghat": np.zeros((n_orbs, n_all, 2)),
                 "dhat": np.zeros((n_all, 2)),
+                "s": np.zeros((n_all, 2)),
             }
         mom = self.pm_moments[kins.name]
         obs = np.reshape(obs, (n_ap, nvx, nvy))
@@ -2432,6 +2436,28 @@ class NNLS(WeightSolver):
             mom["mu"][:, ap0 + a, 0] = sx @ vx
             mom["mu"][:, ap0 + a, 1] = sy @ vy
             if moments_only:
+                continue
+            if profile:
+                # no projection: whitened rows at frozen errors, so the Gram
+                # stays fixed; the centre is fitted per aperture instead
+                e = mom["e"][ap0 + a] if freeze else err[a].ravel()
+                mom["e"][ap0 + a] = e
+                if w_prev is not None:
+                    o = obs[a]
+                    H = (w_prev @ h.reshape(n_orbs, -1)).reshape(nvx, nvy)
+                    s = self._pm_fit_shift(kins, H, o, e.reshape(nvx, nvy))
+                    mom["s"][ap0 + a] = s
+                    if self._pm_profile_move:
+                        c = self._pm_centre[kins.name][ap0 + a] + s
+                        self._pm_centre[kins.name][ap0 + a] = c
+                        d0 = kins.data_unshifted["PM_2dhist"][ap0 + a]
+                        new = kins.shift_histograms(d0[None], xedg, -c[None])[0]
+                        tot = new.sum()
+                        if tot > 0:  # data scaled by projected mass, as obs
+                            o = new * (o.sum() / tot)
+                    obs[a] = o
+                obs_out[a] = obs[a].ravel() / e
+                orb_out[:, a] = h.reshape(n_orbs, -1) / e.astype(dt)
                 continue
             if freeze:
                 e, G = mom["e"][ap0 + a], mom["G"][ap0 + a]
@@ -2500,6 +2526,30 @@ class NNLS(WeightSolver):
         dv = v[None] - mu[:, None, None]
         cov = np.einsum("axy,axyk,axyl->akl", h, dv, dv) / n[:, None, None]
         return np.einsum("ak,akl,al->a", delta, np.linalg.pinv(cov), delta)
+
+    @staticmethod
+    def _pm_fit_shift(kins, H, obs, e):
+        """s (2,) minimising sum(((H shifted by -s) - obs) / e)^2: the exact
+        (not linearised) offset of model histogram ``H`` from data ``obs``,
+        so data at centre c + s match H. Starts from the mean difference."""
+        x, y = kins.as_histogram2d().x
+        xedg = kins.as_histogram2d().xedg
+        ok = e > 0
+        inv = np.where(ok, 1.0 / np.where(ok, e, 1.0), 0.0)
+
+        def mean(h):
+            h = np.clip(h, 0, None)
+            n = h.sum()
+            return np.array([h.sum(1) @ x, h.sum(0) @ y]) / n if n > 0 \
+                else np.zeros(2)
+
+        def f(s):
+            Hs = kins.shift_histograms(H[None], xedg, s[None])[0]
+            return float((((Hs - obs) * inv) ** 2).sum())
+        s0 = mean(H) - mean(obs)
+        r = optimize.minimize(f, s0, method="Nelder-Mead",
+                              options=dict(xatol=1e-5, fatol=1e-9))
+        return r.x if r.fun <= f(s0) else s0
 
     def _pm_shift_factor(self, rel):
         """``U'`` (2 n_ap, n_orbs), F-order, over the relative sets ``rel``:
@@ -2687,6 +2737,16 @@ class NNLS(WeightSolver):
            ``pm_recentre_rank_update`` (default True) a round is one
            rhs-only read plus two rank-(2 n_ap) updates
            (:meth:`_relative_rank_update`); otherwise a full build.
+        2''. ``pm_recentre_mode: profile``: no shift projection. The rows
+           are whitened by the pass-1 errors only, so P never changes. Each
+           round is one rhs-only read that fits every aperture's centre
+           exactly to the model histogram at the current w
+           (:meth:`_pm_fit_shift`; data at c + s match the model), moves the
+           data there and re-solves; stop when the rms fitted shift is below
+           ``pm_recentre_step_tol``, or after ``pm_recentre_max_rounds``.
+           This is alternating minimisation of the HST chi2 over w and the
+           per-aperture centres, so the centre is the best-fit offset, not
+           the model mean, and the chi2 is exact rather than linearised.
         2'. ``pm_recentre_mode: frozen`` (default):
            delta_a = m_a(w1) - m_ref,a. If delta' C^-1 delta >
            ``pm_recentre_delta_tol`` (default 0.01) in more than
@@ -2735,9 +2795,9 @@ class NNLS(WeightSolver):
         max_rounds = int(self.settings.get("pm_recentre_max_rounds", 6))
         rank = gram and bool(self.settings.get("pm_recentre_rank_update",
                                                True))
-        if mode not in ("frozen", "rebuild"):
-            txt = (f"pm_recentre_mode must be 'frozen' or 'rebuild', not "
-                   f"{mode!r}")
+        if mode not in ("frozen", "rebuild", "profile"):
+            txt = (f"pm_recentre_mode must be 'frozen', 'rebuild' or "
+                   f"'profile', not {mode!r}")
             self.logger.error(txt)
             raise ValueError(txt)
         if self.nnls_solver == "admm" and getattr(self, "admm_free_p", False):
@@ -2754,6 +2814,7 @@ class NNLS(WeightSolver):
             hold.enter_context(
                 getattr(orblib, "hold_decompressed", contextlib.nullcontext)())
             self._pm_moments_only, self._pm_freeze = True, False
+            self._pm_profile = mode == "profile"
             prob = self._relative_build(orblib, gram)
             self._pm_moments_only = False
             w, _ = self._relative_qp(prob)
@@ -2780,7 +2841,36 @@ class NNLS(WeightSolver):
                     (self._pm_model_mean(k.name, w) - m_used[k.name]) ** 2)))
                     for k in rel)
             steps = [step(w)]
-            if mode == "rebuild":
+
+            def fitted_step():  # max over sets of rms(fitted centre shift)
+                return max(float(np.sqrt(np.mean(
+                    self.pm_moments[k.name]["s"] ** 2))) for k in rel)
+            if mode == "profile":
+                extra = False
+                self._pm_centre = {k.name: np.array(m_ref[k.name], float)
+                                   for k in rel}
+                steps, n_solves = [], 0
+                self._pm_profile_move = True
+                for r in range(1, max_rounds + 1):
+                    # one rhs-only read: fit each aperture's centre to the
+                    # model at w and move its data there (P is unchanged)
+                    self._pm_profile_w = w
+                    prob = self._relative_build(orblib, gram, rhs_from=prob)
+                    m_used = {n: c.copy() for n, c in self._pm_centre.items()}
+                    for k in rel:
+                        k.shift_data(-m_used[k.name])
+                    steps.append(fitted_step())
+                    self.logger.info(f"relative PM: profile round {r}: rms "
+                                     f"centre shift {steps[-1]:.4g}")
+                    if steps[-1] < step_tol:
+                        break
+                    w, solver = self._relative_qp(prob, warm=solver)
+                    n_solves += 1
+                # the chi2 read below fits the final w's centre (no move)
+                self._pm_profile_w, self._pm_profile_move = w, False
+                if not gram:  # its chi2 reuses A: fit with an explicit read
+                    prob = self._relative_build(orblib, gram, rhs_from=prob)
+            elif mode == "rebuild":
                 extra = False
                 if rank:
                     prob["U"] = self._pm_shift_factor(rel)
@@ -2815,15 +2905,17 @@ class NNLS(WeightSolver):
                 prob = self._relative_build(orblib, gram, rhs_from=prob)
                 w, _ = self._relative_qp(prob, warm=solver)
                 steps.append(step(w))
-            converged = bool(steps[-1] < step_tol)
-            self.pm_recentre_info = dict(recentre_mode=mode,
-                                         n_rounds=len(steps) - 1,
-                                         converged=converged)
-            if mode == "rebuild" and not converged:
-                self.logger.warning(
-                    f"relative PM: NOT converged after {max_rounds} rebuilt "
-                    f"rounds (rms step {steps[-1]:.4g} >= {step_tol})")
             chi2 = self._relative_chi2(orblib, prob, gram, w)
+            if mode == "profile":
+                steps.append(fitted_step())
+            converged = bool(steps[-1] < step_tol)
+            self.pm_recentre_info = dict(
+                recentre_mode=mode, converged=converged,
+                n_rounds=n_solves if mode == "profile" else len(steps) - 1)
+            if mode != "frozen" and not converged:
+                self.logger.warning(
+                    f"relative PM: NOT converged after {max_rounds} {mode} "
+                    f"rounds (rms step {steps[-1]:.4g} >= {step_tol})")
             for name, c2, n in chi2:
                 self.logger.info(f"chi2/N {name}: {c2:.6g}/{n} = "
                                  f"{c2 / max(n, 1):.4g}")
@@ -2841,6 +2933,8 @@ class NNLS(WeightSolver):
                     diag[f"{nm}_m_ref_pass1"] = m_ref[nm]
                     diag[f"{nm}_m_ref"] = m_used[nm]
                     diag[f"{nm}_m_model"] = m_model
+                    if mode == "profile":
+                        diag[f"{nm}_s_final"] = mom["s"]
                     diag[f"{nm}_mhat"] = (np.einsum("o,oak->ak", w, mom["ghat"])
                                           - mom["dhat"])
                     diag[f"{nm}_dsq_over_sigsq_pass1"] = ratio1[nm]
@@ -2859,7 +2953,8 @@ class NNLS(WeightSolver):
         finally:
             hold.close()
             self._pm_moments_only = self._pm_freeze = False
-            self._pm_freeze_e = False
+            self._pm_freeze_e = self._pm_profile = False
+            self._pm_profile_w, self._pm_centre = None, {}
             self._rot_mass = {}
             for k in rel:
                 if k.data_unshifted is not None:

@@ -481,6 +481,7 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
             fake.settings[f"pm_recentre_{key}"] = val
     fake.direc_with_ml = str(tmp_path) + "/"
     fake._pm_dsq_over_sigsq = NNLS._pm_dsq_over_sigsq
+    fake._pm_fit_shift = NNLS._pm_fit_shift
     for name in DRIVER:
         setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
     return fake, lib, pm, w_true, m_true
@@ -776,6 +777,40 @@ def test_rebuild_mode_reaches_one_answer_from_different_starts(tmp_path):
         ends.append(_model_mean(lib, w))
     assert np.abs(ends[0] - ends[1]).max() < 1e-3
     assert np.abs(ends[2] - ends[1]).max() < 1e-3
+
+
+@pytest.mark.parametrize("solver,gram", [("scipy", False), ("admm", True)])
+def test_profile_mode_reaches_the_truth_from_different_starts(tmp_path,
+                                                              solver, gram):
+    # exact per-aperture centre fit, P never rebuilt: one answer, the truth.
+    # The fitted shift levels off at ~2e-4 (model-side fit, data-side move)
+    ends = []
+    for i, off in enumerate((-2.0, 2.5)):
+        d = tmp_path / f"s{i}"
+        d.mkdir()
+        fake, lib, pm, w_true, m_true = _toy(
+            d, solver=solver, gram=gram, mode="profile",
+            start=lambda m, o=off: m + o, step_tol=1e-3, max_rounds=30)
+        builds = _builds_spy(fake)
+        w, *_ = fake._solve_relative(lib)
+        info = fake.pm_recentre_info
+        assert info["recentre_mode"] == "profile" and info["converged"]
+        # pass 0 and pass 1 build P; every later read is rhs-only
+        assert builds[:2] == [False, False] and all(builds[2:])
+        z = np.load(d / "recentre_shifts.npz")
+        assert np.abs(z["hst_s_final"]).max() < 1e-3
+        ends.append(_model_mean(lib, w))
+        assert np.abs(ends[-1] - m_true).max() < 0.02, i
+    assert np.abs(ends[0] - ends[1]).max() < 1e-3
+
+
+def test_profile_mode_round_cap_flags_not_converged(tmp_path):
+    fake, lib, pm, *_ = _toy(tmp_path, mode="profile",
+                             start=lambda m: m + 2.0, step_tol=-1.0,
+                             max_rounds=2)
+    fake._solve_relative(lib)
+    assert fake.pm_recentre_info == dict(recentre_mode="profile",
+                                         n_rounds=2, converged=False)
 
 
 def test_rebuild_mode_round_cap_flags_not_converged(tmp_path):
