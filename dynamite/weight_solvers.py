@@ -2448,6 +2448,11 @@ class NNLS(WeightSolver):
                     s = self._pm_fit_shift(kins, H, o, e.reshape(nvx, nvy))
                     mom["s"][ap0 + a] = s
                     if self._pm_profile_move:
+                        # a shift reversing the last move is a 2-cycle (seen
+                        # in ~1% of central i44 bins): move half-way instead
+                        sp = self._pm_s_prev.get(kins.name)
+                        if sp is not None and s @ sp[ap0 + a] < 0:
+                            s = 0.5 * s
                         c = self._pm_centre[kins.name][ap0 + a] + s
                         self._pm_centre[kins.name][ap0 + a] = c
                         d0 = kins.data_unshifted["PM_2dhist"][ap0 + a]
@@ -2867,6 +2872,7 @@ class NNLS(WeightSolver):
                 extra = False
                 self._pm_centre = {k.name: np.array(m_ref[k.name], float)
                                    for k in rel}
+                self._pm_s_prev = {}
                 steps, n_solves, s_rounds = [], 0, []
                 # total chi2 (all rows, rotation rows included) after each
                 # centre move and each re-solve; alternating minimisation, so
@@ -2885,6 +2891,7 @@ class NNLS(WeightSolver):
                     steps.append(fitted_step())
                     s_rounds.append({k.name: self.pm_moments[k.name]["s"].copy()
                                      for k in rel})
+                    self._pm_s_prev = s_rounds[-1]
                     chi2_moved.append(self._relative_chi2_total(prob, w))
                     if steps[-1] < step_tol:
                         stop = "step_tol"
@@ -3004,7 +3011,7 @@ class NNLS(WeightSolver):
             hold.close()
             self._pm_moments_only = self._pm_freeze = False
             self._pm_freeze_e = self._pm_profile = False
-            self._pm_profile_w, self._pm_centre = None, {}
+            self._pm_profile_w, self._pm_centre, self._pm_s_prev = None, {}, {}
             self._rot_mass = {}
             for k in rel:
                 if k.data_unshifted is not None:
