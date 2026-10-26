@@ -482,6 +482,7 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
     fake.direc_with_ml = str(tmp_path) + "/"
     fake._pm_dsq_over_sigsq = NNLS._pm_dsq_over_sigsq
     fake._pm_fit_shift = NNLS._pm_fit_shift
+    fake._relative_chi2_total = NNLS._relative_chi2_total
     for name in DRIVER:
         setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
     return fake, lib, pm, w_true, m_true
@@ -815,7 +816,37 @@ def test_profile_mode_round_cap_flags_not_converged(tmp_path):
                              max_rounds=2)
     fake._solve_relative(lib)
     assert fake.pm_recentre_info == dict(recentre_mode="profile",
-                                         n_rounds=2, converged=False)
+                                         n_rounds=2, converged=False,
+                                         stop="max_rounds")
+
+
+@pytest.mark.parametrize("solver,gram", [("scipy", False), ("admm", True)])
+def test_profile_mode_chi2_falls_matches_and_can_stop_on_it(tmp_path, solver,
+                                                            gram):
+    fake, lib, pm, *_ = _toy(tmp_path, solver=solver, gram=gram,
+                             mode="profile", start=lambda m: m + 2.0,
+                             step_tol=-1.0, max_rounds=8)
+    w, chi2_tot, chi2_kin, chi2 = fake._solve_relative(lib)
+    z = np.load(tmp_path / "recentre_shifts.npz")
+    solved, moved = z["chi2_total_solved"], z["chi2_total_moved"]
+    assert solved.shape == (9,) and moved.shape == (8,)
+    # alternating minimisation: each move and each re-solve lowers chi2
+    # (up to the model-side fit / data-side move mismatch, ~1e-6 relative)
+    tol = 1e-6 * solved[0]
+    assert np.all(moved <= solved[:-1] + tol)
+    assert np.all(solved[1:] <= moved + tol)
+    # the last solve's total equals the chi2 read's sum (same centres)
+    assert np.isclose(solved[-1], chi2_tot, rtol=1e-6)
+    # with a chi2 tolerance it stops early, flagged
+    d = tmp_path / "tol"
+    d.mkdir()
+    fake, lib, *_ = _toy(d, solver=solver, gram=gram, mode="profile",
+                         start=lambda m: m + 2.0, step_tol=-1.0,
+                         max_rounds=8)
+    fake.settings["pm_recentre_chi2_tol"] = 0.5 * (solved[1] - solved[2])
+    fake._solve_relative(lib)
+    assert fake.pm_recentre_info["stop"] == "chi2_tol"
+    assert fake.pm_recentre_info["n_rounds"] < 8
 
 
 def test_rebuild_mode_round_cap_flags_not_converged(tmp_path):

@@ -2635,6 +2635,18 @@ class NNLS(WeightSolver):
         q = -((A[1:] / col).T @ (b[1:] / b_max))
         return dict(prob, P=P, q=q, col=col, b_max=b_max)
 
+    @staticmethod
+    def _relative_chi2_total(prob, w):
+        """Total chi2 of all rows at ``w`` for the problem's current right-hand
+        side: ``||A w - b||^2``, or on the Gram path ``w'Gw - 2 w'v + ||b||^2``
+        plus the total-mass row (``G``, ``v`` raw, as in :class:`GramProblem`)."""
+        if "A" in prob:
+            r = prob["A"] @ w - prob["b"]
+            return float(r @ r)
+        gp = prob["gp"]
+        return float(w @ (gp.G @ w) - 2 * w @ gp.v + gp.b_sq_rest
+                     + (gp.row0_vec @ w - gp.b0) ** 2)
+
     def _relative_qp(self, prob, warm=None):
         """Solve one built problem; returns ``(weights, solver or None)``.
 
@@ -2749,6 +2761,9 @@ class NNLS(WeightSolver):
            This is alternating minimisation of the HST chi2 over w and the
            per-aperture centres, so the centre is the best-fit offset, not
            the model mean, and the chi2 is exact rather than linearised.
+           The total chi2 after every centre move and re-solve is logged and
+           saved; with ``pm_recentre_chi2_tol`` the rounds also stop when a
+           round lowers it by less than that (``pm_recentre_info['stop']``).
         2'. ``pm_recentre_mode: frozen`` (default):
            delta_a = m_a(w1) - m_ref,a. If delta' C^-1 delta >
            ``pm_recentre_delta_tol`` (default 0.01) in more than
@@ -2795,6 +2810,7 @@ class NNLS(WeightSolver):
         mode = self.settings.get("pm_recentre_mode", "frozen")
         step_tol = float(self.settings.get("pm_recentre_step_tol", 0.05))
         max_rounds = int(self.settings.get("pm_recentre_max_rounds", 6))
+        chi2_tol = self.settings.get("pm_recentre_chi2_tol")  # profile only
         rank = gram and bool(self.settings.get("pm_recentre_rank_update",
                                                True))
         if mode not in ("frozen", "rebuild", "profile"):
@@ -2852,6 +2868,11 @@ class NNLS(WeightSolver):
                 self._pm_centre = {k.name: np.array(m_ref[k.name], float)
                                    for k in rel}
                 steps, n_solves, s_rounds = [], 0, []
+                # total chi2 (all rows, rotation rows included) after each
+                # centre move and each re-solve; alternating minimisation, so
+                # it should only fall
+                chi2_moved, chi2_solved = [], [self._relative_chi2_total(prob, w)]
+                stop = "max_rounds"
                 self._pm_profile_move = True
                 for r in range(1, max_rounds + 1):
                     # one rhs-only read: fit each aperture's centre to the
@@ -2864,12 +2885,25 @@ class NNLS(WeightSolver):
                     steps.append(fitted_step())
                     s_rounds.append({k.name: self.pm_moments[k.name]["s"].copy()
                                      for k in rel})
-                    self.logger.info(f"relative PM: profile round {r}: rms "
-                                     f"centre shift {steps[-1]:.4g}")
+                    chi2_moved.append(self._relative_chi2_total(prob, w))
                     if steps[-1] < step_tol:
+                        stop = "step_tol"
+                        self.logger.info(f"relative PM: profile round {r}: rms "
+                                         f"centre shift {steps[-1]:.4g}; "
+                                         f"chi2 {chi2_moved[-1]:.8g}")
                         break
                     w, solver = self._relative_qp(prob, warm=solver)
                     n_solves += 1
+                    chi2_solved.append(self._relative_chi2_total(prob, w))
+                    gain = chi2_solved[-2] - chi2_solved[-1]
+                    self.logger.info(
+                        f"relative PM: profile round {r}: rms centre shift "
+                        f"{steps[-1]:.4g}; chi2 {chi2_solved[-2]:.8g} -> "
+                        f"{chi2_moved[-1]:.8g} (centres) -> "
+                        f"{chi2_solved[-1]:.8g} (weights), gain {gain:.4g}")
+                    if chi2_tol is not None and gain < float(chi2_tol):
+                        stop = "chi2_tol"
+                        break
                 # the chi2 read below fits the final w's centre (no move)
                 self._pm_profile_w, self._pm_profile_move = w, False
                 if not gram:  # its chi2 reuses A: fit with an explicit read
@@ -2916,6 +2950,10 @@ class NNLS(WeightSolver):
             self.pm_recentre_info = dict(
                 recentre_mode=mode, converged=converged,
                 n_rounds=n_solves if mode == "profile" else len(steps) - 1)
+            if mode == "profile":
+                # chi2_tol stops on a stable chi2 even if a few centres still
+                # move; 'converged' keeps meaning the step criterion
+                self.pm_recentre_info["stop"] = stop
             if mode != "frozen" and not converged:
                 self.logger.warning(
                     f"relative PM: NOT converged after {max_rounds} {mode} "
@@ -2923,7 +2961,12 @@ class NNLS(WeightSolver):
             for name, c2, n in chi2:
                 self.logger.info(f"chi2/N {name}: {c2:.6g}/{n} = "
                                  f"{c2 / max(n, 1):.4g}")
-            diag = dict(extra_pass=extra, step_rms=np.array(steps),
+            if mode == "profile":
+                diag_extra = dict(chi2_total_moved=np.array(chi2_moved),
+                                  chi2_total_solved=np.array(chi2_solved))
+            else:
+                diag_extra = {}
+            diag = dict(extra_pass=extra, step_rms=np.array(steps), **diag_extra,
                         **self.pm_recentre_info,
                         chi2_names=np.array([c[0] for c in chi2]),
                         chi2=np.array([c[1] for c in chi2]),
