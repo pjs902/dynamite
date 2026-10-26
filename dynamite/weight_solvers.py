@@ -2531,25 +2531,26 @@ class NNLS(WeightSolver):
     def _pm_fit_shift(kins, H, obs, e):
         """s (2,) minimising sum(((H shifted by -s) - obs) / e)^2: the exact
         (not linearised) offset of model histogram ``H`` from data ``obs``,
-        so data at centre c + s match H. Starts from the mean difference."""
-        x, y = kins.as_histogram2d().x
+        so data at centre c + s match H. Local search from s = 0 (the current
+        centre), capped at half a velocity cell: in apertures where the chi2
+        is flat in s (the centre, where nothing else pins the mean) a global
+        start (the mean difference) lands on a different far minimum each
+        round and the rounds never settle."""
         xedg = kins.as_histogram2d().xedg
+        cap = 0.5 * min(np.diff(xedg[0]).min(), np.diff(xedg[1]).min())
         ok = e > 0
         inv = np.where(ok, 1.0 / np.where(ok, e, 1.0), 0.0)
-
-        def mean(h):
-            h = np.clip(h, 0, None)
-            n = h.sum()
-            return np.array([h.sum(1) @ x, h.sum(0) @ y]) / n if n > 0 \
-                else np.zeros(2)
 
         def f(s):
             Hs = kins.shift_histograms(H[None], xedg, s[None])[0]
             return float((((Hs - obs) * inv) ** 2).sum())
-        s0 = mean(H) - mean(obs)
-        r = optimize.minimize(f, s0, method="Nelder-Mead",
-                              options=dict(xatol=1e-5, fatol=1e-9))
-        return r.x if r.fun <= f(s0) else s0
+        d = 0.1 * cap
+        r = optimize.minimize(f, np.zeros(2), method="Nelder-Mead", options=dict(
+            xatol=1e-5, fatol=1e-9,
+            initial_simplex=np.array([[0.0, 0.0], [d, 0.0], [0.0, d]])))
+        s = r.x if r.fun < f(np.zeros(2)) else np.zeros(2)
+        n = np.hypot(*s)
+        return s * (cap / n) if n > cap else s
 
     def _pm_shift_factor(self, rel):
         """``U'`` (2 n_ap, n_orbs), F-order, over the relative sets ``rel``:
@@ -2741,7 +2742,8 @@ class NNLS(WeightSolver):
            are whitened by the pass-1 errors only, so P never changes. Each
            round is one rhs-only read that fits every aperture's centre
            exactly to the model histogram at the current w
-           (:meth:`_pm_fit_shift`; data at c + s match the model), moves the
+           (:meth:`_pm_fit_shift`; data at c + s match the model; local
+           search, at most half a velocity cell per round), moves the
            data there and re-solves; stop when the rms fitted shift is below
            ``pm_recentre_step_tol``, or after ``pm_recentre_max_rounds``.
            This is alternating minimisation of the HST chi2 over w and the
@@ -2849,7 +2851,7 @@ class NNLS(WeightSolver):
                 extra = False
                 self._pm_centre = {k.name: np.array(m_ref[k.name], float)
                                    for k in rel}
-                steps, n_solves = [], 0
+                steps, n_solves, s_rounds = [], 0, []
                 self._pm_profile_move = True
                 for r in range(1, max_rounds + 1):
                     # one rhs-only read: fit each aperture's centre to the
@@ -2860,6 +2862,8 @@ class NNLS(WeightSolver):
                     for k in rel:
                         k.shift_data(-m_used[k.name])
                     steps.append(fitted_step())
+                    s_rounds.append({k.name: self.pm_moments[k.name]["s"].copy()
+                                     for k in rel})
                     self.logger.info(f"relative PM: profile round {r}: rms "
                                      f"centre shift {steps[-1]:.4g}")
                     if steps[-1] < step_tol:
@@ -2935,6 +2939,9 @@ class NNLS(WeightSolver):
                     diag[f"{nm}_m_model"] = m_model
                     if mode == "profile":
                         diag[f"{nm}_s_final"] = mom["s"]
+                        # (rounds, n_ap, 2): each round's fitted centre shift
+                        diag[f"{nm}_s_rounds"] = np.array(
+                            [x[nm] for x in s_rounds] + [mom["s"]])
                     diag[f"{nm}_mhat"] = (np.einsum("o,oak->ak", w, mom["ghat"])
                                           - mom["dhat"])
                     diag[f"{nm}_dsq_over_sigsq_pass1"] = ratio1[nm]

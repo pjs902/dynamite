@@ -799,6 +799,11 @@ def test_profile_mode_reaches_the_truth_from_different_starts(tmp_path,
         assert builds[:2] == [False, False] and all(builds[2:])
         z = np.load(d / "recentre_shifts.npz")
         assert np.abs(z["hst_s_final"]).max() < 1e-3
+        # every round's shifts are saved, each capped at half a cell
+        sr = z["hst_s_rounds"]
+        assert sr.shape[0] >= 2 and sr.shape[1:] == (3, 2)
+        assert np.array_equal(sr[-1], z["hst_s_final"])
+        assert np.hypot(*sr.transpose(2, 0, 1)).max() <= 0.5 * np.diff(EDG).min() + 1e-12
         ends.append(_model_mean(lib, w))
         assert np.abs(ends[-1] - m_true).max() < 0.02, i
     assert np.abs(ends[0] - ends[1]).max() < 1e-3
