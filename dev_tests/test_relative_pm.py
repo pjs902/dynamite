@@ -414,7 +414,7 @@ class ConsistentLOS(FakeLOS):
 
 def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
          d_tol=0.01, f_tol=0.05, norm=None, mge_scale=None, mode=None,
-         start=None, step_tol=None, max_rounds=None):
+         start=None, step_tol=None, max_rounds=None, misfit=False):
     """Relative PM toy with a known truth.
 
     Library: _orblib(rebin=False) (orbit means depend on o in x, on a in y).
@@ -424,6 +424,8 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
     multiplies the PM set's MGE projected masses (a library that cannot
     match the MGE). ``mode``, ``step_tol``, ``max_rounds``: the
     pm_recentre_* settings; ``start``: a callable m_true -> start_mean.
+    ``misfit``: data the library cannot fit (skewed, smoothly distorted
+    histograms) with errors growing with the data, as in the real HST set.
     Returns (fake, lib, pm, w_true, m_true).
     """
     w_true = np.array([1.3, 0.4, 0.9, 1.6, 0.2, 1.1])
@@ -436,6 +438,9 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
     rel = dyn_kin.ProperMotions.shift_histograms(H, (EDG, EDG), m_true)
     hist = rel  # the data are relative either way
     sigma = 0.002 + 0.02 * hist.clip(0)
+    if misfit:  # a second peak 3 cells away; errors spanning ~100x
+        hist = 0.6 * rel + 0.4 * np.roll(rel, 3, axis=1)
+        sigma = 1e-4 + 0.03 * hist.clip(0) ** 0.75
     np.savez(tmp_path / "hst.npz", PM_2dhist=hist, PM_2dhist_sigma=sigma,
              vxrange=VR, vyrange=VR)
     kw = {}
@@ -808,6 +813,28 @@ def test_profile_mode_reaches_the_truth_from_different_starts(tmp_path,
         ends.append(_model_mean(lib, w))
         assert np.abs(ends[-1] - m_true).max() < 0.02, i
     assert np.abs(ends[0] - ends[1]).max() < 1e-3
+
+
+_MISMATCH = pytest.mark.xfail(strict=True, reason="profile centre step shifts "
+                              "the model, the solve moves the data (fix pending)")
+
+
+@pytest.mark.parametrize("solver,gram", [pytest.param("scipy", False, marks=_MISMATCH),
+                                         ("admm", True)])
+def test_profile_mode_chi2_never_rises_on_data_it_cannot_fit(tmp_path, solver,
+                                                             gram):
+    # one objective, minimised in both half-steps: the exact chi2 can only
+    # fall, also when the data are not a library mixture and the errors vary
+    # across the window (a fittable toy hides a mismatch between the steps)
+    fake, lib, pm, *_ = _toy(tmp_path, solver=solver, gram=gram,
+                             mode="profile", start=lambda m: m + 2.0,
+                             step_tol=-1.0, max_rounds=10, misfit=True)
+    fake._solve_relative(lib)
+    z = np.load(tmp_path / "recentre_shifts.npz")
+    solved, moved = z["chi2_total_solved"], z["chi2_total_moved"]
+    tol = 1e-9 * solved[0]
+    assert np.all(moved <= solved[:-1] + tol), (solved, moved)
+    assert np.all(solved[1:] <= moved + tol), (solved, moved)
 
 
 def test_profile_mode_round_cap_flags_not_converged(tmp_path):
