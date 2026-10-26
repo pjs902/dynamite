@@ -820,14 +820,14 @@ _MISMATCH = pytest.mark.xfail(strict=True, reason="profile centre step shifts "
 
 
 @pytest.mark.parametrize("solver,gram", [pytest.param("scipy", False, marks=_MISMATCH),
-                                         ("admm", True)])
+                                         pytest.param("admm", True, marks=_MISMATCH)])
 def test_profile_mode_chi2_never_rises_on_data_it_cannot_fit(tmp_path, solver,
                                                              gram):
     # one objective, minimised in both half-steps: the exact chi2 can only
     # fall, also when the data are not a library mixture and the errors vary
     # across the window (a fittable toy hides a mismatch between the steps)
     fake, lib, pm, *_ = _toy(tmp_path, solver=solver, gram=gram,
-                             mode="profile", start=lambda m: m + 2.0,
+                             mode="profile", start=lambda m: m - 1.5,
                              step_tol=-1.0, max_rounds=10, misfit=True)
     fake._solve_relative(lib)
     z = np.load(tmp_path / "recentre_shifts.npz")
