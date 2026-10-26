@@ -357,6 +357,11 @@ class NormalEquationAccumulator:
         self.chi2_w = chi2_w
         self.chi2 = {}
         self.skip_zero_blocks = False
+        # relative PM vp mode (NNLS._solve_relative): grad_w -> g = A'(A w - b)
+        # over all rows; line = (w0, dw) -> line_q = (r'r, r'A dw, |A dw|^2)
+        # with r = A w0 - b, the exact chi2 along w0 + t dw at fixed rows
+        self.grad_w, self.g = None, None
+        self.line, self.line_q = None, np.zeros(3)
         # symmetric: only the upper triangle is filled until finalize()
         self.G = None if rhs_only else np.zeros((n_orbs, n_orbs), dtype=dtype,
                                                 order="F")
@@ -373,6 +378,15 @@ class NormalEquationAccumulator:
         if self.chi2_w is not None:
             r = A_block @ self.chi2_w - np.asarray(b_block, dtype=np.float64)
             self.chi2[self.tag] = self.chi2.get(self.tag, 0.0) + float(r @ r)
+        if self.grad_w is not None:
+            if self.g is None:
+                self.g = np.zeros(self.n_orbs)
+            self.g += A_block.T @ (A_block @ self.grad_w
+                                   - np.asarray(b_block, dtype=np.float64))
+        if self.line is not None:
+            r = A_block @ self.line[0] - np.asarray(b_block, dtype=np.float64)
+            d = A_block @ self.line[1]
+            self.line_q += (r @ r, r @ d, d @ d)
         if self.skip_zero_blocks and not A_block.any():
             b_block = np.asarray(b_block, dtype=np.float64)
             self.b_sq_sum += float(np.dot(b_block, b_block))
@@ -1965,6 +1979,10 @@ class NNLS(WeightSolver):
         acc = NormalEquationAccumulator(n_orbs, dtype=np.float64, profiler=prof,
                                         rhs_only=rhs_only, chi2_w=chi2_w)
         acc.skip_zero_blocks = getattr(self, "_pm_moments_only", False)
+        acc.grad_w = getattr(self, "_vp_grad_w", None)
+        acc.line = getattr(self, "_vp_line", None)
+        if acc.grad_w is not None or acc.line is not None:
+            self._vp_acc = acc  # read back by vp mode (rhs-only: no Gram held)
         n_mass_rest = self.n_intrinsic + self.n_apertures
         A_mass = np.empty((n_mass_rest, n_orbs), dtype=np.float64, order="C")
 
@@ -2403,6 +2421,7 @@ class NNLS(WeightSolver):
         freeze_e = getattr(self, "_pm_freeze_e", False)
         profile = getattr(self, "_pm_profile", False)
         w_prev = getattr(self, "_pm_profile_w", None)
+        vp = getattr(self, "_pm_vp", None)
         xedg = kins.as_histogram2d().xedg
         if ap0 == 0 and not (freeze or freeze_e):
             n_all = kins.n_spatial_bins
@@ -2436,6 +2455,23 @@ class NNLS(WeightSolver):
             mom["mu"][:, ap0 + a, 0] = sx @ vx
             mom["mu"][:, ap0 + a, 1] = sy @ vy
             if moments_only:
+                continue
+            if vp is not None:
+                # vp mode: the MODEL is shifted by the aperture's centre, the
+                # data and errors stay on their own grid, so these rows are
+                # exactly those of the objective the centres are fitted to
+                n = kins.n_spatial_bins
+                e = err[a].ravel()
+                for key, wv in vp["capture"].items():
+                    vp["H"].setdefault((kins.name, key), np.zeros((n, nvx, nvy)))[ap0 + a] = (
+                        wv @ h.reshape(n_orbs, -1)).reshape(nvx, nvy)
+                vp["D"].setdefault(kins.name, np.zeros((n, nvx, nvy)))[ap0 + a] = obs[a]
+                vp["E"].setdefault(kins.name, np.zeros((n, nvx, nvy)))[ap0 + a] = err[a]
+                cx, cy = vp["centre"][kins.name][ap0 + a]
+                hs = np.matmul(np.matmul(dyn_kin.pm_shift_matrix(xedg[0], cx), h),
+                               dyn_kin.pm_shift_matrix(xedg[1], cy).T)
+                obs_out[a] = obs[a].ravel() / e
+                orb_out[:, a] = (hs.reshape(n_orbs, -1) / e).astype(dt)
                 continue
             if profile:
                 # no projection: whitened rows at frozen errors, so the Gram
@@ -2531,6 +2567,178 @@ class NNLS(WeightSolver):
         dv = v[None] - mu[:, None, None]
         cov = np.einsum("axy,axyk,axyl->akl", h, dv, dv) / n[:, None, None]
         return np.einsum("ak,akl,al->a", delta, np.linalg.pinv(cov), delta)
+
+    @staticmethod
+    def _vp_fit_centres(xedg, H, D, E, c0, scan):
+        """Per aperture a, the centre c minimising
+        f_a(c) = sum(((H_a shifted by -c) - D_a) / E_a)^2: the MODEL is shifted,
+        the data D and errors E stay on their own grid. Nelder-Mead from
+        c0[a]; with ``scan`` also from the best point of a +-3-cell grid
+        around c0[a] (half-cell steps), since chi2_a(c) can have a side
+        minimum about one cell off. Returns (c (n_ap, 2), f (n_ap,))."""
+        ex, ey = xedg
+        dv = min(np.diff(ex).min(), np.diff(ey).min())
+        grid = np.arange(-6, 7) * 0.5 * dv
+        S = dyn_kin.pm_shift_matrix
+        c_out, f_out = np.empty_like(c0, dtype=float), np.empty(len(c0))
+        for a in range(len(c0)):
+            Ha, Da, inv = H[a], D[a], 1.0 / E[a]
+
+            def f(c):
+                return float((((S(ex, c[0]) @ Ha @ S(ey, c[1]).T - Da) * inv)
+                              ** 2).sum())
+            starts = [np.asarray(c0[a], float)]
+            if scan:
+                Sy = [S(ey, c0[a][1] + g).T for g in grid]
+                fg = np.array([[float((((SxH @ sy - Da) * inv) ** 2).sum())
+                                for sy in Sy]
+                               for SxH in (S(ex, c0[a][0] + g) @ Ha
+                                           for g in grid)])
+                i, j = np.unravel_index(fg.argmin(), fg.shape)
+                starts.append(starts[0] + np.array([grid[i], grid[j]]))
+            best = (np.inf, None)
+            for s in starts:
+                d = 0.1 * dv
+                r = optimize.minimize(f, s, method="Nelder-Mead", options=dict(
+                    xatol=1e-4, fatol=1e-8, initial_simplex=np.array(
+                        [s, s + [d, 0.0], s + [0.0, d]])))
+                fs = f(s)
+                cand = (r.fun, r.x) if r.fun < fs else (fs, s)
+                if cand[0] < best[0]:
+                    best = cand
+            f_out[a], c_out[a] = best
+        return c_out, f_out
+
+    def _solve_relative_vp(self, orblib, gram, prob, solver, w, c0, rel,
+                           max_rounds, chi2_tol):
+        """``pm_recentre_mode: vp``: minimise one objective over the weights
+        and every relative aperture's centre c,
+        Phi(w) = min_c chi2(w, c) + ridge(w), where chi2(w, c) has the MODEL
+        histograms shifted by c and the data and errors fixed on their own
+        grid (no frame dependence, no regridding of noisy data). Variable
+        projection with the curvature frozen at the start: the pass-1
+        projected P (shift projected out, so the centres are eliminated) is
+        the fixed Hessian; each step takes the exact gradient at (w, c) from
+        one rhs-only read, solves the QP with that P, reads the model
+        histograms of the step direction and the exact chi2 along it, and
+        line-searches Phi on [0, 1] with the centres refitted at every trial.
+        Phi can only fall; the limit is a stationary point of Phi whatever
+        the curvature, so it does not depend on when the iteration stops.
+        Stops when a step lowers Phi by less than ``chi2_tol`` and so does
+        the geometric tail estimated from the last two gains, when the line
+        search finds no descent, or after ``max_rounds`` steps.
+        shortcut: P is frozen at the pass-1 centres; if Phi creeps (toy: from
+        a far start), rebuild P at the current centres (a full build).
+
+        Returns (w, c {set: (n_ap, 2)}, history dict, stop reason).
+        """
+        lam = float(getattr(self, "_ridge_shift", 0.0) or 0.0)
+        col, bmax, P = prob["col"], prob["b_max"], prob["P"]
+        c = {k.name: np.array(c0[k.name], float) for k in rel}
+        xedg = {k.name: k.as_histogram2d().xedg for k in rel}
+        for k in rel:  # data back on their own grid; the model moves instead
+            k.shift_data(np.zeros((k.n_spatial_bins, 2)))
+        vp = self._pm_vp = dict(centre=c, capture={}, H={}, D={}, E={})
+
+        def read(capture=None, grad_w=None, line=None):
+            vp["capture"], vp["H"] = capture or {}, {}
+            self._vp_grad_w, self._vp_line = grad_w, line
+            p = self._relative_build(orblib, gram, rhs_from=prob)
+            self._vp_grad_w = self._vp_line = None
+            H = {k.name: {key: vp["H"][(k.name, key)] for key in vp["capture"]}
+                 for k in rel}
+            if gram:
+                acc, self._vp_acc = getattr(self, "_vp_acc", None), None
+                if acc is None:  # neither gradient nor line asked for
+                    return H, None, None
+                return H, acc.g, acc.line_q
+            A, b = p["A"][1:], p["b"][1:]  # row 0 is the QP's equality
+            g = None if grad_w is None else A.T @ (A @ grad_w - b)
+            q = None
+            if line is not None:
+                r, d = A @ line[0] - b, A @ line[1]
+                q = np.array([r @ r, r @ d, d @ d])
+            return H, g, q
+
+        def fit(Hm, cs, scan):  # profiled PM chi2 at model histograms Hm
+            out, tot = {}, 0.0
+            for nm in Hm:
+                out[nm], f = self._vp_fit_centres(xedg[nm], Hm[nm], vp["D"][nm],
+                                                  vp["E"][nm], cs[nm], scan)
+                tot += float(f.sum())
+            return tot, out
+
+        def ridge(wv):
+            return lam * float(((wv * col) ** 2).sum())
+
+        H, _, _ = read(capture={"w": w})
+        Hk = {nm: h["w"] for nm, h in H.items()}
+        pm, c = fit(Hk, c, scan=True)
+        vp["centre"] = c
+        hist = dict(phi=[], t=[], gain=[], c=[c])
+        stop = "max_rounds"
+        for it in range(1, max_rounds + 1):
+            _, g, _ = read(grad_w=w)
+            beta = w * col / bmax
+            q = g / (col * bmax) - (P @ beta - lam * beta)
+            wn, solver = self._relative_qp(dict(prob, q=q), warm=solver)
+            dw = wn - w
+            H, _, lq = read(capture={"dw": dw}, line=(w, dw))
+            Hd = {nm: h["dw"] for nm, h in H.items()}
+            # exact chi2 of the non-PM rows along t: all rows at fixed c minus
+            # the PM rows at fixed c (both quadratic in t)
+            pq = np.zeros(3)
+            for nm in Hk:
+                ex, ey = xedg[nm]
+                for a, (cx, cy) in enumerate(c[nm]):
+                    Sx, Sy = (dyn_kin.pm_shift_matrix(ex, cx),
+                              dyn_kin.pm_shift_matrix(ey, cy))
+                    inv = 1.0 / vp["E"][nm][a]
+                    r = (Sx @ Hk[nm][a] @ Sy.T - vp["D"][nm][a]) * inv
+                    d = (Sx @ Hd[nm][a] @ Sy.T) * inv
+                    pq += ((r * r).sum(), (r * d).sum(), (d * d).sum())
+            other = lq - pq
+            cache = {}
+
+            def phi(t):
+                t = float(t)
+                if t not in cache:
+                    f, cs = fit({nm: Hk[nm] + t * Hd[nm] for nm in Hk}, c,
+                                scan=False)
+                    cache[t] = (other[0] + 2 * t * other[1] + t * t * other[2]
+                                + f + ridge(w + t * dw), cs)
+                return cache[t][0]
+            if it == 1:
+                hist["phi"].append(phi(0.0))
+            r = optimize.minimize_scalar(phi, bounds=(0.0, 1.0),
+                                         method="bounded",
+                                         options=dict(xatol=1e-3))
+            t = min((1.0, float(r.x)), key=phi)
+            if phi(t) >= hist["phi"][-1]:
+                stop = "no_descent"
+                break
+            w = w + t * dw
+            Hk = {nm: Hk[nm] + t * Hd[nm] for nm in Hk}
+            pm, c = fit(Hk, cache[t][1], scan=True)
+            vp["centre"] = c
+            phi_new = (other[0] + 2 * t * other[1] + t * t * other[2] + pm
+                       + ridge(w))
+            gain = hist["phi"][-1] - phi_new
+            hist["phi"].append(phi_new)
+            hist["t"].append(t)
+            hist["gain"].append(gain)
+            hist["c"].append(c)
+            # gains shrinking by rho per step leave ~gain rho / (1 - rho) to
+            # gain: a small step on a slow tail is not convergence
+            g_prev = hist["gain"][-2] if len(hist["gain"]) > 1 else np.inf
+            rho = gain / g_prev if g_prev > 0 else 0.0
+            tail = gain * rho / (1 - rho) if rho < 1 else np.inf
+            self.logger.info(f"relative PM: vp step {it}: t {t:.3f}, Phi "
+                             f"{phi_new:.8g}, gain {gain:.4g}, tail ~{tail:.3g}")
+            if gain < chi2_tol and tail < chi2_tol:
+                stop = "chi2_tol"
+                break
+        return w, c, hist, stop
 
     @staticmethod
     def _pm_fit_shift(kins, H, obs, e):
@@ -2818,9 +3026,13 @@ class NNLS(WeightSolver):
         chi2_tol = self.settings.get("pm_recentre_chi2_tol")  # profile only
         rank = gram and bool(self.settings.get("pm_recentre_rank_update",
                                                True))
-        if mode not in ("frozen", "rebuild", "profile"):
-            txt = (f"pm_recentre_mode must be 'frozen', 'rebuild' or "
-                   f"'profile', not {mode!r}")
+        if mode not in ("frozen", "rebuild", "profile", "vp"):
+            txt = (f"pm_recentre_mode must be 'frozen', 'rebuild', 'profile' "
+                   f"or 'vp', not {mode!r}")
+            self.logger.error(txt)
+            raise ValueError(txt)
+        if mode == "vp" and self.nnls_solver not in ("admm", "cvxopt"):
+            txt = "pm_recentre_mode 'vp' needs nnls_solver admm or cvxopt"
             self.logger.error(txt)
             raise ValueError(txt)
         if self.nnls_solver == "admm" and getattr(self, "admm_free_p", False):
@@ -2915,6 +3127,14 @@ class NNLS(WeightSolver):
                 self._pm_profile_w, self._pm_profile_move = w, False
                 if not gram:  # its chi2 reuses A: fit with an explicit read
                     prob = self._relative_build(orblib, gram, rhs_from=prob)
+            elif mode == "vp":
+                extra = False
+                w, c, vp_hist, stop = self._solve_relative_vp(
+                    orblib, gram, prob, solver, w, m_ref, rel, max_rounds,
+                    1.0 if chi2_tol is None else float(chi2_tol))
+                m_used = c
+                if not gram:  # the chi2 read below uses prob's A
+                    prob = self._relative_build(orblib, gram, rhs_from=prob)
             elif mode == "rebuild":
                 extra = False
                 if rank:
@@ -2953,15 +3173,24 @@ class NNLS(WeightSolver):
             chi2 = self._relative_chi2(orblib, prob, gram, w)
             if mode == "profile":
                 steps.append(fitted_step())
-            converged = bool(steps[-1] < step_tol)
+            if mode == "vp":
+                converged = stop == "chi2_tol"
+                n_rounds = len(vp_hist["phi"]) - 1
+            else:
+                converged = bool(steps[-1] < step_tol)
+                n_rounds = n_solves if mode == "profile" else len(steps) - 1
             self.pm_recentre_info = dict(
-                recentre_mode=mode, converged=converged,
-                n_rounds=n_solves if mode == "profile" else len(steps) - 1)
+                recentre_mode=mode, converged=converged, n_rounds=n_rounds)
+            if mode == "vp":
+                self.pm_recentre_info["stop"] = stop
             if mode == "profile":
                 # chi2_tol stops on a stable chi2 even if a few centres still
                 # move; 'converged' keeps meaning the step criterion
                 self.pm_recentre_info["stop"] = stop
-            if mode != "frozen" and not converged:
+            if mode == "vp" and not converged:
+                self.logger.warning(f"relative PM: vp stopped ({stop}) after "
+                                    f"{n_rounds} steps")
+            elif mode != "frozen" and not converged:
                 self.logger.warning(
                     f"relative PM: NOT converged after {max_rounds} {mode} "
                     f"rounds (rms step {steps[-1]:.4g} >= {step_tol})")
@@ -2971,6 +3200,11 @@ class NNLS(WeightSolver):
             if mode == "profile":
                 diag_extra = dict(chi2_total_moved=np.array(chi2_moved),
                                   chi2_total_solved=np.array(chi2_solved))
+            elif mode == "vp":
+                diag_extra = {f"vp_{key}": np.array(val)
+                              for key, val in vp_hist.items() if key != "c"}
+                diag_extra.update({f"{nm}_centre_steps": np.array(
+                    [x[nm] for x in vp_hist["c"]]) for nm in m_used})
             else:
                 diag_extra = {}
             diag = dict(extra_pass=extra, step_rms=np.array(steps), **diag_extra,
@@ -3012,6 +3246,7 @@ class NNLS(WeightSolver):
             self._pm_moments_only = self._pm_freeze = False
             self._pm_freeze_e = self._pm_profile = False
             self._pm_profile_w, self._pm_centre, self._pm_s_prev = None, {}, {}
+            self._pm_vp = self._vp_grad_w = self._vp_line = self._vp_acc = None
             self._rot_mass = {}
             for k in rel:
                 if k.data_unshifted is not None:

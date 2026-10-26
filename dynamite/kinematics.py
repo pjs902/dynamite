@@ -68,6 +68,16 @@ def cdf_regrid_matrix(src_edges, dst_edges, kind='spline'):
     return np.diff(interp @ cum, axis=0)
 
 
+def pm_shift_matrix(edg, m):
+    """``S`` (n, n) with ``S @ masses`` = the bin masses on ``edg`` of the
+    distribution shifted by -m along one axis (cdf regrid, each column
+    renormalised to 1 so mass pushed out of the window stays in the edge
+    bins). ``ProperMotions.shift_histograms`` applies it per axis."""
+    r = cdf_regrid_matrix(edg - m, edg)
+    col = r.sum(axis=0)
+    return np.divide(r, col, out=r, where=col > 0)
+
+
 def pm_shift_basis(hist, vx, vy):
     """Smooth shift derivatives of 2D velocity histograms, per aperture
 
@@ -2114,14 +2124,10 @@ class ProperMotions(Kinematics, data.Integrated):
         array (n_apertures, n_vx, n_vy)
 
         """
-        def shift_matrix(edg, mi):
-            r = cdf_regrid_matrix(edg - mi, edg)
-            col = r.sum(axis=0)
-            return np.divide(r, col, out=r, where=col > 0)
         out = np.empty(hist.shape, dtype=float)
         for a, (mx, my) in enumerate(m):
-            out[a] = shift_matrix(xedg[0], mx) @ hist[a] \
-                     @ shift_matrix(xedg[1], my).T
+            out[a] = pm_shift_matrix(xedg[0], mx) @ hist[a] \
+                     @ pm_shift_matrix(xedg[1], my).T
         return out
 
     def shift_data(self, m_ref):

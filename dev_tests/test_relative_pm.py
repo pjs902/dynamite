@@ -342,7 +342,7 @@ from dynamite import weight_solvers as ws_new  # noqa: E402
 
 DRIVER = ("_rotation_blocks", "_relative_build", "_relative_qp",
           "_relative_chi2", "_pm_model_mean", "_solve_relative", "solve",
-          "_pm_shift_factor", "_relative_rank_update")
+          "_pm_shift_factor", "_relative_rank_update", "_solve_relative_vp")
 
 
 def write_rotation_files(tmp_path, superbins, components, mu, dmu, members):
@@ -487,6 +487,7 @@ def _toy(tmp_path, relative=True, rotation=True, solver="scipy", gram=False,
     fake.direc_with_ml = str(tmp_path) + "/"
     fake._pm_dsq_over_sigsq = NNLS._pm_dsq_over_sigsq
     fake._pm_fit_shift = NNLS._pm_fit_shift
+    fake._vp_fit_centres = NNLS._vp_fit_centres
     fake._relative_chi2_total = NNLS._relative_chi2_total
     for name in DRIVER:
         setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
@@ -835,6 +836,47 @@ def test_profile_mode_chi2_never_rises_on_data_it_cannot_fit(tmp_path, solver,
     tol = 1e-9 * solved[0]
     assert np.all(moved <= solved[:-1] + tol), (solved, moved)
     assert np.all(solved[1:] <= moved + tol), (solved, moved)
+
+
+@pytest.mark.parametrize("gram", [False, True])
+def test_vp_mode_one_answer_from_near_starts_chi2_never_rises(tmp_path, gram):
+    # model shifted, data and errors fixed; frozen-curvature variable
+    # projection with an exact gradient and line search: Phi only falls, the
+    # chi2 read equals the last Phi, and starts either side give one answer
+    ends = []
+    for i, off in enumerate((-0.3, 0.3)):
+        d = tmp_path / f"s{i}"
+        d.mkdir()
+        fake, lib, *_ = _toy(d, solver="admm", gram=gram, mode="vp",
+                             start=lambda m, o=off: m + o, max_rounds=30,
+                             misfit=True)
+        w, chi2_tot, *_ = fake._solve_relative(lib)
+        info = fake.pm_recentre_info
+        assert info["recentre_mode"] == "vp" and info["stop"] == "chi2_tol"
+        assert info["converged"] and info["n_rounds"] <= 5
+        z = np.load(d / "recentre_shifts.npz")
+        phi = z["vp_phi"]
+        assert np.all(np.diff(phi) < 0)
+        assert np.isclose(chi2_tot, phi[-1], rtol=1e-9)  # no ridge in the toy
+        assert z["hst_centre_steps"].shape == (len(phi), 3, 2)
+        ends.append((phi[-1], _model_mean(lib, w)))
+    assert abs(ends[0][0] - ends[1][0]) < 0.05
+    assert np.abs(ends[0][1] - ends[1][1]).max() < 0.01
+
+
+def test_vp_mode_recovers_the_truth_on_a_fittable_toy(tmp_path):
+    fake, lib, pm, w_true, m_true = _toy(tmp_path, solver="admm", mode="vp",
+                                         start=lambda m: m - 1.5,
+                                         max_rounds=30)
+    w, *_ = fake._solve_relative(lib)
+    assert fake.pm_recentre_info["converged"]
+    assert np.abs(_model_mean(lib, w) - m_true).max() < 0.005
+
+
+def test_vp_mode_needs_a_qp_solver(tmp_path):
+    fake, lib, *_ = _toy(tmp_path, solver="scipy", mode="vp")
+    with pytest.raises(ValueError, match="vp"):
+        fake._solve_relative(lib)
 
 
 def test_profile_mode_round_cap_flags_not_converged(tmp_path):
