@@ -2468,10 +2468,27 @@ class NNLS(WeightSolver):
                 vp["D"].setdefault(kins.name, np.zeros((n, nvx, nvy)))[ap0 + a] = obs[a]
                 vp["E"].setdefault(kins.name, np.zeros((n, nvx, nvy)))[ap0 + a] = err[a]
                 cx, cy = vp["centre"][kins.name][ap0 + a]
-                hs = np.matmul(np.matmul(dyn_kin.pm_shift_matrix(xedg[0], cx), h),
-                               dyn_kin.pm_shift_matrix(xedg[1], cy).T)
-                obs_out[a] = obs[a].ravel() / e
-                orb_out[:, a] = (hs.reshape(n_orbs, -1) / e).astype(dt)
+                Sx = dyn_kin.pm_shift_matrix(xedg[0], cx)
+                Sy = dyn_kin.pm_shift_matrix(xedg[1], cy)
+                # two plain GEMMs over all orbits (a broadcast matmul of 23x23
+                # matrices is ~10x slower at 45k orbits)
+                hs = (Sx.astype(dt) @ h.transpose(1, 0, 2).reshape(nvx, -1)).reshape(
+                    nvx, n_orbs, nvy).transpose(1, 0, 2).reshape(-1, nvy)
+                hs = (hs @ Sy.T.astype(dt)).reshape(n_orbs, -1) / e.astype(dt)
+                o = obs[a].ravel() / e
+                if vp.get("w_proj") is not None:
+                    # curvature rebuild: project out the shift derivative of
+                    # the current model (variable projection at this centre)
+                    Ha = (vp["w_proj"] @ h.reshape(n_orbs, -1)).reshape(nvx, nvy)
+                    dc = 0.01 * min(np.diff(xedg[0]).min(), np.diff(xedg[1]).min())
+                    G = np.stack([(dyn_kin.pm_shift_matrix(xedg[0], cx + dc) - dyn_kin.pm_shift_matrix(xedg[0], cx - dc)) @ Ha @ Sy.T,
+                                  Sx @ Ha @ (dyn_kin.pm_shift_matrix(xedg[1], cy + dc) - dyn_kin.pm_shift_matrix(xedg[1], cy - dc)).T],
+                                 -1).reshape(-1, 2) / (2 * dc * e[:, None])
+                    Q = np.linalg.qr(G)[0]
+                    hs -= (hs @ Q.astype(dt)) @ Q.T.astype(dt)
+                    o = o - Q @ (Q.T @ o)
+                obs_out[a] = o
+                orb_out[:, a] = hs
                 continue
             if profile:
                 # no projection: whitened rows at frozen errors, so the Gram
@@ -2616,10 +2633,12 @@ class NNLS(WeightSolver):
         Phi(w) = min_c chi2(w, c) + ridge(w), where chi2(w, c) has the MODEL
         histograms shifted by c and the data and errors fixed on their own
         grid (no frame dependence, no regridding of noisy data). Variable
-        projection with the curvature frozen at the start: the pass-1
-        projected P (shift projected out, so the centres are eliminated) is
-        the fixed Hessian; each step takes the exact gradient at (w, c) from
-        one rhs-only read, solves the QP with that P, reads the model
+        projection with the curvature frozen at the start: from the pass-0
+        weights ``w`` the centres are fitted (one read), then one full build
+        gives P at those weights and centres with the shift derivative of
+        the current model projected out (so the centres are eliminated); P
+        is the fixed Hessian. Each step takes the exact gradient at (w, c)
+        from one rhs-only read, solves the QP with that P, reads the model
         histograms of the step direction and the exact chi2 along it, and
         line-searches Phi on [0, 1] with the centres refitted at every trial.
         Phi can only fall; the limit is a stationary point of Phi whatever
@@ -2627,13 +2646,15 @@ class NNLS(WeightSolver):
         Stops when a step lowers Phi by less than ``chi2_tol`` and so does
         the geometric tail estimated from the last two gains, when the line
         search finds no descent, or after ``max_rounds`` steps.
-        shortcut: P is frozen at the pass-1 centres; if Phi creeps (toy: from
-        a far start), rebuild P at the current centres (a full build).
+        (A P frozen at a data-template projection about the start centres,
+        as in pass 1 of the other modes, made the steps shrink only ~x0.75
+        each at full scale; built at the fitted centres it converges in 2-3
+        steps on the toy from every start.) ``prob``: pass 0's problem, only
+        the base of the rhs-only reads; ``solver``: None.
 
         Returns (w, c {set: (n_ap, 2)}, history dict, stop reason).
         """
-        lam = float(getattr(self, "_ridge_shift", 0.0) or 0.0)
-        col, bmax, P = prob["col"], prob["b_max"], prob["P"]
+        cur = dict(prob=prob)  # pass 0's problem: the base of rhs-only reads
         c = {k.name: np.array(c0[k.name], float) for k in rel}
         xedg = {k.name: k.as_histogram2d().xedg for k in rel}
         for k in rel:  # data back on their own grid; the model moves instead
@@ -2643,7 +2664,7 @@ class NNLS(WeightSolver):
         def read(capture=None, grad_w=None, line=None):
             vp["capture"], vp["H"] = capture or {}, {}
             self._vp_grad_w, self._vp_line = grad_w, line
-            p = self._relative_build(orblib, gram, rhs_from=prob)
+            p = self._relative_build(orblib, gram, rhs_from=cur["prob"])
             self._vp_grad_w = self._vp_line = None
             H = {k.name: {key: vp["H"][(k.name, key)] for key in vp["capture"]}
                  for k in rel}
@@ -2669,19 +2690,29 @@ class NNLS(WeightSolver):
             return tot, out
 
         def ridge(wv):
-            return lam * float(((wv * col) ** 2).sum())
+            return lam * float(((wv * col0) ** 2).sum())
 
         H, _, _ = read(capture={"w": w})
         Hk = {nm: h["w"] for nm, h in H.items()}
         pm, c = fit(Hk, c, scan=True)
         vp["centre"] = c
+        cur["prob"] = None  # P at these weights and centres: one full build
+        vp["capture"], vp["w_proj"] = {}, w
+        cur["prob"] = self._relative_build(orblib, gram)
+        vp["w_proj"] = None
+        lam = float(getattr(self, "_ridge_shift", 0.0) or 0.0)
+        col0 = cur["prob"]["col"]  # Phi's ridge: lam ||w col0||^2 throughout
         hist = dict(phi=[], t=[], gain=[], c=[c])
         stop = "max_rounds"
         for it in range(1, max_rounds + 1):
+            p = cur["prob"]
             _, g, _ = read(grad_w=w)
-            beta = w * col / bmax
-            q = g / (col * bmax) - (P @ beta - lam * beta)
-            wn, solver = self._relative_qp(dict(prob, q=q), warm=solver)
+            # QP = 1/2 (b - b_k)'P(b - b_k) + grad'(b - b_k), b = w col / b_max:
+            # P (its own ridge included) is only the metric; grad is Phi's
+            beta = w * p["col"] / p["b_max"]
+            q = ((g + lam * col0 ** 2 * w) / (p["col"] * p["b_max"])
+                 - p["P"] @ beta)
+            wn, solver = self._relative_qp(dict(p, q=q), warm=solver)
             dw = wn - w
             H, _, lq = read(capture={"dw": dw}, line=(w, dw))
             Hd = {nm: h["dw"] for nm, h in H.items()}
@@ -3059,8 +3090,11 @@ class NNLS(WeightSolver):
             self._rot_mass = dict(mass0)
             for k in rel:
                 k.shift_data(-m_ref[k.name])  # shift_data(m) moves by -m
-            prob = self._relative_build(orblib, gram)
-            w, solver = self._relative_qp(prob)
+            if mode == "vp":  # no projected pass 1: vp builds its own P
+                solver = None  # prob stays pass 0's, the base of vp's reads
+            else:
+                prob = self._relative_build(orblib, gram)
+                w, solver = self._relative_qp(prob)
             self._pm_freeze = True
             ratio1 = {k.name: self._pm_dsq_over_sigsq(
                 k, self._pm_model_mean(k.name, w) - m_ref[k.name]) for k in rel}
@@ -3133,8 +3167,8 @@ class NNLS(WeightSolver):
                     orblib, gram, prob, solver, w, m_ref, rel, max_rounds,
                     1.0 if chi2_tol is None else float(chi2_tol))
                 m_used = c
-                if not gram:  # the chi2 read below uses prob's A
-                    prob = self._relative_build(orblib, gram, rhs_from=prob)
+                if not gram:  # the chi2 read below uses a matrix A
+                    prob = self._relative_build(orblib, gram)
             elif mode == "rebuild":
                 extra = False
                 if rank:
