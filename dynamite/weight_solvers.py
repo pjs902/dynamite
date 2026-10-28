@@ -397,8 +397,6 @@ class NormalEquationAccumulator:
         b_max = self.b_max if self.b_max > 0 else 1.0
         # Two broadcast divides, not G / np.outer(col, col): the outer
         # product would be a second full (n_orbs, n_orbs) temporary.
-        P = self.G / col[:, None]
-        P /= col[None, :]
         q = -self.v / (col * b_max)
         if in_place:
             self.G /= col[:, None]

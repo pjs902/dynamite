@@ -71,11 +71,11 @@ def test_finalize_is_invariant_to_the_mirror_block_size():
     print("test_finalize_is_invariant_to_the_mirror_block_size: OK")
 
 
-@pytest.mark.xfail(reason="finalize peaks at ~2.0x one matrix on master 0bd9503 (one extra full temporary); "
-                   "not yet investigated", strict=False)
-def test_finalize_does_not_allocate_a_second_full_matrix():
+@pytest.mark.parametrize("in_place", [False, True])
+def test_finalize_does_not_allocate_a_second_full_matrix(in_place):
     """np.outer/np.triu_indices would each cost another n^2; the peak above
-    the resident G must stay well under one extra full matrix."""
+    the resident G must stay well under one extra full matrix (and near zero
+    when P is built in G's own buffer)."""
     n = 1200
     NormalEquationAccumulator._MIRROR_BLOCK = 256
     rng = np.random.default_rng(3)
@@ -84,9 +84,11 @@ def test_finalize_does_not_allocate_a_second_full_matrix():
     full = n * n * 8
     tracemalloc.start()
     base = tracemalloc.get_traced_memory()[0]
-    P, q, col, b_max = acc.finalize()
+    P, q, col, b_max = acc.finalize(in_place=in_place)
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
+    if in_place:
+        assert peak - base < 0.25 * full, (peak - base, full)
     # P itself is one full matrix and is the returned value; anything beyond
     # ~1.25x that means a temporary of the kind we removed came back.
     assert peak - base < 1.25 * full, (peak - base, full)
