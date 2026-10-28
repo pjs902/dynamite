@@ -10,6 +10,7 @@ import shutil
 import sys
 import logging
 import time
+import zipfile
 import numpy as np
 from scipy.io import FortranFile
 from astropy import table
@@ -44,6 +45,18 @@ def _pid_tmp(path):
     """Process-unique name for a decompressed temporary ``datfil/*_{ml}.dat``,
     so concurrent readers of one library cannot clash."""
     return f"{path[:-4]}_p{os.getpid()}.dat"
+
+
+def _atomic_savez(path, compressed=False, **arrays):
+    """np.savez to a process-unique temp name, then rename onto ``path``, so a
+    concurrent reader sees the old file or the new one, never a partial one."""
+    tmp = f"{path}.{os.getpid()}.tmp.npz"
+    try:
+        (np.savez_compressed if compressed else np.savez)(tmp, **arrays)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def _walk_cache_path(fname):
@@ -2049,7 +2062,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
             if ok:
                 return (z["start"], z["ivmin0"], z["ivmin1"], z["n0"],
                         z["nv"])
-        except (OSError, KeyError, ValueError):
+        except (OSError, KeyError, ValueError, EOFError, zipfile.BadZipFile):
             pass
         return None
 
@@ -2058,9 +2071,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
         """Persist the pm walk arrays to ``_walk_cache_path(fname)``. Best-effort:
         a read-only datfil silently falls back to recomputing each time."""
         try:
-            np.savez(_walk_cache_path(fname), norb=norb, n_ap_file=n_ap_file,
-                     fsize=os.path.getsize(fname), start=start,
-                     ivmin0=ivmin0, ivmin1=ivmin1, n0=n0, nv=nv)
+            _atomic_savez(_walk_cache_path(fname), norb=norb,
+                          n_ap_file=n_ap_file, fsize=os.path.getsize(fname),
+                          start=start, ivmin0=ivmin0, ivmin1=ivmin1, n0=n0,
+                          nv=nv)
         except OSError:
             pass
 
@@ -2073,7 +2087,7 @@ class LegacyOrbitLibrary(OrbitLibrary):
             if (int(z["norb"]) == norb
                     and int(z["fsize"]) == os.path.getsize(fname)):
                 return z["orbtypes"], z["density_3D"]
-        except (OSError, KeyError, ValueError):
+        except (OSError, KeyError, ValueError, EOFError, zipfile.BadZipFile):
             pass
         return None
 
@@ -2083,12 +2097,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
         partial file). Best-effort."""
         # fname is relative to the cwd (the model dir), as in _qgrid_cache_load;
         # prefixing mod_dir broke the cache whenever mod_dir is relative
-        path = fname + ".dens.npz"
-        tmp = f"{path}.{os.getpid()}.tmp.npz"
         try:
-            np.savez(tmp, norb=norb, fsize=os.path.getsize(fname),
-                     orbtypes=orbtypes, density_3D=density_3D)
-            os.replace(tmp, path)
+            _atomic_savez(fname + ".dens.npz", norb=norb,
+                          fsize=os.path.getsize(fname), orbtypes=orbtypes,
+                          density_3D=density_3D)
         except OSError:
             pass
 
@@ -2902,12 +2914,9 @@ class LegacyOrbitLibrary(OrbitLibrary):
             intmoms[:, :, :, :, 12] *= velscale**2.0
             int_grid[0] /= conversion_factor  # kpc -> arcsec
             if cache:
-                if mom_file_exists:
-                    os.remove(mom_file)
-                if grid_file_exists:
-                    os.remove(grid_file)
-                np.savez_compressed(mom_file, intmoms=intmoms)
-                np.savez(grid_file, r=int_grid[0], th=int_grid[1], ph=int_grid[2])
+                _atomic_savez(mom_file, compressed=True, intmoms=intmoms)
+                _atomic_savez(grid_file, r=int_grid[0], th=int_grid[1],
+                              ph=int_grid[2])
         return intmoms, int_grid
 
     def read_orbit_property_file_base(self, file, ncol, nrow):

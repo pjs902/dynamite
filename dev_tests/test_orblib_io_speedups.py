@@ -137,3 +137,30 @@ def test_hold_keys_on_destination_too(lib, monkeypatch, tmp_path):
         lib._decompress_held('x.bz2', b)  # same src, another dest (e.g. ml)
         assert calls == [('x.bz2', a), ('x.bz2', b)]
         assert set(lib._held.values()) == {a, b}
+
+
+def test_atomic_savez_leaves_only_the_target(tmp_path, monkeypatch):
+    from dynamite import orblib
+    path = str(tmp_path / 'c.walk.npz')
+    orblib._atomic_savez(path, a=np.arange(3))
+    orblib._atomic_savez(path, compressed=True, a=np.arange(4))  # overwrite
+    np.testing.assert_array_equal(np.load(path)['a'], np.arange(4))
+    assert os.listdir(tmp_path) == ['c.walk.npz']
+    # a failed write leaves the old file and no temp behind
+    monkeypatch.setattr(orblib.np, 'savez', lambda *a, **k: 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        orblib._atomic_savez(path, a=np.arange(5))
+    assert os.listdir(tmp_path) == ['c.walk.npz']
+
+
+def test_truncated_walk_cache_is_ignored(tmp_path):
+    from dynamite import orblib
+    fname = str(tmp_path / 'orblib_pm_hist_2.75_p1.dat')
+    open(fname, 'wb').write(b'x' * 10)
+    orblib._atomic_savez(orblib._walk_cache_path(fname), norb=1, n_ap_file=1,
+                         fsize=10, start=0, ivmin0=0, ivmin1=0, n0=0, nv=0)
+    lib = object.__new__(orblib.LegacyOrbitLibrary)
+    assert lib._pm_walk_load(fname, 1, 1) is not None
+    with open(orblib._walk_cache_path(fname), 'r+b') as f:
+        f.truncate(20)  # what a concurrent reader used to see mid-write
+    assert lib._pm_walk_load(fname, 1, 1) is None
