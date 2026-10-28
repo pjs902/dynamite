@@ -1,7 +1,7 @@
 """lbzip2 (de)compression, process-unique temp names, decompress-once.
 
-Uses the small orbit library of comparison_20260617_124144 (1d LOSVD
-histograms only). Run with and without lbzip2 on the PATH: the lbzip2-specific
+Uses the small NGC6278 test orbit library (1d LOSVD histograms only) that
+test_nnls.py / user_test_config_ml.yaml leave in NGC6278_output/. Run with and without lbzip2 on the PATH: the lbzip2-specific
 cases skip when it is absent and the fallback cases run either way."""
 import glob
 import os
@@ -13,9 +13,14 @@ import numpy as np
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUN = os.path.join(HERE, 'comparison_20260617_124144')
-HAVE_LBZIP2 = shutil.which('lbzip2') is not None
-pytestmark = pytest.mark.skipif(not os.path.isdir(RUN), reason='needs the comparison run')
+RUN = HERE
+CFG = 'user_test_config_ml.yaml'
+# same lookup as orblib._bzip2_cmd
+HAVE_LBZIP2 = shutil.which('lbzip2', path=os.environ.get('PATH', '') + os.pathsep
+                           + os.path.dirname(sys.executable)) is not None
+pytestmark = pytest.mark.skipif(
+    not os.path.isdir(os.path.join(HERE, 'NGC6278_output', 'models')),
+    reason='needs NGC6278_output (run test_nnls.py first)')
 
 
 @pytest.fixture
@@ -27,7 +32,7 @@ def lib(monkeypatch):
                         lambda *a, **k: None)
     monkeypatch.setattr(dyn.orblib.LegacyOrbitLibrary, '_qgrid_cache_load',
                         lambda *a, **k: None)
-    c = dyn.config_reader.Configuration('config_gridwalk.yaml')
+    c = dyn.config_reader.Configuration(CFG)
     model = c.all_models.get_model_from_row(0)
     return model.get_orblib()
 
@@ -38,13 +43,13 @@ def temps(lib):
 
 def test_bzip2_cmd(monkeypatch):
     from dynamite import orblib
-    monkeypatch.setattr(orblib.shutil, 'which', lambda n: None)
+    monkeypatch.setattr(orblib.shutil, 'which', lambda n, **k: None)
     assert orblib._bzip2_cmd(True) == 'bunzip2 -c'
     assert orblib._bzip2_cmd() == 'bzip2 -c'
-    monkeypatch.setattr(orblib.shutil, 'which', lambda n: '/x/lbzip2')
+    monkeypatch.setattr(orblib.shutil, 'which', lambda n, **k: '/x/lbzip2')
     monkeypatch.setenv('DYNAMITE_BZIP2_THREADS', '3')
-    assert orblib._bzip2_cmd(True) == 'lbzip2 -d -c -n 3'
-    assert orblib._bzip2_cmd() == 'lbzip2 -c -n 3'
+    assert orblib._bzip2_cmd(True) == '/x/lbzip2 -d -c -n 3'
+    assert orblib._bzip2_cmd() == '/x/lbzip2 -c -n 3'
 
 
 @pytest.mark.parametrize('use_lbzip2', [True, False])
@@ -52,9 +57,9 @@ def test_truncated_archive_raises_and_good_one_roundtrips(
         lib, monkeypatch, tmp_path, use_lbzip2):
     from dynamite import orblib
     if use_lbzip2 and not HAVE_LBZIP2:
-        pytest.skip('lbzip2 not on PATH')
+        pytest.skip('no lbzip2')
     if not use_lbzip2:
-        monkeypatch.setattr(orblib.shutil, 'which', lambda n: None)
+        monkeypatch.setattr(orblib.shutil, 'which', lambda n, **k: None)
     raw = np.random.default_rng(0).random(300000).tobytes()
     (tmp_path / 'a').write_bytes(raw)
     subprocess.run(f'bzip2 -c {tmp_path}/a > {tmp_path}/a.bz2', shell=True, check=True)
@@ -78,7 +83,7 @@ def test_two_processes_read_one_datfil(lib):
         "import sys, numpy as np, dynamite as dyn\n"
         "dyn.orblib.LegacyOrbitLibrary._qgrid_cache_save = lambda *a, **k: None\n"
         "dyn.orblib.LegacyOrbitLibrary._qgrid_cache_load = lambda *a, **k: None\n"
-        "c = dyn.config_reader.Configuration('config_gridwalk.yaml')\n"
+        f"c = dyn.config_reader.Configuration('{CFG}')\n"
         "o = c.all_models.get_model_from_row(0).get_orblib()\n"
         "o.read_vel_histograms()\n"
         "print(sum(float(h.y.sum()) for h in o.vel_histograms))\n")

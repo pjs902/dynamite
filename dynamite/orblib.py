@@ -5,7 +5,9 @@ import contextlib
 import pathlib
 import re
 import subprocess
+import shlex
 import shutil
+import sys
 import logging
 import time
 import numpy as np
@@ -25,15 +27,17 @@ def _bzip2_cmd(decompress=False):
     """Shell command that (de)compresses stdin/file arguments to stdout.
 
     Uses ``lbzip2`` (parallel, output readable by plain ``bunzip2``) when it is
-    on the PATH, else serial ``bzip2``/``bunzip2``. The thread count is 8 by
-    default (the node is shared; tube and box builds and decompressions can
-    overlap) and can be set with the environment variable
-    ``DYNAMITE_BZIP2_THREADS``.
+    on the PATH or next to the running python (an unactivated conda env), else
+    serial ``bzip2``/``bunzip2``. The thread count is 8 by default (the node
+    is shared; tube and box builds and decompressions can overlap) and can be
+    set with the environment variable ``DYNAMITE_BZIP2_THREADS``.
     """
-    if shutil.which("lbzip2") is None:
+    lbzip2 = shutil.which("lbzip2", path=os.environ.get("PATH", "") + os.pathsep
+                          + os.path.dirname(sys.executable))
+    if lbzip2 is None:
         return "bunzip2 -c" if decompress else "bzip2 -c"
     n = int(os.environ.get("DYNAMITE_BZIP2_THREADS", "8"))
-    return f"lbzip2 {'-d ' if decompress else ''}-c -n {n}"
+    return f"{shlex.quote(lbzip2)} {'-d ' if decompress else ''}-c -n {n}"
 
 
 def _pid_tmp(path):

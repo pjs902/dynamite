@@ -10,25 +10,26 @@ import numpy as np
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUN = os.path.join(HERE, 'comparison_20260617_124144')
-CFG = 'config_gridwalk.yaml'
-CFG_REL = 'config_gridwalk_relout.yaml'
+RUN = HERE
+CFG = 'user_test_config_ml.yaml'  # relative output_directory
+CFG_ABS = 'user_test_config_ml_absout.yaml'
 
 
-@pytest.mark.skipif(not os.path.isdir(RUN), reason='needs the comparison run')
+@pytest.mark.skipif(not os.path.isdir(os.path.join(HERE, 'NGC6278_output', 'models')),
+                    reason='needs NGC6278_output (run test_nnls.py first)')
 @pytest.mark.parametrize('relative_out', [False, True])
 def test_qgrid_density_cache(monkeypatch, relative_out):
     import dynamite as dyn
     monkeypatch.chdir(RUN)
     cfg = CFG
-    if relative_out:
+    if not relative_out:
         with open(CFG) as f:
             txt = f.read()
-        old = f'output_directory: {RUN}/gridwalk/'
+        old = 'output_directory: "NGC6278_output/"'
         assert old in txt
-        with open(CFG_REL, 'w') as f:
-            f.write(txt.replace(old, 'output_directory: gridwalk/'))
-        cfg = CFG_REL
+        with open(CFG_ABS, 'w') as f:
+            f.write(txt.replace(old, f'output_directory: "{RUN}/NGC6278_output/"'))
+        cfg = CFG_ABS
     try:
         c = dyn.config_reader.Configuration(cfg)
         model = c.all_models.get_model_from_row(0)
@@ -50,7 +51,7 @@ def test_qgrid_density_cache(monkeypatch, relative_out):
         for a, b in zip(ref.vel_histograms, new.vel_histograms):
             np.testing.assert_array_equal(a.y, b.y)
     finally:
-        for f in glob.glob('gridwalk/models/*/datfil/*_qgrid.dat.bz2.dens.npz'):
+        for f in glob.glob('NGC6278_output/models/*/datfil/*_qgrid.dat.bz2.dens.npz'):
             os.remove(f)
-        if relative_out and os.path.exists(CFG_REL):
-            os.remove(CFG_REL)
+        if not relative_out and os.path.exists(CFG_ABS):
+            os.remove(CFG_ABS)
