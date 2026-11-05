@@ -621,6 +621,35 @@ class AllModels(object):
             raise ValueError(text)
         return row_id
 
+    def get_orblib_parameters(self):
+        """Names of the parameters that identify an orbit library
+
+        All parameters except ``ml``, whose libraries are shared and rescaled
+        in velocity -- unless ``parameter_space_settings`` has
+        ``reuse_orblib_across_ml: False``, in which case ``ml`` identifies the
+        library too and every ml gets its own.
+
+        Raises
+        ------
+        ValueError
+            If the ``ml`` parameter is not in the parameter space.
+
+        Returns
+        -------
+        list of str
+
+        """
+        orblib_parameters = self.config.parspace.par_names[:]
+        if self.config.settings.parameter_space_settings.get(
+                'reuse_orblib_across_ml', True):
+            try:
+                orblib_parameters.remove('ml')
+            except ValueError:
+                self.logger.error("Parameter 'ml' not found - check "
+                                  "implementation")
+                raise
+        return orblib_parameters
+
     def get_ml_of_original_orblib(self, model_id):
         """Get ``ml`` of model number model_id's original orblib
 
@@ -644,14 +673,7 @@ class AllModels(object):
             the original ``ml``
 
         """
-        orblib_parameters = self.config.parspace.par_names[:]
-        ml = 'ml'
-        try:
-            orblib_parameters.remove(ml)
-        except:
-            self.logger.error(f"Parameter '{ml}' not found - check "
-                              "implementation")
-            raise
+        orblib_parameters = self.get_orblib_parameters()
         row_comp = tuple(self.table[orblib_parameters][model_id])
         model_dir = self.table['directory'][model_id]
         for row_id, row in enumerate( \
@@ -976,14 +998,7 @@ class AllModels(object):
             return False
 
         # parameters that identify an orblib
-        orblib_parameters = self.config.parspace.par_names[:]
-        ml = 'ml'
-        try:
-            orblib_parameters.remove(ml)
-        except:
-            self.logger.error(f"Parameter '{ml}' not found - check "
-                              "implementation")
-            raise
+        orblib_parameters = self.get_orblib_parameters()
 
         # now try to remove the data...
         n_removed = 0
