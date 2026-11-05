@@ -623,8 +623,11 @@ class LegacyOrbitLibrary(OrbitLibrary):
         text += f"{settngs['quad_nph']}\n"
         text += f"{dm_specs}\n"
         text += f"{dm_par_vals}\n"
-        sbh_pot = sbh.mge_pot if isinstance(sbh, physys.StellarBlackHolesMGE) \
-            else None
+        sbh_pot = None
+        if isinstance(sbh, physys.StellarBlackHolesMGE):
+            # physical Msun/pc^2 -> the ml-scaled potential MGE's units
+            sbh_pot = sbh.scaled_mge(self.parset)
+            sbh_pot.data['I'] = sbh_pot.data['I'] / self.parset['ml']
         if self.system.is_bar_disk_system():
             len_disk_lum = len(stars.disk_lum.data)
             header_string_lum = (

@@ -720,9 +720,9 @@ class AllModels(object):
         Parameters that are *ratios* are already invariant under the same
         rescaling and are left alone: ``NFW``'s ``c`` and ``f`` (``f`` is a
         fraction of ``totalmass``, which scales with ``ml`` in the Fortran),
-        and the sBH shape exponents. ``StellarBlackHolesMGE`` likewise needs
-        no correction - its Gaussians ride in the ``ml``-scaled potential
-        MGE and so already track ``ml``.
+        and the sBH shape exponents. ``StellarBlackHolesMGE``'s ``mscale``
+        is a mass and gets ``sf**2`` too (the library was built with its
+        Gaussians at physical mass for ``ml_orblib``); ``rscale`` is a ratio.
 
         Use this - not ``self.table`` - whenever masses are read for
         analysis, plotting or a warm start.
@@ -759,6 +759,9 @@ class AllModels(object):
         sbh = self.system.get_sbh_component()
         if isinstance(sbh, physys.StellarBlackHoles):
             val[f'm-{sbh.name}'] = val[f'm-{sbh.name}'] * sf**2
+        elif isinstance(sbh, physys.StellarBlackHolesMGE) \
+                and f'mscale-{sbh.name}' in val.colnames:
+            val[f'mscale-{sbh.name}'] = val[f'mscale-{sbh.name}'] * sf**2
         bh = self.system.get_component_from_class(physys.Plummer)
         val[f'm-{bh.name}'] = val[f'm-{bh.name}'] * sf**2
         return val

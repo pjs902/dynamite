@@ -122,8 +122,8 @@ physical mass = stored value * ml/ml_orblib  ( = scale_factor**2 )
 This applies to `m-bh`, the fitted `StellarBlackHoles` `m`, `Hernquist`
 `rhoc` and `GeneralisedNFW` `Mvir`. `NFW`'s `c`/`f` and the shape exponents
 are invariant (`f` is a fraction of `totalmass`, which is `ml`-scaled in
-`iniparam_f.f90`), as is `StellarBlackHolesMGE`, whose Gaussians sit in the
-`ml`-scaled potential MGE. `TriaxialCoredLogPotential`'s `Vc` is a velocity,
+`iniparam_f.f90`). `StellarBlackHolesMGE`'s optional `mscale` is a mass and
+also takes `scale_factor**2` (its `rscale` is a ratio). `TriaxialCoredLogPotential`'s `Vc` is a velocity,
 so it takes `scale_factor**1`.
 
 Use `AllModels.get_physical_parameter_table()` for any readout of masses for
@@ -151,10 +151,13 @@ radius falls outside its own fitting range. The shape choice shifts
 M_sBH(<10 arcsec) by ~12x at fixed total mass and so biases `m-bh`
 directly — treat it as a systematic, not a detail.
 
-`StellarBlackHolesMGE` — a fixed externally-supplied profile whose
-Gaussians concatenate into the potential MGE; no Fortran involved. It has
-no sampled parameters, but the config reader still demands the key: its
-YAML entry needs an explicit `parameters: {}`. On a bar-disk system its
+`StellarBlackHolesMGE` — an externally-supplied profile whose
+Gaussians concatenate into the potential MGE; no Fortran involved. The MGE
+file is PHYSICAL surface-mass density [Msun/pc^2], independent of `ml`
+(orblib.py divides it by `ml` before it joins the `ml`-scaled potential MGE).
+Optional parameters `mscale` (total mass factor) and `rscale` (sigma factor
+at fixed mass), both or neither; without them the config still needs an
+explicit `parameters: {}`. On a bar-disk system its
 Gaussians are folded in BEFORE the disk block, since the Fortran reads
 `[bulge, disk]` in file order.
 

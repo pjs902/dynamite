@@ -249,20 +249,20 @@ def test_pot_in_sbh_no_halo_slot1_is_00():
 
 class _FakeMGERows:
     """Stand-in MGE with just enough behaviour for the header-format test:
-    a `.data` numpy array and `+` that concatenates rows. Not a real
-    ``mges.MGE`` (which needs astropy Table plumbing the other stand-ins
-    in this file don't set up either)."""
+    a `.data` table with the MGE columns and `+` that concatenates rows. Not
+    a real ``mges.MGE`` (which needs a config and input files)."""
 
     def __init__(self, n_rows, fill=0.):
-        import numpy as _np
+        from astropy.table import Table
         # `fill` lets a test tell the blocks apart by value in the written
         # file, so row ORDER (not just the header) can be asserted.
-        self.data = _np.full((n_rows, 4), float(fill))
+        self.data = Table({k: [float(fill)] * n_rows
+                           for k in ('I', 'sigma', 'q', 'PA_twist')})
 
     def __add__(self, other):
-        import numpy as _np
+        from astropy.table import vstack
         combined = _FakeMGERows.__new__(_FakeMGERows)
-        combined.data = _np.vstack([self.data, other.data])
+        combined.data = vstack([self.data, other.data])
         return combined
 
 
@@ -364,6 +364,96 @@ def test_mge_sbh_from_config_file():
     print('  mge_sbh_from_config_file OK')
 
 
+class _PotStarsFake(_PotStars):
+    """Non-bar stand-in whose MGE supports `+` with a `_FakeMGERows` sBH."""
+    mge_pot = _FakeMGERows(1, fill=1.)
+    mge_lum = _FakeMGERows(1, fill=1.)
+
+
+def test_pot_in_mge_sbh_scaled_and_divided_by_ml():
+    """parameters_pot.in gets the sBH Gaussians as physical mass / ml, with
+    mscale on the mass and rscale on sigma at fixed mass."""
+    import logging
+    import tempfile
+    import numpy as np
+    from dynamite import orblib as orblib_mod
+
+    sbh = _mk(physys.StellarBlackHolesMGE, 'sbh')
+    sbh.mge_pot = _FakeMGERows(2, fill=3.)
+    ol = orblib_mod.LegacyOrbitLibrary.__new__(orblib_mod.LegacyOrbitLibrary)
+    ol.logger = logging.getLogger('test')
+    ol.system = _PotSystem(halo=None, sbh=sbh)
+    ol.settings = _POT_SETTINGS
+    ol.stars = _PotStarsFake()
+    for extra, (I, sig) in (({}, (3. / 2.5, 3.)),
+                            ({'mscale-sbh': 2., 'rscale-sbh': 2.},
+                             (3. * 2. / 4. / 2.5, 6.))):
+        ol.parset = dict(_POT_PARSET, ml=2.5, **extra)
+        path = tempfile.mkdtemp() + '/'
+        try:
+            ol.create_fortran_input_orblib(path)
+        except (KeyError, AttributeError):
+            pass  # only parameters_pot.in is needed
+        rows = np.loadtxt(path + 'parameters_pot.in', skiprows=1, max_rows=3)
+        assert np.allclose(rows[0], 1.), f'stars row changed: {rows[0]}'
+        assert np.allclose(rows[1:, 0], I, atol=0.006) \
+            and np.allclose(rows[1:, 1], sig), f'{extra}: sBH rows {rows[1:]}'
+    assert np.all(sbh.mge_pot.data['I'] == 3.), 'mge_pot itself was modified'
+    print('  pot_in_mge_sbh_scaled_and_divided_by_ml OK')
+
+
+def test_mge_sbh_scale_parameters_from_config():
+    """mscale/rscale from YAML: logarithmic, mass x mscale, sigma x rscale;
+    both-or-neither; raw (log10) values validated."""
+    import os
+    import numpy as np
+    from dynamite import config_reader
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, 'user_test_config_sbh_mge.yaml')) as f:
+        text = f.read()
+    par = ('{par}:\n'
+           '                par_generator_settings: {{lo: -1.0, hi: 1.0, step: 0.1, minstep: 0.01}}\n'
+           '                fixed: False\n'
+           '                value: {v}\n'
+           '                logarithmic: True\n'
+           '                LaTeX: "${par}$"\n')
+    block = ('parameters:\n            ' + par.format(par='mscale', v=0.3)
+             + '            ' + par.format(par='rscale', v=-0.2))
+    assert text.count('parameters: {}\n') == 1
+    cwd = os.getcwd()
+    os.chdir(here)
+    tmp = '_tmp_sbh_mge_scaled.yaml'
+    try:
+        for t, ok in ((text.replace('parameters: {}\n', block), True),
+                      (text.replace('parameters: {}\n', 'parameters:\n            '
+                                    + par.format(par='mscale', v=0.3)), False)):
+            with open(tmp, 'w') as f:
+                f.write(t)
+            try:
+                c = config_reader.Configuration(tmp, reset_logging=False)
+            except ValueError:
+                assert not ok, 'config with mscale and rscale must load'
+                continue
+            assert ok, 'mscale without rscale must be rejected'
+    finally:
+        os.remove(tmp)
+        os.chdir(cwd)
+    sbh = c.system.get_sbh_component()
+    assert {p.name for p in sbh.parameters} == {'mscale-sbh', 'rscale-sbh'}
+    assert all(p.logarithmic for p in sbh.parameters)
+    m0 = sbh.mge_pot.data
+    s = sbh.scaled_mge({'mscale-sbh': 10**0.3, 'rscale-sbh': 10**-0.2}).data
+    mass = lambda d: np.sum(d['I'] * d['sigma'] ** 2 * d['q'])
+    assert np.isclose(mass(s) / mass(m0), 10**0.3), 'mass must scale by mscale'
+    assert np.allclose(s['sigma'] / m0['sigma'], 10**-0.2)
+    s1 = sbh.scaled_mge({}).data
+    assert np.all(s1['I'] == m0['I']) and np.all(s1['sigma'] == m0['sigma'])
+    assert sbh.validate_parset({'mscale': -0.5, 'rscale': 0.4}) is True
+    sbh.parameters[0].logarithmic = False
+    assert sbh.validate_parset({'mscale': 0., 'rscale': 0.4}) is False
+    print('  mge_sbh_scale_parameters_from_config OK')
+
+
 def test_sbh_validate_parset():
     """validate_parset is the only guard against a Fortran stop mid-run."""
     import logging
@@ -394,6 +484,8 @@ TESTS = [test_helpers_split_halo_and_sbh,
          test_pot_in_bar_disk_with_mge_sbh_keeps_3token_header,
          test_mge_sbh_is_not_a_legacy_block,
          test_mge_sbh_from_config_file,
+         test_pot_in_mge_sbh_scaled_and_divided_by_ml,
+         test_mge_sbh_scale_parameters_from_config,
          test_sbh_validate_parset]
 
 if __name__ == '__main__':
