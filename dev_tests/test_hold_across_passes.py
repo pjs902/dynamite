@@ -76,12 +76,12 @@ def test_temp_files_removed_after_an_exception(tmp_path):
     orig = fake._relative_qp
     n = []
 
-    def boom(prob, warm=None):
+    def boom(prob, warm=None, **k):
         n.append(1)
         if len(n) == 2:
             assert _temps(tmp_path), "held files should exist mid-solve"
             raise KeyError("boom")
-        return orig(prob, warm=warm)
+        return orig(prob, warm=warm, **k)
     fake._relative_qp = boom
     with pytest.raises(KeyError):
         fake._solve_relative(lib)
