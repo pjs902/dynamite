@@ -21,6 +21,7 @@ import sparse
 from dynamite import physical_system as physys
 from dynamite import kinematics as dyn_kin
 from dynamite import orblib_chunks
+from dynamite import start_grid
 from dynamite.constants import PARSEC_KM
 
 
@@ -276,7 +277,10 @@ class LegacyOrbitLibrary(OrbitLibrary):
                         os.remove(self.mod_dir + f"datfil/{file1}")
                     if check2:
                         os.remove(self.mod_dir + f"datfil/{file2}")
-                    self.get_orbit_ics()
+                    if start_grid.enabled(self.settings):
+                        self.get_orbit_ics_start_grid()
+                    else:
+                        self.get_orbit_ics()
                 if self.n_chunks > 1 and self.can_chunk_orbits():
                     self.get_orbit_library_chunked(self.n_chunks)
                 elif self.orblibs_in_parallel:
@@ -403,6 +407,14 @@ class LegacyOrbitLibrary(OrbitLibrary):
         except (OSError, ValueError, IndexError):
             self.logger.warning(
                 f"Cannot read the orbit grid from {path}; regenerating initial conditions."
+            )
+            return False
+        if got == want and start_grid.read_fingerprint(
+            self.mod_dir + "datfil"
+        ) != start_grid.fingerprint(s):
+            self.logger.warning(
+                f"{path} was not generated for initial_conditions: "
+                f"{s.get('initial_conditions', 'default')}. Regenerating initial conditions."
             )
             return False
         if got != want:
@@ -611,8 +623,11 @@ class LegacyOrbitLibrary(OrbitLibrary):
         text += f"{settngs['quad_nph']}\n"
         text += f"{dm_specs}\n"
         text += f"{dm_par_vals}\n"
-        sbh_pot = sbh.mge_pot if isinstance(sbh, physys.StellarBlackHolesMGE) \
-            else None
+        sbh_pot = None
+        if isinstance(sbh, physys.StellarBlackHolesMGE):
+            # physical Msun/pc^2 -> the ml-scaled potential MGE's units
+            sbh_pot = sbh.scaled_mge(self.parset)
+            sbh_pot.data['I'] = sbh_pot.data['I'] / self.parset['ml']
         if self.system.is_bar_disk_system():
             len_disk_lum = len(stars.disk_lum.data)
             header_string_lum = (
@@ -934,6 +949,16 @@ class LegacyOrbitLibrary(OrbitLibrary):
                 f.write(f'"infil/{kin_i.binfile}"\n')
             f.write('"datfil/mass_aper.dat"')
             f.close()
+
+    def get_orbit_ics_start_grid(self):
+        """Write the orbit ICs for ``initial_conditions: actions`` (see ``start_grid.py``) instead of ``orbitstart``"""
+        if self.system.is_bar_disk_system():
+            text = "orblib_settings: initial_conditions: actions is not available for bar/disk systems."
+            self.logger.error(text)
+            raise NotImplementedError(text)
+        self.logger.info(f"Calculating initial conditions for {self.mod_dir} in action space (initial_conditions: actions).")
+        start_grid.write_start_files(self.settings, self.mod_dir)
+        self.logger.info("...done.")
 
     @restores_cwd
     def get_orbit_ics(self):

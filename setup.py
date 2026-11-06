@@ -61,6 +61,7 @@ setuptools.setup(
     # extra requirements for testing
     extras_require={
         "cvxopt": "cvxopt>=1.2.6",
+        "actions": "agama",
         "testing": [
             "pytest",
             "coverage",

@@ -621,6 +621,35 @@ class AllModels(object):
             raise ValueError(text)
         return row_id
 
+    def get_orblib_parameters(self):
+        """Names of the parameters that identify an orbit library
+
+        All parameters except ``ml``, whose libraries are shared and rescaled
+        in velocity -- unless ``parameter_space_settings`` has
+        ``reuse_orblib_across_ml: False``, in which case ``ml`` identifies the
+        library too and every ml gets its own.
+
+        Raises
+        ------
+        ValueError
+            If the ``ml`` parameter is not in the parameter space.
+
+        Returns
+        -------
+        list of str
+
+        """
+        orblib_parameters = self.config.parspace.par_names[:]
+        if self.config.settings.parameter_space_settings.get(
+                'reuse_orblib_across_ml', True):
+            try:
+                orblib_parameters.remove('ml')
+            except ValueError:
+                self.logger.error("Parameter 'ml' not found - check "
+                                  "implementation")
+                raise
+        return orblib_parameters
+
     def get_ml_of_original_orblib(self, model_id):
         """Get ``ml`` of model number model_id's original orblib
 
@@ -644,14 +673,7 @@ class AllModels(object):
             the original ``ml``
 
         """
-        orblib_parameters = self.config.parspace.par_names[:]
-        ml = 'ml'
-        try:
-            orblib_parameters.remove(ml)
-        except:
-            self.logger.error(f"Parameter '{ml}' not found - check "
-                              "implementation")
-            raise
+        orblib_parameters = self.get_orblib_parameters()
         row_comp = tuple(self.table[orblib_parameters][model_id])
         model_dir = self.table['directory'][model_id]
         for row_id, row in enumerate( \
@@ -720,9 +742,9 @@ class AllModels(object):
         Parameters that are *ratios* are already invariant under the same
         rescaling and are left alone: ``NFW``'s ``c`` and ``f`` (``f`` is a
         fraction of ``totalmass``, which scales with ``ml`` in the Fortran),
-        and the sBH shape exponents. ``StellarBlackHolesMGE`` likewise needs
-        no correction - its Gaussians ride in the ``ml``-scaled potential
-        MGE and so already track ``ml``.
+        and the sBH shape exponents. ``StellarBlackHolesMGE``'s ``mscale``
+        is a mass and gets ``sf**2`` too (the library was built with its
+        Gaussians at physical mass for ``ml_orblib``); ``rscale`` is a ratio.
 
         Use this - not ``self.table`` - whenever masses are read for
         analysis, plotting or a warm start.
@@ -759,6 +781,9 @@ class AllModels(object):
         sbh = self.system.get_sbh_component()
         if isinstance(sbh, physys.StellarBlackHoles):
             val[f'm-{sbh.name}'] = val[f'm-{sbh.name}'] * sf**2
+        elif isinstance(sbh, physys.StellarBlackHolesMGE) \
+                and f'mscale-{sbh.name}' in val.colnames:
+            val[f'mscale-{sbh.name}'] = val[f'mscale-{sbh.name}'] * sf**2
         bh = self.system.get_component_from_class(physys.Plummer)
         val[f'm-{bh.name}'] = val[f'm-{bh.name}'] * sf**2
         return val
@@ -973,14 +998,7 @@ class AllModels(object):
             return False
 
         # parameters that identify an orblib
-        orblib_parameters = self.config.parspace.par_names[:]
-        ml = 'ml'
-        try:
-            orblib_parameters.remove(ml)
-        except:
-            self.logger.error(f"Parameter '{ml}' not found - check "
-                              "implementation")
-            raise
+        orblib_parameters = self.get_orblib_parameters()
 
         # now try to remove the data...
         n_removed = 0

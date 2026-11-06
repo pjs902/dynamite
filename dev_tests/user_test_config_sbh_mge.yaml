@@ -65,10 +65,12 @@ system_components:
         include: True
 
     sbh: # stellar-mass black hole subcluster, fixed external MGE
-        # StellarBlackHolesMGE has NO sampled parameters, but the config
-        # reader still requires a `parameters` key -- give it an explicit
-        # empty mapping (`parameters: {}`); omitting it, or writing
-        # `parameters:` with no value, raises.
+        # mge_sbh.ecsv is physical surface-mass density [Msun/pc^2]. The
+        # optional parameters mscale (mass factor) and rscale (sigma factor
+        # at fixed mass) come both or neither; without them the config
+        # reader still requires an explicit empty mapping
+        # (`parameters: {}`); omitting it, or writing `parameters:` with no
+        # value, raises.
         parameters: {}
         type: "StellarBlackHolesMGE"
         mge_pot: "mge_sbh.ecsv"

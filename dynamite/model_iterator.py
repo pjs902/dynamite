@@ -483,7 +483,9 @@ class ModelInnerIterator(object):
             non_orblib_pars = [p.name for p in ext_chi2_component.parameters]
         else:
             non_orblib_pars = []
-        non_orblib_pars.append('ml')
+        if config.settings.parameter_space_settings.get(
+                'reuse_orblib_across_ml', True):
+            non_orblib_pars.append('ml')
         for par_name in non_orblib_pars:
             try:
                 self.orblib_parameters.remove(par_name)

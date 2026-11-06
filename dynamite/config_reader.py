@@ -100,6 +100,9 @@ class Settings(object):
                    f"{self.orblib_settings['nI2']}."
             self.logger.error(text)
             raise ValueError(text)
+        if 'initial_conditions' in self.orblib_settings:
+            from dynamite import start_grid
+            start_grid.validate(self.orblib_settings)
         for quad in ['nr', 'nth', 'nph']:
             key = 'quad_' + quad
             if key not in self.orblib_settings.keys():

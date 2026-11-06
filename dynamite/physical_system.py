@@ -4,6 +4,7 @@
 import numpy as np
 from scipy import special, integrate
 
+import copy
 import logging
 
 import dynamite as dyn
@@ -2085,6 +2086,17 @@ class StellarBlackHolesMGE(DarkComponent):
     an MGE cannot represent a central cusp below its smallest sigma. Use it
     for a cored profile, or for a cusp only over a bounded radial range.
 
+    The MGE holds PHYSICAL surface-mass density [Msun/pc^2], independent of
+    ``ml``: ``scaled_mge`` returns it with the optional scale factors applied,
+    and orblib.py divides it by ``ml`` before it joins the ``ml``-scaled
+    potential MGE.
+
+    Optional parameters (both or neither; absent means 1):
+
+    - ``mscale``: multiplies the total mass of the profile
+    - ``rscale``: multiplies every Gaussian's sigma at fixed total mass
+      (surface density divided by ``rscale**2``)
+
     Parameters
     ----------
     mge_pot : a ``dyn.mges.MGE`` object
@@ -2093,7 +2105,7 @@ class StellarBlackHolesMGE(DarkComponent):
     """
     # deliberately no legacy_code: this component contributes Gaussians,
     # not a dm block, and orblib.py keys on isinstance(..., StellarBlackHoles)
-    par_names = []
+    par_names = ['mscale', 'rscale']
 
     def __init__(self, mge_pot=None, **kwds):
         self.mge_pot = mge_pot
@@ -2106,10 +2118,37 @@ class StellarBlackHolesMGE(DarkComponent):
                    'object'
             self.logger.error(text)
             raise ValueError(text)
+        if self.parameters:
+            super().validate(par=self.par_names)
 
     def validate_parset(self, par):
-        # the profile is fixed; there is nothing to sample
-        return True
+        # raw values: log10 for logarithmic parameters, any finite value is ok
+        log = {self.get_parname(p.name): p.logarithmic
+               for p in self.parameters or []}
+        return all(np.isfinite(v) and (log.get(k) or v > 0.)
+                   for k, v in par.items())
+
+    def scaled_mge(self, parset):
+        """The profile's MGE with ``mscale``/``rscale`` applied [Msun/pc^2]
+
+        Parameters
+        ----------
+        parset : dict or astropy table row
+            physical (not raw) parameter values; without this component's
+            parameters the factors are 1
+
+        Returns
+        -------
+        a new ``dyn.mges.MGE`` object (``self.mge_pot`` is not modified)
+
+        """
+        names = [f'{p}-{self.name}' for p in self.par_names]
+        keys = parset.colnames if hasattr(parset, 'colnames') else parset
+        ms, rs = (float(parset[n]) if n in keys else 1. for n in names)
+        scaled = copy.deepcopy(self.mge_pot)
+        scaled.data['I'] = scaled.data['I'] * ms / rs**2
+        scaled.data['sigma'] = scaled.data['sigma'] * rs
+        return scaled
 
 
 class Chi2Ext(Component):
