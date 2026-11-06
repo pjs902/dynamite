@@ -342,7 +342,8 @@ from dynamite import weight_solvers as ws_new  # noqa: E402
 
 DRIVER = ("_rotation_blocks", "_relative_build", "_relative_qp",
           "_relative_chi2", "_pm_model_mean", "_solve_relative", "solve",
-          "_pm_shift_factor", "_relative_rank_update", "_solve_relative_vp")
+          "_pm_shift_factor", "_relative_rank_update", "_solve_relative_vp",
+          "_vp_polish_problem")
 
 
 def write_rotation_files(tmp_path, superbins, components, mu, dmu, members):
@@ -873,6 +874,183 @@ def test_vp_mode_recovers_the_truth_on_a_fittable_toy(tmp_path):
     assert np.abs(_model_mean(lib, w) - m_true).max() < 0.005
 
 
+def test_batched_shift_matrices_equal_pm_shift_matrix():
+    from dynamite.vp_polish import ShiftMatrices
+    m = np.array([-9.0, -2.3, -0.4, 0.0, 0.05, 1.7, 3.0, 12.0])
+    got = ShiftMatrices(EDG)(m)
+    for i, mi in enumerate(m):
+        assert np.allclose(got[i], dyn_kin.pm_shift_matrix(EDG, mi),
+                           rtol=0, atol=1e-12)
+
+
+def test_shift_matrix_derivatives_match_finite_differences():
+    # off the kinks (whole-cell shifts) the spline derivatives are exact;
+    # on one dS/dm is the mean of the two sides
+    from dynamite.vp_polish import ShiftMatrices
+    sm, dv = ShiftMatrices(EDG), EDG[1] - EDG[0]
+    m = np.array([-2.37, -1.004, -0.3, 0.013, 0.49, 0.996, 1.61, 3.3]) * dv
+    S, S1, S2 = sm(m, 2)
+    assert np.allclose(S, sm(m), rtol=0, atol=1e-14)
+    d1 = lambda m, h=1e-3, sm=sm: (sm(m - 2 * h) - 8 * sm(m - h)  # noqa: E731
+                                   + 8 * sm(m + h) - sm(m + 2 * h)) / (12 * h)
+    assert np.allclose(S1, d1(m), rtol=0, atol=1e-8)
+    assert np.allclose(S2, d1(m, sm=lambda m: sm(m, 2)[1]), rtol=0, atol=1e-6)
+    # at m = 0 (at whole cells an edge column's sum also passes through 0,
+    # where pm_shift_matrix is near-singular, so no clean test there)
+    k, h = np.zeros(1), 1e-5
+    right = (-3 * sm(k) + 4 * sm(k + h) - sm(k + 2 * h)) / (2 * h)
+    left = (3 * sm(k) - 4 * sm(k - h) + sm(k - 2 * h)) / (2 * h)
+    assert np.abs(right - left).max() > 0.1  # a real kink
+    assert np.allclose(sm(k, 2)[1], 0.5 * (right + left), rtol=0, atol=1e-6)
+
+
+def test_centre_fit_derivatives_match_finite_differences(tmp_path):
+    from dynamite.vp_polish import CentreFit
+    rng = np.random.default_rng(5)
+    fake, lib, pm, w_true, m_true = _toy(tmp_path, misfit=True)
+    H = np.einsum("o,oxya->axy", w_true, lib.full[1].y)
+    hist = pm.data["PM_2dhist"] * H.sum(axis=(1, 2))[:, None, None]
+    E = pm.data["PM_2dhist_sigma"] * H.sum(axis=(1, 2))[:, None, None]
+    fit, h = CentreFit((EDG, EDG), hist, E), 1e-4
+    c = m_true + rng.uniform(-0.4, 0.4, m_true.shape) * (EDG[1] - EDG[0])
+    f, g, hxx, hyy, hxy = fit.derivatives(H, c)
+    ex, ey = np.array([h, 0.0]), np.array([0.0, h])
+    F = lambda d: fit.chi2(H, c + d)  # noqa: E731
+    assert np.allclose(f, F(0.0), rtol=1e-12)
+    fd = np.stack([F(ex) - F(-ex), F(ey) - F(-ey)], -1) / (2 * h)
+    assert np.allclose(g, fd, rtol=1e-5, atol=1e-6 * np.abs(fd).max())
+    for an, fd in ((hxx, (F(ex) - 2 * f + F(-ex)) / h ** 2),
+                   (hyy, (F(ey) - 2 * f + F(-ey)) / h ** 2),
+                   (hxy, (F(ex + ey) - F(ex - ey) - F(ey - ex) + F(-ex - ey)) / (4 * h ** 2))):
+        assert np.allclose(an, fd, rtol=1e-3, atol=1e-4 * np.abs(fd).max())
+
+
+def test_batched_centre_fit_is_at_least_as_good_as_nelder_mead(tmp_path):
+    from dynamite.vp_polish import CentreFit
+    rng = np.random.default_rng(3)
+    fake, lib, pm, w_true, m_true = _toy(tmp_path, misfit=True)
+    y = lib.full[1].y
+    H = np.einsum("o,oxya->axy", w_true * rng.uniform(0.8, 1.2, 6), y)
+    hist = pm.data["PM_2dhist"] * H.sum(axis=(1, 2))[:, None, None]
+    E = (pm.data["PM_2dhist_sigma"] * H.sum(axis=(1, 2))[:, None, None])
+    c0 = m_true + rng.normal(0, 0.5, m_true.shape)
+    xedg = (EDG, EDG)
+    for scan in (False, True):
+        c_nm, f_nm = NNLS._vp_fit_centres(xedg, H, hist, E, c0, scan)
+        c_b, f_b = CentreFit(xedg, hist, E).fit(H, c0, scan)
+        assert np.all(f_b <= f_nm * (1 + 1e-9))
+        assert np.abs(c_b - c_nm).max() < 1e-3
+
+
+def test_vp_ridge_is_the_pass1_builds_whatever_the_start(tmp_path,
+                                                         monkeypatch):
+    # data-only ridge: col0 and lam equal those pass 1 of the frozen mode
+    # builds (data shifted to the start centres, data template projected
+    # out), and do not depend on the vp start weights
+    from dynamite import vp_polish
+    got = []
+    orig = vp_polish.VPPolish.data_ridge
+
+    def spy(self, *a, **k):
+        got.append(orig(self, *a, **k))
+        return got[-1]
+    monkeypatch.setattr(vp_polish.VPPolish, "data_ridge", spy)
+    start = lambda m: m + 0.3  # noqa: E731
+    d = tmp_path / "frozen"
+    d.mkdir()
+    fake, lib, *_ = _toy(d, solver="admm", gram=True, start=start)
+    fake.ridge_lambda = 0.03
+    builds = []
+
+    def bspy(self, orblib, gram_, rhs_from=None):
+        prob = NNLS._relative_build(self, orblib, gram_, rhs_from)
+        if rhs_from is None:
+            builds.append((prob["col"].copy(), self._ridge_shift))
+        return prob
+    fake._relative_build = types.MethodType(bspy, fake)
+    fake._solve_relative(lib)
+    col1, lam1 = builds[1]  # pass 1
+    for i, max_rounds in enumerate((0, 1)):
+        d = tmp_path / f"vp{i}"
+        d.mkdir()
+        fake, lib, *_ = _toy(d, solver="admm", gram=True, start=start,
+                             mode="vp", max_rounds=max_rounds, misfit=False)
+        fake.ridge_lambda = 0.03
+        fake._solve_relative(lib)
+        lam, col0 = got[-1]
+        assert np.isclose(lam, lam1, rtol=1e-12)
+        assert np.allclose(col0, col1, rtol=1e-10)
+
+
+@pytest.mark.parametrize("gram", [False, True])
+def test_vp_polish_lowers_phi_to_one_answer_from_either_start(tmp_path, gram):
+    # no vp steps, polish only: Phi never rises, ends below 30 vp steps'
+    # Phi, the chi2 read equals the polished Phi, starts either side agree
+    ends = []
+    for i, off in enumerate((-0.3, 0.3)):
+        d = tmp_path / f"s{i}"
+        d.mkdir()
+        fake, lib, *_ = _toy(d, solver="admm", gram=gram, mode="vp",
+                             start=lambda m, o=off: m + o, max_rounds=0,
+                             misfit=True)
+        fake.settings.update(pm_vp_polish_maxfun=500, pm_vp_polish_tol=1e-6)
+        w, chi2_tot, *_ = fake._solve_relative(lib)
+        info = fake.pm_recentre_info
+        assert info["converged"] and info["stop"].startswith("polish_")
+        assert info["n_rounds"] == 0 and info["n_polish"] > 0
+        z = np.load(d / "recentre_shifts.npz")
+        ph = z["vp_polish_phi"]
+        assert np.all(np.diff(ph) <= 0) and ph[-1] < z["vp_phi"][0]
+        assert np.isclose(chi2_tot, ph[-1], rtol=1e-8)  # no ridge in the toy
+        ends.append((ph[-1], _model_mean(lib, w)))
+    d = tmp_path / "steps"
+    d.mkdir()
+    fake, lib, *_ = _toy(d, solver="admm", gram=gram, mode="vp",
+                         start=lambda m: m - 0.3, max_rounds=30, misfit=True)
+    fake._solve_relative(lib)
+    phi_vp = np.load(d / "recentre_shifts.npz")["vp_phi"][-1]
+    assert max(e[0] for e in ends) <= phi_vp + 1e-3
+    assert abs(ends[0][0] - ends[1][0]) < 1e-3
+    assert np.abs(ends[0][1] - ends[1][1]).max() < 1e-3
+
+
+@pytest.mark.parametrize("gram", [False, True])
+def test_vp_consumes_pass0_p(tmp_path, gram, monkeypatch):
+    # vp factors pass 0's P in place and drops it (it never reuses it); the
+    # frozen mode keeps it for the extra pass. Same answer either way.
+    import gc
+    import weakref
+    from dynamite import weight_solvers as ws
+    flags, seen, made = [], [], []
+    orig = ws.AdmmNonNegSolver
+
+    class Spy(orig):
+        def __init__(self, *a, factor_in_place=False, **k):
+            flags.append(factor_in_place)
+            made.append(weakref.ref(self))
+            super().__init__(*a, factor_in_place=factor_in_place, **k)
+    monkeypatch.setattr(ws, "AdmmNonNegSolver", Spy)
+    out = {}
+    for mode in ("vp", "frozen"):
+        flags.clear()
+        d = tmp_path / mode
+        d.mkdir()
+        fake, lib, *_ = _toy(d, solver="admm", gram=gram, mode=mode,
+                             max_rounds=0, misfit=True)
+        if mode == "vp":
+            orig_pp = fake._vp_polish_problem
+
+            def spy_pp(prob, *a):
+                gc.collect()  # pass 0's solver (its factor) must be gone here
+                seen.append((prob["P"], getattr(prob.get("gp"), "P", None),
+                             made[0]() is None))
+                return orig_pp(prob, *a)
+            fake._vp_polish_problem = spy_pp
+        out[mode] = fake._solve_relative(lib)
+        assert flags[0] == (mode == "vp") and not any(flags[1:])
+    assert seen == [(None, None, True)]
+
+
 def test_vp_mode_needs_a_qp_solver(tmp_path):
     fake, lib, *_ = _toy(tmp_path, solver="scipy", mode="vp")
     with pytest.raises(ValueError, match="vp"):
@@ -965,9 +1143,9 @@ def test_rank_update_round_equals_a_full_rebuild(tmp_path, stream, gap):
         seen = []
         orig = fake._relative_qp
 
-        def spy(prob, warm=None, orig=orig, seen=seen):
+        def spy(prob, warm=None, orig=orig, seen=seen, **k):
             seen.append((prob["P"].copy(), prob["q"].copy()))
-            return orig(prob, warm)
+            return orig(prob, warm, **k)
         fake._relative_qp = spy
         w, *_ = fake._solve_relative(lib)
         out[rank] = (seen, w, np.load(d / "recentre_shifts.npz")["chi2"])

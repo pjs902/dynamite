@@ -2156,16 +2156,25 @@ class ProperMotions(Kinematics, data.Integrated):
                                    for k in ('PM_2dhist', 'PM_2dhist_sigma')}
         hist = self.data_unshifted['PM_2dhist']
         sigma = self.data_unshifted['PM_2dhist_sigma']
-        xedg = self.as_histogram2d().xedg
-        new_hist = self.shift_histograms(hist, xedg, m_ref)
+        new_hist, new_sigma = self.shifted_data(
+            hist, sigma, self.as_histogram2d().xedg, m_ref)
+        self.data['PM_2dhist'] = new_hist.astype(hist.dtype, copy=False)
+        self.data['PM_2dhist_sigma'] = new_sigma.astype(sigma.dtype, copy=False)
+
+    @classmethod
+    def shifted_data(cls, hist, sigma, xedg, m_ref):
+        """(hist, sigma) shifted by -m_ref as :meth:`shift_data` does it:
+        histogram mass conserved per aperture, errors floored at the
+        aperture's smallest error. Linear in hist, so it commutes with the
+        projected-mass scaling of the weight solver's rows."""
+        new_hist = cls.shift_histograms(hist, xedg, m_ref)
         # a column wholly outside the window still loses its mass; put it back
         old_mass, new_mass = hist.sum(axis=(1, 2)), new_hist.sum(axis=(1, 2))
         new_hist *= np.divide(old_mass, new_mass, out=np.ones_like(old_mass),
                               where=new_mass > 0)[:, None, None]
-        new_sigma = np.maximum(self.shift_histograms(sigma, xedg, m_ref),
+        new_sigma = np.maximum(cls.shift_histograms(sigma, xedg, m_ref),
                                sigma.min(axis=(1, 2), keepdims=True))
-        self.data['PM_2dhist'] = new_hist.astype(hist.dtype, copy=False)
-        self.data['PM_2dhist_sigma'] = new_sigma.astype(sigma.dtype, copy=False)
+        return new_hist, new_sigma
 
     def rebin_orblib_to_observations(self, vel_hist):
         """Rebin orblib to velocity spacing of observations

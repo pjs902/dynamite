@@ -1,4 +1,5 @@
 import faulthandler
+import ctypes
 import functools
 import os
 import copy
@@ -12,7 +13,7 @@ import subprocess
 import logging
 from types import SimpleNamespace
 from typing import NamedTuple
-from scipy import optimize
+from scipy import optimize, sparse
 
 try:
     import cvxopt
@@ -2465,6 +2466,13 @@ class NNLS(WeightSolver):
                         wv @ h.reshape(n_orbs, -1)).reshape(nvx, nvy)
                 vp["D"].setdefault(kins.name, np.zeros((n, nvx, nvy)))[ap0 + a] = obs[a]
                 vp["E"].setdefault(kins.name, np.zeros((n, nvx, nvy)))[ap0 + a] = err[a]
+                if vp.get("lib") is not None:
+                    # keep the unshifted orbit histograms, sparse (cells, orbits)
+                    hT = h.reshape(n_orbs, -1).T
+                    cell, o = np.nonzero(hT)
+                    vp["lib"][(kins.name, ap0 + a)] = (
+                        hT[cell, o], o.astype(np.int32),
+                        np.bincount(cell, minlength=hT.shape[0]))
                 cx, cy = vp["centre"][kins.name][ap0 + a]
                 Sx = dyn_kin.pm_shift_matrix(xedg[0], cx)
                 Sy = dyn_kin.pm_shift_matrix(xedg[1], cy)
@@ -2647,8 +2655,21 @@ class NNLS(WeightSolver):
         (A P frozen at a data-template projection about the start centres,
         as in pass 1 of the other modes, made the steps shrink only ~x0.75
         each at full scale; built at the fitted centres it converges in 2-3
-        steps on the toy from every start.) ``prob``: pass 0's problem, only
-        the base of the rhs-only reads; ``solver``: None.
+        steps on the toy from every start.) ``prob``: pass 0's problem, the
+        base of the rhs-only reads and of the in-memory objective below;
+        ``solver``: None.
+
+        The first read also keeps the relative sets' orbit histograms in
+        memory (:mod:`dynamite.vp_polish`, ~7 GB at full omega Cen scale).
+        From them Phi's ridge lam ||w col0||^2 is taken from the data alone
+        (:meth:`vp_polish.VPPolish.data_ridge`: pass 1's col0 and lam), so
+        Phi does not depend on the start. With ``pm_recentre_max_rounds: 0``
+        no vp step is taken and the 80-min curvature build is skipped. With
+        ``pm_vp_polish_maxfun`` > 0, L-BFGS-B on the in-memory Phi follows
+        (seconds per evaluation instead of a library read per step); it stops
+        when the best Phi falls by less than ``pm_vp_polish_tol`` (default
+        0.1) over ``pm_vp_polish_window`` (default 20) evaluations; the
+        history is ``polish_phi``, the stop reason ``polish_<reason>``.
 
         Returns (w, c {set: (n_ap, 2)}, history dict, stop reason).
         """
@@ -2690,18 +2711,33 @@ class NNLS(WeightSolver):
         def ridge(wv):
             return lam * float(((wv * col0) ** 2).sum())
 
+        vp["lib"] = {}  # the first read also keeps the orbit histograms
         H, _, _ = read(capture={"w": w})
         Hk = {nm: h["w"] for nm, h in H.items()}
         pm, c = fit(Hk, c, scan=True)
         vp["centre"] = c
-        cur["prob"] = None  # P at these weights and centres: one full build
-        vp["capture"], vp["w_proj"] = {}, w
-        cur["prob"] = self._relative_build(orblib, gram)
-        vp["w_proj"] = None
-        lam = float(getattr(self, "_ridge_shift", 0.0) or 0.0)
-        col0 = cur["prob"]["col"]  # Phi's ridge: lam ||w col0||^2 throughout
+        pol = self._vp_polish_problem(prob, gram, vp.pop("lib"), vp["D"],
+                                      vp["E"], xedg)
+        try:  # hand the read's freed heap (~5 GB at omega Cen) back to the OS
+            ctypes.CDLL(None).malloc_trim(0)
+        except (OSError, AttributeError):  # not glibc
+            pass
+        # Phi's ridge lam ||w col0||^2 from the data alone, so Phi is the same
+        # function whatever the start (it used to come from the curvature
+        # build below, at the pass-0 weights and their fitted centres)
+        if self.ridge_lambda > 0:
+            pol.lam, pol.col0 = pol.data_ridge(c0, self.ridge_lambda,
+                                               self.nnls_dtype)
+        lam, col0 = pol.lam, pol.col0
         hist = dict(phi=[], t=[], gain=[], c=[c])
         stop = "max_rounds"
+        if max_rounds > 0:  # P at these weights and centres: one full build
+            cur["prob"] = None
+            vp["capture"], vp["w_proj"] = {}, w
+            cur["prob"] = self._relative_build(orblib, gram)
+            vp["w_proj"] = None
+        else:
+            hist["phi"].append(pol.phi(w, c, scan=False, grad=False)["phi"])
         for it in range(1, max_rounds + 1):
             p = cur["prob"]
             _, g, _ = read(grad_w=w)
@@ -2767,7 +2803,62 @@ class NNLS(WeightSolver):
             if gain < chi2_tol and tail < chi2_tol:
                 stop = "chi2_tol"
                 break
+        maxfun = int(self.settings.get("pm_vp_polish_maxfun", 0))
+        if maxfun > 0:
+            cur["prob"] = None  # the QP's P is not needed any more
+            r = pol.phi(w, c, scan=False, grad=False)
+            self.logger.info(f"relative PM: vp polish from Phi {r['phi']:.8g} "
+                             f"(vp's {hist['phi'][-1]:.8g})")
+            w, c, ph, pstop = pol.run(
+                w, c, maxfun,
+                float(self.settings.get("pm_vp_polish_tol", 0.1)),
+                int(self.settings.get("pm_vp_polish_window", 20)))
+            vp["centre"] = c
+            hist["polish_phi"] = ph["phi"]
+            hist["c"].append(c)
+            stop = f"polish_{pstop}"
         return w, c, hist, stop
+
+    def _vp_polish_problem(self, prob, gram, lib, D, E, xedg):
+        """:class:`vp_polish.VPPolish` from vp's first read (``lib``: per
+        (set, aperture) the sparse unshifted orbit histograms) and pass 0's
+        problem ``prob``, whose rows are all but the relative PM rows, with
+        the rotation rows at the MGE mass: those are swapped for vp's."""
+        from dynamite.vp_polish import VPPolish
+        if gram:
+            gp = prob["gp"]
+            G, v, b_sq = gp.G, gp.v, gp.b_sq_rest
+        else:
+            A, b = prob["A"][1:], prob["b"][1:]
+            G, v, b_sq = A.T @ A, A.T @ b, float(b @ b)
+        sets = {}
+        for nm in D:
+            n_ap, nvx, nvy = D[nm].shape
+            indptr = np.zeros(n_ap * nvx * nvy + 1, dtype=np.int64)
+            np.cumsum(np.concatenate([lib[(nm, a)][2] for a in range(n_ap)]),
+                      out=indptr[1:])
+            # filled piece by piece as the pieces are freed: np.empty pages
+            # only become resident when written, so there is never a second
+            # full copy (no concatenate)
+            data = np.empty(indptr[-1], dtype=np.float64)
+            idx = np.empty(indptr[-1], dtype=np.int32)
+            k = nvx * nvy
+            for a in range(n_ap):
+                val, o, _ = lib.pop((nm, a))
+                i0, i1 = indptr[a * k], indptr[(a + 1) * k]
+                data[i0:i1], idx[i0:i1] = val, o
+                del val, o
+            if indptr[-1] < np.iinfo(np.int32).max:
+                indptr = indptr.astype(np.int32)
+            L = sparse.csc_matrix((data, idx, indptr),
+                                  shape=(len(v), indptr.size - 1))
+            sets[nm] = dict(L=L, D=D[nm], E=E[nm], xedg=xedg[nm])
+        rot_mass, self._rot_mass = self._rot_mass, {}
+        old = self._rotation_blocks()
+        self._rot_mass = rot_mass
+        rot = [(A_old, A_new, b) for (_, A_old, _), (_, A_new, b)
+               in zip(old, self._rotation_blocks())]
+        return VPPolish(sets, G, v, b_sq, rot, self.total_mass, self.logger)
 
     @staticmethod
     def _pm_fit_shift(kins, H, obs, e):
@@ -2889,12 +2980,15 @@ class NNLS(WeightSolver):
         return float(w @ (gp.G @ w) - 2 * w @ gp.v + gp.b_sq_rest
                      + (gp.row0_vec @ w - gp.b0) ** 2)
 
-    def _relative_qp(self, prob, warm=None):
+    def _relative_qp(self, prob, warm=None, consume_p=False):
         """Solve one built problem; returns ``(weights, solver or None)``.
 
         ``warm``: the solver of the previous pass. ADMM restarts from its
         (z, u); scipy's nnls and cvxopt's coneqp take no warm start here and
-        re-solve from scratch.
+        re-solve from scratch. ``consume_p`` (float64 ADMM only): factor P
+        in its own buffer (no second p x p copy); P is garbage afterwards,
+        so its references in ``prob`` are dropped and the buffer is freed
+        with the solver.
         """
         if "P" not in prob:  # scipy, as in solve()
             A, b = prob["A"], prob["b"]
@@ -2910,7 +3004,12 @@ class NNLS(WeightSolver):
                 max_iters=self.admm_max_iters, tol=self.admm_tol,
                 precision=self.admm_precision,
                 z0=None if warm is None else warm.z_exit,
-                u0=None if warm is None else warm.u_exit, **eq)
+                u0=None if warm is None else warm.u_exit,
+                factor_in_place=consume_p, **eq)
+            if consume_p:
+                prob["P"] = None
+                if "gp" in prob:
+                    prob["gp"] = prob["gp"]._replace(P=None)
         else:  # cvxopt: untested here (not installed in the dev env)
             solver = CvxoptNonNegSolver(
                 prob["P"], prob["q"], tol=self.cvxopt_tol,
@@ -3064,7 +3163,8 @@ class NNLS(WeightSolver):
             txt = "pm_recentre_mode 'vp' needs nnls_solver admm or cvxopt"
             self.logger.error(txt)
             raise ValueError(txt)
-        if self.nnls_solver == "admm" and getattr(self, "admm_free_p", False):
+        if (self.nnls_solver == "admm" and getattr(self, "admm_free_p", False)
+                and mode != "vp"):  # vp consumes pass 0's P regardless
             # the extra pass reuses P, so it must survive the factorization
             self.logger.info("relative PM: admm_free_p ignored (P is kept "
                              "for the extra pass)")
@@ -3081,7 +3181,12 @@ class NNLS(WeightSolver):
             self._pm_profile = mode == "profile"
             prob = self._relative_build(orblib, gram)
             self._pm_moments_only = False
-            w, _ = self._relative_qp(prob)
+            # vp never reuses pass 0's P (its reads need only G, v, col and
+            # b_max): factor it in place and drop it, -16 GB at omega Cen
+            w = self._relative_qp(prob, consume_p=(
+                mode == "vp" and self.nnls_solver == "admm"
+                and self.admm_precision == "float64"))[0]  # not ``w, _``: a
+            # bound ``_`` kept the solver and its 15 GB factor alive to the end
             m_ref = {k.name: self._pm_model_mean(k.name, w)
                      if k.start_mean is None else k.start_mean for k in rel}
             mass0 = {k.name: w @ self.pm_moments[k.name]["n"] for k in rel}
@@ -3200,14 +3305,16 @@ class NNLS(WeightSolver):
                 for k in rel:
                     k.shift_data(-m_used[k.name])
                 prob = self._relative_build(orblib, gram, rhs_from=prob)
-                w, _ = self._relative_qp(prob, warm=solver)
+                w = self._relative_qp(prob, warm=solver)[0]
                 steps.append(step(w))
             chi2 = self._relative_chi2(orblib, prob, gram, w)
             if mode == "profile":
                 steps.append(fitted_step())
             if mode == "vp":
-                converged = stop == "chi2_tol"
+                converged = stop in ("chi2_tol", "polish_tol",
+                                     "polish_lbfgsb_0")
                 n_rounds = len(vp_hist["phi"]) - 1
+                n_polish = len(vp_hist.get("polish_phi", []))
             else:
                 converged = bool(steps[-1] < step_tol)
                 n_rounds = n_solves if mode == "profile" else len(steps) - 1
@@ -3215,13 +3322,15 @@ class NNLS(WeightSolver):
                 recentre_mode=mode, converged=converged, n_rounds=n_rounds)
             if mode == "vp":
                 self.pm_recentre_info["stop"] = stop
+                self.pm_recentre_info["n_polish"] = n_polish
             if mode == "profile":
                 # chi2_tol stops on a stable chi2 even if a few centres still
                 # move; 'converged' keeps meaning the step criterion
                 self.pm_recentre_info["stop"] = stop
             if mode == "vp" and not converged:
                 self.logger.warning(f"relative PM: vp stopped ({stop}) after "
-                                    f"{n_rounds} steps")
+                                    f"{n_rounds} steps, {n_polish} polish "
+                                    f"evaluations")
             elif mode != "frozen" and not converged:
                 self.logger.warning(
                     f"relative PM: NOT converged after {max_rounds} {mode} "
