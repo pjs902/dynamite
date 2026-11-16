@@ -1099,7 +1099,7 @@ class Configuration(object):
                                   'GaussHermite, BayesLOSVD, or ProperMotions.'
                             self.logger.error(txt)
                             raise ValueError(txt)
-                        if check_pm and getattr(kin_data, 'statistic',
+                        if (check_pm or check_bl) and getattr(kin_data, 'statistic',
                                                 'diag') == 'laplace' and not (
                                 ws_type == 'NNLS' and self.settings.
                                 weight_solver_settings.get('gram_blockwise')):

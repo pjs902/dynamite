@@ -306,3 +306,79 @@ def test_mirrored_h0_is_refused(tmp_path):
     with pytest.raises(ValueError, match="PM_lap_h0"):
         dyn_kin.ProperMotions(name="hst", datafile="hst.npz", input_directory=str(tmp_path) + "/",
                               type="ProperMotions", statistic="laplace")
+
+
+# ------------------------------------------------------------ 1D (BayesLOSVD)
+LOS_EDG = np.linspace(-3, 3, 5)  # data grid: 4 bins of 1.5 (orblib: 6 of 1.0)
+LOS_CEN = 0.5 * (LOS_EDG[:-1] + LOS_EDG[1:])
+
+
+def make_los_lap(tmp_path, statistic="laplace", flip=False):
+    from astropy.table import Table
+    n_ap, nv = 2, len(LOS_CEN)
+    hist = np.stack([np.diff(ndtr((LOS_EDG - m) / 1.2)) for m in (-0.3, 0.4)])
+    hist /= hist.sum(1, keepdims=True)
+    t = Table({"binID_BayesLOSVD": np.arange(n_ap), "binID_dynamite": np.arange(1, n_ap + 1),
+               "xbin": [0.0, 1.0], "ybin": [0.0, 0.0], "bin_flux": [1.0, 1.0]})
+    for j in range(nv):
+        t[f"losvd_{j}"] = hist[:, j]
+        t[f"dlosvd_{j}"] = 0.01 + 0.05 * hist[:, j]
+    t.meta.update(nbins=n_ap, nvbins=nv, vcent=list(LOS_CEN), dv=1.5,
+                  PSF={"sigma": [0.0], "weight": [1.0]})
+    t.write(tmp_path / "los.ecsv", format="ascii.ecsv", overwrite=True)
+    rng = np.random.default_rng(3)
+    ptr, cell, mass, ap = [0], [], [], []
+    for a, m in enumerate((-0.3, 0.4)):
+        v = rng.normal(m, 1.2, 120)
+        rows = np.diff(ndtr((LOS_EDG[None] - v[:, None]) / 0.5), axis=1)
+        rows = rows[rows.sum(1) >= 1e-3]
+        for row in rows:
+            nz = np.nonzero(row >= 1e-6 * row.max())[0]
+            cell.append(nz.astype(np.int32))
+            mass.append(row[nz].astype(np.float32))
+            ptr.append(ptr[-1] + len(nz))
+        ap.append(np.full(len(rows), a, np.int32))
+    h0 = 0.99 * hist + 0.01 / nv
+    h0 = h0 / h0.sum(1, keepdims=True)
+    np.savez(tmp_path / "los_stars.npz", LOS_star_indptr=np.asarray(ptr, np.int64),
+             LOS_star_cell=np.concatenate(cell), LOS_star_mass=np.concatenate(mass),
+             LOS_star_aperture=np.concatenate(ap), LOS_lap_h0=h0[:, ::-1] if flip else h0,
+             LOS_star_sharpened=np.asarray(True))
+    return dyn_kin.BayesLOSVD(name="los", datafile="los.ecsv", input_directory=str(tmp_path) + "/",
+                              type="BayesLOSVD", statistic=statistic)
+
+
+def test_bayeslosvd_laplace_loads_and_guards(tmp_path):
+    los = make_los_lap(tmp_path)
+    assert los.statistic == "laplace" and len(los._lap_rows) == 2
+    with pytest.raises(ValueError, match="LOS_lap_h0"):
+        make_los_lap(tmp_path, flip=True)
+
+
+@pytest.mark.parametrize("stream,gap", [(False, 0), (True, 2)])
+def test_gram_quadratic_form_1d(tmp_path, stream, gap):
+    """A 1D Laplace set (set 0, whole-set read) next to a diag PM set."""
+    los = make_los_lap(tmp_path)
+    pm = make_pm_lap(tmp_path, MEANS)  # diag
+    n_ap_total = 2 + pm.n_spatial_bins
+    w = np.random.default_rng(5).random(N_ORBS) * 1e4
+
+    def build(**kw):
+        fake = _fake_nnls([los, pm], n_ap_total, stream, gap)
+        fake._laplace_pm_block = NNLS._laplace_pm_block.__get__(fake)
+        lib = _orblib(pm, rebin=True)
+        lib.vel_histograms = list(lib.full)
+        return fake, lib, fake.construct_gram_and_rhs_blockwise(lib, **kw)
+
+    fake, lib, gp = build()
+    h1 = dyn_kin.Histogram(xedg=lib.full[0].xedg, y=lib.full[0].y.copy())
+    h1.y[:, 0, :] = h1.y[:, -1, :] = 0.0  # 1D: DYNAMITE drops the orblib's overflow bins
+    H = los.transform_orblib_to_observables(h1, {}).reshape(N_ORBS, 2, -1)
+    prj = fake.projected_masses[:2]
+    ref = sum(fs.stat_offset_free(H[:, a].T @ w, *los.laplace_terms(a, prj[a])) for a in range(2))
+    _, _, gp_c = build(rhs_only=True, chi2_w=w)
+    mass_r2 = (gp_c.A_mass @ w - gp_c.b_mass) ** 2
+    lap = gp_c.chi2_by_tag["set0/"] - mass_r2[fake.n_intrinsic:fake.n_intrinsic + 2].sum()
+    assert lap == pytest.approx(ref, rel=1e-8, abs=1e-6)
+    total = w @ gp.G @ w - 2 * w @ gp.v + gp.b_sq_rest
+    assert total == pytest.approx(sum(gp_c.chi2_by_tag.values()), rel=1e-8, abs=1e-6)
