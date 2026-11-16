@@ -406,6 +406,25 @@ class NormalEquationAccumulator:
         self.b_sq_sum += float(np.dot(b_block, b_block))
         self.b_max = max(self.b_max, float(np.abs(b_block).max(initial=0.0)))
 
+    def add_linear(self, c):
+        """Add ``2 c'w`` to the objective (``c``: ``(n_orbs,)``, raw scale).
+
+        ``|A w - b|^2 + 2 c'w = w'Gw - 2 (v - c)'w + |b|^2``, so only ``v``
+        moves; every reader of ``v`` (P/q, the quadratic-form chi2) and the
+        per-tag chi2 / vp gradient and line terms follow. Used by
+        ``statistic: laplace`` sets (``NNLS._laplace_pm_block``).
+        """
+        c = np.asarray(c, dtype=np.float64)
+        self.v -= c
+        if self.chi2_w is not None:
+            self.chi2[self.tag] = self.chi2.get(self.tag, 0.0) + 2.0 * float(c @ self.chi2_w)
+        if self.grad_w is not None:
+            if self.g is None:
+                self.g = np.zeros(self.n_orbs)
+            self.g += c
+        if self.line is not None:
+            self.line_q += (2.0 * float(c @ self.line[0]), float(c @ self.line[1]), 0.0)
+
     def finalize(self, in_place=False):
         """Return ``(P, q, col_norm, b_max)`` with unit-L2 column scaling.
 
@@ -1589,6 +1608,7 @@ class NNLS(WeightSolver):
         checks the assembly arithmetic without needing a stored orbit library.
 
         """
+        self._lap_acc = None  # statistic: laplace refuses this path (no linear term)
         # construct vector of observed constraints (con), errors (econ) and
         # matrix of orbit propertites (orbmat)
         dtype = self.nnls_dtype
@@ -1714,6 +1734,7 @@ class NNLS(WeightSolver):
 
         Returns an :class:`AdelieProblem`.
         """
+        self._lap_acc = None  # statistic: laplace refuses this path (no linear term)
         dtype = self.nnls_dtype
         stars = self.system.get_unique_triaxial_visible_component()
         # observed values depend only on the kinematic data; same pre-pass,
@@ -1982,6 +2003,7 @@ class NNLS(WeightSolver):
         acc.line = getattr(self, "_vp_line", None)
         if acc.grad_w is not None or acc.line is not None:
             self._vp_acc = acc  # read back by vp mode (rhs-only: no Gram held)
+        self._lap_acc = acc  # statistic: laplace sets add their linear term
         n_mass_rest = self.n_intrinsic + self.n_apertures
         A_mass = np.empty((n_mass_rest, n_orbs), dtype=np.float64, order="C")
 
@@ -2312,6 +2334,7 @@ class NNLS(WeightSolver):
         )
 
         acc.tag = ""
+        self._lap_acc = None
         if rhs_only:
             return GramProblem(
                 P=None, q=None, col_norm=None, b_max=acc.b_max, G=None,
@@ -2385,7 +2408,44 @@ class NNLS(WeightSolver):
         if getattr(kins, "relative", False):
             obs_kins, obs_kins_err, orb_kins = self._relative_pm_block(
                 kins, obs_kins, obs_kins_err, orb_kins, ap0)
+        elif getattr(kins, "statistic", "diag") == "laplace":
+            obs_kins, obs_kins_err, orb_kins = self._laplace_pm_block(
+                kins, obs_kins, orb_kins, prj_mass_i, ap0)
         return np.ravel(obs_kins), np.ravel(obs_kins_err), orb_kins
+
+    def _laplace_pm_block(self, kins, obs, orb, prj_mass_i, ap0):
+        """Rows of a ``statistic: laplace`` set (:mod:`dynamite.fitstat_pm`).
+
+        Per aperture a (MGE projected mass M_a): model rows ``H_a Lt_a'``
+        (orbit histograms in mass units, unscaled), data ``Lt_a h0_a``,
+        errors 1, and the linear term ``2 g_a' H_a w`` added to the
+        accumulator's cross term (``NormalEquationAccumulator.add_linear``),
+        so the set's chi2 is the offset-free ``Q(h) - Q(h0)``. ``h0_a`` is
+        ``PM_lap_h0`` times M_a, or ``self._lap_h0[kins.name][a]`` when a
+        re-expansion driver has set it. Returns ``(obs, err, orb)`` in the
+        shapes received. Only the blockwise Gram path carries the linear
+        term; the materialised-A paths refuse.
+        """
+        acc = getattr(self, "_lap_acc", None)
+        if acc is None:
+            raise ValueError(
+                f"{kins.name}: statistic 'laplace' needs weight_solver_settings "
+                "gram_blockwise: True (its linear term lives in the Gram path).")
+        n_orbs, n_ap = orb.shape[:2]
+        h0_set = (getattr(self, "_lap_h0", None) or {}).get(kins.name)
+        obs_out = np.empty((n_ap, int(np.prod(orb.shape[2:]))))
+        orb_out = np.empty(orb.shape, dtype=orb.dtype)
+        lin = np.zeros(n_orbs)
+        for a in range(n_ap):
+            h0 = None if h0_set is None else h0_set[ap0 + a]
+            Lt, g, h0 = kins.laplace_terms(ap0 + a, float(prj_mass_i[a]), h0=h0)
+            H = np.asarray(orb[:, a], dtype=np.float64).reshape(n_orbs, -1)
+            orb_out[:, a] = (H @ Lt.T).reshape(orb.shape[0], *orb.shape[2:])
+            obs_out[a] = Lt @ h0
+            lin += H @ g
+        acc.add_linear(lin)
+        return (np.reshape(obs_out, np.shape(obs)), np.ones(np.size(obs)),
+                orb_out)
 
     def _relative_pm_block(self, kins, obs, err, orb, ap0):
         """Project a free per-aperture mean shift out of a relative PM set.

@@ -1856,11 +1856,33 @@ class ProperMotions(Kinematics, data.Integrated):
     shifts the data to, e.g. a Gaia-tied mean field. Without it the solver
     starts from its pass-0 model mean (``NNLS._solve_relative``).
 
+    The optional config key ``statistic`` (default ``'diag'``) selects how
+    the set is scored. ``'laplace'`` uses the per-star likelihood of a veldist
+    fit, expanded about ``h0`` (:mod:`dynamite.fitstat_pm`), instead of the
+    diagonal chi2 on ``PM_2dhist`` / ``PM_2dhist_sigma``. It needs the npz
+    keys veldist's ``write_dynamite_kinematics_2d(star_data=...)`` writes:
+    ``PM_star_indptr``, ``PM_star_cell``, ``PM_star_mass`` (each star's cell
+    masses on the data grid as CSR rows), ``PM_star_aperture`` (0-based) and
+    ``PM_lap_h0`` (n_apertures, n_bins[0], n_bins[1]), each aperture summing
+    to 1. Needs ``gram_blockwise`` and is not combined with ``relative``.
+
     """
+    LAPLACE_KEYS = ('PM_star_indptr', 'PM_star_cell', 'PM_star_mass',
+                    'PM_star_aperture', 'PM_lap_h0')
+
     def __init__(self, relative=False, rotation_rows=None, start_mean=None,
-                 **kwargs):
+                 statistic='diag', **kwargs):
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
         self.relative = bool(relative)
+        if statistic not in ('diag', 'laplace'):
+            txt = f"statistic must be 'diag' or 'laplace', not {statistic!r}."
+            self.logger.error(txt)
+            raise ValueError(txt)
+        if statistic == 'laplace' and self.relative:
+            txt = "statistic 'laplace' is not available for a relative set."
+            self.logger.error(txt)
+            raise ValueError(txt)
+        self.statistic = statistic
         self.data_unshifted = None  # set by the first shift_data call
         if rotation_rows is not None and not self.relative:
             txt = 'rotation_rows need a relative ProperMotions set ' \
@@ -1907,6 +1929,61 @@ class ProperMotions(Kinematics, data.Integrated):
                       f'{self.start_mean.shape[0]}.'
                 self.logger.error(txt)
                 raise ValueError(txt)
+            if self.statistic == 'laplace':
+                self._init_laplace()
+
+    def _init_laplace(self):
+        """Check the per-star keys; index each aperture's star rows."""
+        missing = [k for k in self.LAPLACE_KEYS if k not in self.data]
+        if missing:
+            txt = f"{self.name}: statistic 'laplace' needs npz keys {missing}."
+            self.logger.error(txt)
+            raise ValueError(txt)
+        h0 = self.data['PM_lap_h0']
+        k2 = int(np.prod(self.data['PM_2dhist'].shape[1:]))
+        ap = np.asarray(self.data['PM_star_aperture'])
+        if (h0.shape != self.data['PM_2dhist'].shape
+                or not np.allclose(h0.sum(axis=(1, 2)), 1.0)
+                or ap.size != self.data['PM_star_indptr'].size - 1
+                or ap.min(initial=0) < 0 or ap.max(initial=0) >= self.n_spatial_bins
+                or self.data['PM_star_cell'].max(initial=0) >= k2):
+            txt = f"{self.name}: inconsistent per-star / PM_lap_h0 arrays."
+            self.logger.error(txt)
+            raise ValueError(txt)
+        order = np.argsort(ap, kind='stable')
+        cuts = np.searchsorted(ap[order], np.arange(self.n_spatial_bins + 1))
+        self._lap_rows = [order[cuts[a]:cuts[a + 1]]
+                          for a in range(self.n_spatial_bins)]
+        if not bool(self.data.get('PM_star_sharpened', False)):
+            self.logger.warning(
+                f"{self.name}: star rows are not sharpened (veldist sharpen="
+                "True); the fitted dispersion runs ~h^2/(12 sigma) low.")
+
+    def laplace_design(self, a):
+        """Aperture ``a``'s star rows as a dense (n_stars, n_cells) matrix."""
+        ptr = self.data['PM_star_indptr']
+        cell, mass = self.data['PM_star_cell'], self.data['PM_star_mass']
+        rows = self._lap_rows[a]
+        M = np.zeros((len(rows), int(np.prod(self.data['PM_2dhist'].shape[1:]))))
+        for j, r in enumerate(rows):
+            M[j, cell[ptr[r]:ptr[r + 1]]] = mass[ptr[r]:ptr[r + 1]]
+        return M
+
+    def laplace_terms(self, a, mass, h0=None):
+        """``(Lt, g, h0)`` of aperture ``a`` (:mod:`dynamite.fitstat_pm`).
+
+        ``mass``: the aperture's MGE projected mass (the data's scale in the
+        solver). ``h0``: the expansion point in those units; default
+        ``PM_lap_h0[a] * mass``. An ``h0`` given (re-expansion about a model)
+        is used as is and returned unchanged.
+        """
+        from dynamite import fitstat_pm
+        if h0 is None:
+            h0 = self.data['PM_lap_h0'][a].ravel() * mass
+        M = self.laplace_design(a)
+        F, g = fitstat_pm.laplace_terms(M, h0, len(M), mass)
+        Lt = fitstat_pm.laplace_lt(F, fitstat_pm.default_delta(len(M), mass))
+        return Lt, g, h0
 
     def update_data(self, weight_solver_settings):
         """Update proper motions errors according to `PM_sys_err_factor`.

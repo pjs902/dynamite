@@ -1099,6 +1099,15 @@ class Configuration(object):
                                   'GaussHermite, BayesLOSVD, or ProperMotions.'
                             self.logger.error(txt)
                             raise ValueError(txt)
+                        if check_pm and getattr(kin_data, 'statistic',
+                                                'diag') == 'laplace' and not (
+                                ws_type == 'NNLS' and self.settings.
+                                weight_solver_settings.get('gram_blockwise')):
+                            txt = f"{kin_data.name}: statistic 'laplace' " \
+                                  "needs weight solver NNLS with " \
+                                  "gram_blockwise: True."
+                            self.logger.error(txt)
+                            raise ValueError(txt)
                         if check_bl or check_pm:
                             # check weight solver type
                             if ws_type == 'LegacyWeightSolver':
