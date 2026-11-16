@@ -2436,16 +2436,71 @@ class NNLS(WeightSolver):
         obs_out = np.empty((n_ap, int(np.prod(orb.shape[2:]))))
         orb_out = np.empty(orb.shape, dtype=orb.dtype)
         lin = np.zeros(n_orbs)
+        cap = getattr(self, "_lap_capture", None)
         for a in range(n_ap):
             h0 = None if h0_set is None else h0_set[ap0 + a]
             Lt, g, h0 = kins.laplace_terms(ap0 + a, float(prj_mass_i[a]), h0=h0)
             H = np.asarray(orb[:, a], dtype=np.float64).reshape(n_orbs, -1)
+            if cap is not None:  # _solve_laplace: the model histogram at cap["w"]
+                cap["h"].setdefault(kins.name, np.zeros(
+                    (kins.n_spatial_bins, H.shape[1])))[ap0 + a] = cap["w"] @ H
             orb_out[:, a] = (H @ Lt.T).reshape(orb.shape[0], *orb.shape[2:])
             obs_out[a] = Lt @ h0
             lin += H @ g
         acc.add_linear(lin)
         return (np.reshape(obs_out, np.shape(obs)), np.ones(np.size(obs)),
                 orb_out)
+
+    def _solve_laplace(self, orblib):
+        """Driver for ``statistic: laplace`` sets (blockwise Gram path).
+
+        Pass 1 expands each set's per-star likelihood about the veldist
+        ``PM_lap_h0``. Each of ``pm_laplace_reexpand`` (setting, default 1)
+        further passes re-expands about the previous pass's model: one
+        rhs-only read captures ``h_a = w @ H_a``, the new expansion point is
+        ``(0.99 h_a / sum(h_a) + 0.01 / K2) * M_a`` (the uniform part keeps
+        every star's probability positive), then a full rebuild and solve.
+        veldist C1c: one re-expansion lands within ~0.03 km/s of the exact
+        (sharpened) likelihood's fit and is calibrated.
+
+        The chi2 reported for a Laplace set is always the offset-free
+        Laplace statistic about the DATA h0 at the final weights, so it is
+        comparable across models. Returns ``(w, chi2_tot, chi2_kin, chi2)``
+        as ``_solve_relative``; ``self.laplace_info`` holds ``reexpand`` and
+        the weights of every pass, ``w_pass``.
+        """
+        kin = self.system.get_unique_triaxial_visible_component().kinematic_data
+        n_re = int(self.settings.get("pm_laplace_reexpand", 1))
+        consume = self.nnls_solver == "admm" and getattr(
+            self, "admm_precision", "float64") == "float64"
+        self._lap_h0 = self._lap_capture = None
+        w_pass = []
+        try:
+            prob = self._relative_build(orblib, True)
+            w, solver = self._relative_qp(prob, consume_p=consume)
+            w_pass.append(w)
+            for _ in range(n_re):
+                self._lap_capture = dict(w=w, h={})
+                self.construct_gram_and_rhs_blockwise(orblib, rhs_only=True)
+                h_model, self._lap_capture = self._lap_capture["h"], None
+                h0, ap = {}, 0  # projected_masses: all sets' apertures in order
+                for k in kin:
+                    if k.name in h_model:
+                        h = h_model[k.name]
+                        mix = 0.99 * h / h.sum(axis=1, keepdims=True) + 0.01 / h.shape[1]
+                        h0[k.name] = mix * self.projected_masses[ap:ap + k.n_spatial_bins, None]
+                    ap += k.n_spatial_bins
+                self._lap_h0 = h0
+                prob = self._relative_build(orblib, True)
+                w, solver = self._relative_qp(prob, warm=solver, consume_p=consume)
+                w_pass.append(w)
+            self._lap_h0 = None  # report about the data h0
+            chi2 = self._relative_chi2(orblib, prob, True, w)
+        finally:
+            self._lap_h0 = self._lap_capture = None
+        self.laplace_info = dict(reexpand=n_re, w_pass=w_pass)
+        chi2_tot = sum(c[1] for c in chi2)
+        return w, chi2_tot, chi2_tot - chi2[0][1], chi2
 
     def _relative_pm_block(self, kins, obs, err, orb, ap0):
         """Project a free per-aperture mean shift out of a relative PM set.
@@ -3967,6 +4022,29 @@ class NNLS(WeightSolver):
                                 "chi2_kinmap": chi2_kinmap,
                                 **{f"pm_{k}": v for k, v in
                                    self.pm_recentre_info.items()}}
+                results.write(self.weight_file, format="ascii.ecsv",
+                              overwrite=True)
+            self.config.copy_config_file(self.direc_with_ml)
+        elif any(getattr(k, "statistic", "diag") == "laplace" for k in
+                 self.system.get_unique_triaxial_visible_component(
+                 ).kinematic_data):
+            # per-star likelihood sets: pass 1 + re-expansion (_solve_laplace)
+            if not self.stream_reads:
+                orblib.read_vel_histograms()
+                _downcast_orblib(orblib, self.nnls_dtype)
+            try:
+                weights, chi2_tot, chi2_kin, _ = self._solve_laplace(orblib)
+            except Exception as e:
+                weights = _nan_weights_after_solver_error(
+                    e, orblib, f"laplace-PM {self.nnls_solver}", self.logger)
+                chi2_tot = chi2_kin = chi2_kinmap = np.nan
+            else:
+                chi2_kinmap = self.chi2_kinmap(weights)  # nan: PM sets
+                results = table.Table()
+                results["weights"] = weights
+                results.meta = {"chi2_tot": chi2_tot, "chi2_kin": chi2_kin,
+                                "chi2_kinmap": chi2_kinmap,
+                                "pm_laplace_reexpand": self.laplace_info["reexpand"]}
                 results.write(self.weight_file, format="ascii.ecsv",
                               overwrite=True)
             self.config.copy_config_file(self.direc_with_ml)

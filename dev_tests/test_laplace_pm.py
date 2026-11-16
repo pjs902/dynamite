@@ -199,3 +199,110 @@ def test_gram_quadratic_form_is_the_offset_free_statistic(tmp_path, stream, gap)
         + mass_r2[fake.n_intrinsic + 2:].sum()
     assert total == pytest.approx(other + ref, rel=1e-8, abs=1e-6)
     assert fake._lap_acc is None  # no stale accumulator after the build
+
+
+# ------------------------------------------------------------ the driver
+def _toy_lap(tmp_path, reexpand=1):
+    """Laplace PM set whose stars are drawn from a known w_true on the toy library."""
+    from test_relative_pm import DRIVER, ConsistentLOS
+    import types
+    w_true = np.array([1.3, 0.4, 0.9, 1.6, 0.2, 1.1])
+    probe = make_pm_lap(tmp_path, MEANS, name="probe")
+    lib = _orblib(probe, rebin=False)
+    y = lib.full[1].y                                    # (o, vx, vy, a)
+    M_pm = w_true @ y.sum(axis=(1, 2))
+    H = np.einsum("o,oxya->axy", w_true, y) / M_pm[:, None, None]
+    pm = make_pm_lap(tmp_path, [(0, 0)] * 3, statistic="laplace")
+    z = dict(np.load(tmp_path / "hst.npz"))
+    z["PM_2dhist"] = H
+    rng = np.random.default_rng(7)
+    ptr, cell, mass, ap = [0], [], [], []
+    for a in range(3):  # stars from the true model histogram, errors 0.6
+        idx = rng.choice(NB * NB, size=150, p=(H[a] / H[a].sum()).ravel())
+        v = np.c_[CEN[idx // NB], CEN[idx % NB]] + rng.uniform(-0.5, 0.5, (150, 2))
+        v += rng.normal(0, 0.6, v.shape)
+        px = np.diff(ndtr((EDG[None] - v[:, :1]) / 0.6), axis=1)
+        py = np.diff(ndtr((EDG[None] - v[:, 1:]) / 0.6), axis=1)
+        for row in (px[:, :, None] * py[:, None, :]).reshape(150, -1):
+            nz = np.nonzero(row >= 1e-6 * row.max())[0]
+            cell.append(nz.astype(np.int32))
+            mass.append(row[nz].astype(np.float32))
+            ptr.append(ptr[-1] + len(nz))
+        ap.append(np.full(150, a, np.int32))
+    mix = 0.99 * H + 0.01 / NB**2
+    z.update(PM_star_indptr=np.asarray(ptr, np.int64), PM_star_cell=np.concatenate(cell),
+             PM_star_mass=np.concatenate(mass), PM_star_aperture=np.concatenate(ap),
+             PM_lap_h0=mix / mix.sum(axis=(1, 2), keepdims=True))
+    np.savez(tmp_path / "hst.npz", **z)
+    pm = dyn_kin.ProperMotions(name="hst", datafile="hst.npz", input_directory=str(tmp_path) + "/",
+                               type="ProperMotions", statistic="laplace")
+    M_los = w_true @ lib.projected_masses[0]
+    los_obs = np.einsum("o,oja->aj", w_true, lib.full[0].y[:, :4, :]) / M_los[:, None]
+    los = ConsistentLOS(los_obs, 0.01 * np.abs(los_obs) + 1e-3)
+    fake = _fake_nnls([los, pm], 5, dtype=np.float64)
+    fake.lib = lib
+    fake.total_mass = float(w_true.sum())
+    fake.intrinsic_masses = w_true @ lib.intrinsic_masses
+    fake.projected_masses = np.concatenate([M_los, M_pm])
+    fake.nnls_solver, fake.gram_blockwise, fake.ridge_lambda = "admm", True, 0.0
+    fake.admm_rho, fake.admm_alpha, fake.admm_precision = None, 1.0, "float64"
+    fake.admm_max_iters, fake.admm_tol, fake.admm_free_p = 20000, 1e-12, False
+    fake.settings = {"pm_laplace_reexpand": reexpand}
+    fake._relative_chi2_total = NNLS._relative_chi2_total
+    for name in DRIVER + ("_solve_laplace", "_laplace_pm_block"):
+        setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
+    return fake, lib, pm, w_true
+
+
+def _lap_at_data_h0(pm, lib, prj, w):
+    H = pm.transform_orblib_to_observables(lib.full[1]).reshape(N_ORBS, 3, -1)
+    return sum(fs.stat_offset_free(H[:, a].T @ w, *pm.laplace_terms(a, prj[a]))
+               for a in range(3))
+
+
+@pytest.mark.parametrize("reexpand", [0, 1])
+def test_driver_reports_laplace_at_the_data_h0(tmp_path, reexpand):
+    fake, lib, pm, _ = _toy_lap(tmp_path, reexpand)
+    lib.vel_histograms = list(lib.full)
+    w, chi2_tot, chi2_kin, chi2 = fake._solve_laplace(lib)
+    assert np.all(w >= -1e-9) and w.sum() == pytest.approx(fake.total_mass, rel=1e-3)
+    by = {c[0]: c[1] for c in chi2}
+    ref = _lap_at_data_h0(pm, lib, fake.projected_masses[2:], w)
+    assert by["hst"] == pytest.approx(ref, rel=1e-8, abs=1e-6)
+    assert chi2_kin == pytest.approx(chi2_tot - by["mass"])
+    assert fake._lap_h0 is None and fake._lap_capture is None  # driver state cleared
+    assert fake.laplace_info["reexpand"] == reexpand
+
+
+def test_reexpansion_point_is_the_mixed_pass1_model(tmp_path):
+    fake, lib, pm, _ = _toy_lap(tmp_path, 1)
+    lib.vel_histograms = list(lib.full)
+    seen = []
+    orig = NNLS._relative_build
+
+    def spy(self, orblib, gram, rhs_from=None):
+        seen.append(None if self._lap_h0 is None else {k: v.copy() for k, v in self._lap_h0.items()})
+        return orig(self, orblib, gram, rhs_from)
+    fake._relative_build = spy.__get__(fake)
+    fake._solve_laplace(lib)
+    assert seen[0] is None and len(seen) == 2  # pass 1 at the data h0, then one rebuild
+    w1 = fake.laplace_info["w_pass"][0]
+    H = pm.transform_orblib_to_observables(lib.full[1]).reshape(N_ORBS, 3, -1)
+    prj = fake.projected_masses[2:]
+    for a in range(3):
+        h = H[:, a].T @ w1
+        want = (0.99 * h / h.sum() + 0.01 / NB**2) * prj[a]
+        np.testing.assert_allclose(seen[1]["hst"][a], want, rtol=1e-10)
+
+
+def test_mirrored_h0_is_refused(tmp_path):
+    """PM_lap_h0 and PM_2dhist come from the same veldist fit; a frame flip
+    between them (pm2 -> -pm2, as the x-East convention can introduce) must
+    not pass silently."""
+    pm = make_pm_lap(tmp_path, [(1.5, 1.0), (1.0, -1.5), (-1.5, 1.2)])
+    z = dict(np.load(tmp_path / "hst.npz"))
+    z["PM_lap_h0"] = z["PM_lap_h0"][:, :, ::-1]
+    np.savez(tmp_path / "hst.npz", **z)
+    with pytest.raises(ValueError, match="PM_lap_h0"):
+        dyn_kin.ProperMotions(name="hst", datafile="hst.npz", input_directory=str(tmp_path) + "/",
+                              type="ProperMotions", statistic="laplace")

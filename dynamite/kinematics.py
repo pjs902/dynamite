@@ -1950,6 +1950,23 @@ class ProperMotions(Kinematics, data.Integrated):
             txt = f"{self.name}: inconsistent per-star / PM_lap_h0 arrays."
             self.logger.error(txt)
             raise ValueError(txt)
+        # PM_lap_h0 and PM_2dhist come from the same veldist fit: a frame
+        # flip or transpose between them (or between them and the star rows,
+        # which share h0's export) must not pass silently.
+        d = self.data['PM_2dhist']
+        corr = lambda x: np.array([np.corrcoef(u.ravel(), v.ravel())[0, 1]
+                                   for u, v in zip(x, d)])
+        c0 = corr(h0)
+        alt = [corr(h0[:, ::-1]), corr(h0[:, :, ::-1])]
+        if h0.shape[1] == h0.shape[2]:
+            alt.append(corr(np.swapaxes(h0, 1, 2)))
+        gain = np.median(np.max(alt, axis=0) - c0)
+        if np.median(c0) < 0.9 or gain > 1e-3:
+            txt = (f"{self.name}: PM_lap_h0 does not match PM_2dhist (median "
+                   f"correlation {np.median(c0):.3f}; a flipped/transposed h0 "
+                   f"does {gain:+.3f} better). Check the export frame.")
+            self.logger.error(txt)
+            raise ValueError(txt)
         order = np.argsort(ap, kind='stable')
         cuts = np.searchsorted(ap[order], np.arange(self.n_spatial_bins + 1))
         self._lap_rows = [order[cuts[a]:cuts[a + 1]]
