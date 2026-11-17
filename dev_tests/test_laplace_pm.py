@@ -291,7 +291,7 @@ def test_reexpansion_point_is_the_mixed_pass1_model(tmp_path):
     prj = fake.projected_masses[2:]
     for a in range(3):
         h = H[:, a].T @ w1
-        want = (0.99 * h / h.sum() + 0.01 / NB**2) * prj[a]
+        want = (0.999 * h / h.sum() + 0.001 / NB**2) * prj[a]
         np.testing.assert_allclose(seen[1]["hst"][a], want, rtol=1e-10)
 
 
@@ -382,3 +382,14 @@ def test_gram_quadratic_form_1d(tmp_path, stream, gap):
     assert lap == pytest.approx(ref, rel=1e-8, abs=1e-6)
     total = w @ gp.G @ w - 2 * w @ gp.v + gp.b_sq_rest
     assert total == pytest.approx(sum(gp_c.chi2_by_tag.values()), rel=1e-8, abs=1e-6)
+
+
+def test_reexpand_mix_floor_default():
+    """Re-expansion reference mixes the model histogram with a uniform floor of 1e-3 (C1d) by default."""
+    from dynamite.weight_solvers import LAPLACE_REEXPAND_FLOOR, laplace_reexpand_mix
+    assert LAPLACE_REEXPAND_FLOOR == 1e-3
+    h = np.array([[0.0, 2.0, 2.0, 0.0]])
+    mix = laplace_reexpand_mix(h)
+    np.testing.assert_allclose(mix.sum(axis=1), 1.0)
+    np.testing.assert_allclose(mix[0, 0], 1e-3 / 4)
+    np.testing.assert_allclose(laplace_reexpand_mix(h, floor=0.01)[0, 0], 0.01 / 4)

@@ -99,6 +99,18 @@ class GramProblem(NamedTuple):
     chi2_by_tag: dict = None
 
 
+#: Uniform floor mixed into the re-expansion reference of the PM Laplace statistic: h0 =
+#: (1 - floor) h / sum(h) + floor / K. 1e-3 keeps every star's probability positive while biasing the fitted
+#: dispersion by <= 0.02 km/s on HST-like mocks (C1d); 0.01 biased it by -0.03.
+LAPLACE_REEXPAND_FLOOR = 1e-3
+
+
+def laplace_reexpand_mix(h, floor=LAPLACE_REEXPAND_FLOOR):
+    """Rows of ``h`` normalised to unit sum and mixed with a uniform ``floor`` (fraction of the mass)."""
+    h = np.asarray(h, dtype=float)
+    return (1.0 - floor) * h / h.sum(axis=1, keepdims=True) + floor / h.shape[1]
+
+
 #: Multiple of the working epsilon used as the per-row round-off floor for
 #: the KKT diagnostics. The textbook backward-error bound on a computed
 #: residual row is ~n*eps*(|A_i|.|w| + |b_i|); n*eps would be far too
@@ -2458,7 +2470,8 @@ class NNLS(WeightSolver):
         ``PM_lap_h0``. Each of ``pm_laplace_reexpand`` (setting, default 1)
         further passes re-expands about the previous pass's model: one
         rhs-only read captures ``h_a = w @ H_a``, the new expansion point is
-        ``(0.99 h_a / sum(h_a) + 0.01 / K2) * M_a`` (the uniform part keeps
+        ``((1 - f) h_a / sum(h_a) + f / K2) * M_a`` with ``f`` the setting ``pm_laplace_reexpand_floor``
+        (default ``LAPLACE_REEXPAND_FLOOR`` = 1e-3; the uniform part keeps
         every star's probability positive), then a full rebuild and solve.
         veldist C1c: one re-expansion lands within ~0.03 km/s of the exact
         (sharpened) likelihood's fit and is calibrated.
@@ -2471,6 +2484,7 @@ class NNLS(WeightSolver):
         """
         kin = self.system.get_unique_triaxial_visible_component().kinematic_data
         n_re = int(self.settings.get("pm_laplace_reexpand", 1))
+        floor = float(self.settings.get("pm_laplace_reexpand_floor", LAPLACE_REEXPAND_FLOOR))
         consume = self.nnls_solver == "admm" and getattr(
             self, "admm_precision", "float64") == "float64"
         self._lap_h0 = self._lap_capture = None
@@ -2487,7 +2501,7 @@ class NNLS(WeightSolver):
                 for k in kin:
                     if k.name in h_model:
                         h = h_model[k.name]
-                        mix = 0.99 * h / h.sum(axis=1, keepdims=True) + 0.01 / h.shape[1]
+                        mix = laplace_reexpand_mix(h, floor)
                         h0[k.name] = mix * self.projected_masses[ap:ap + k.n_spatial_bins, None]
                     ap += k.n_spatial_bins
                 self._lap_h0 = h0
