@@ -1975,7 +1975,8 @@ class ProperMotions(LaplaceStatistic, Kinematics, data.Integrated):
     ``PM_star_indptr``, ``PM_star_cell``, ``PM_star_mass`` (each star's cell
     masses on the data grid as CSR rows), ``PM_star_aperture`` (0-based) and
     ``PM_lap_h0`` (n_apertures, n_bins[0], n_bins[1]), each aperture summing
-    to 1. Needs ``gram_blockwise`` and is not combined with ``relative``.
+    to 1. Needs ``gram_blockwise``. With ``relative`` it needs ``pm_recentre_mode: vp``
+    (the model is shifted, see ``NNLS._relative_pm_block``).
 
     """
     LAPLACE_KEYS = ('PM_star_indptr', 'PM_star_cell', 'PM_star_mass',
@@ -1986,10 +1987,6 @@ class ProperMotions(LaplaceStatistic, Kinematics, data.Integrated):
         self.logger = logging.getLogger(f'{__name__}.{__class__.__name__}')
         self.relative = bool(relative)
         self._set_statistic(statistic)
-        if statistic == 'laplace' and self.relative:
-            txt = "statistic 'laplace' is not available for a relative set."
-            self.logger.error(txt)
-            raise ValueError(txt)
         self.data_unshifted = None  # set by the first shift_data call
         if rotation_rows is not None and not self.relative:
             txt = 'rotation_rows need a relative ProperMotions set ' \

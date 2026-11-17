@@ -50,6 +50,7 @@ except ImportError:
 
 from dynamite import constants
 from dynamite import analysis
+from dynamite import fitstat_pm
 from dynamite import kinematics as dyn_kin
 
 
@@ -2419,7 +2420,7 @@ class NNLS(WeightSolver):
             hist_y[:, -1, :] = last
         if getattr(kins, "relative", False):
             obs_kins, obs_kins_err, orb_kins = self._relative_pm_block(
-                kins, obs_kins, obs_kins_err, orb_kins, ap0)
+                kins, obs_kins, obs_kins_err, orb_kins, ap0, prj_mass_i)
         elif getattr(kins, "statistic", "diag") == "laplace":
             obs_kins, obs_kins_err, orb_kins = self._laplace_pm_block(
                 kins, obs_kins, orb_kins, prj_mass_i, ap0)
@@ -2516,7 +2517,7 @@ class NNLS(WeightSolver):
         chi2_tot = sum(c[1] for c in chi2)
         return w, chi2_tot, chi2_tot - chi2[0][1], chi2
 
-    def _relative_pm_block(self, kins, obs, err, orb, ap0):
+    def _relative_pm_block(self, kins, obs, err, orb, ap0, prj_mass=None):
         """Project a free per-aperture mean shift out of a relative PM set.
 
         1. Stores the per-orbit, per-aperture moments of the rebinned,
@@ -2530,6 +2531,14 @@ class NNLS(WeightSolver):
            chi2 then ignores any shift of aperture a's mean (to first order).
 
         Returns ``(obs, err, orb)`` in the shapes received, err = 1.
+
+        ``statistic: laplace`` (vp mode only; ``prj_mass`` = the apertures'
+        MGE masses): the MODEL is shifted by the aperture's centre as for
+        the diagonal statistic, the rows are ``Lt S H`` against ``Lt h0``
+        and the linear term ``2 g' S H w`` goes to the accumulator. With
+        ``vp["w_proj"]`` set the shift derivative ``D`` of the current model
+        is profiled out (:func:`fitstat_pm.project_shift`): rows projected
+        by ``P = I - G G^+``, ``G = Lt D``, and ``g`` replaced by ``gt``.
 
         Driver state (``NNLS._solve_relative``): with ``_pm_moments_only``
         only step 1 runs and the rows come back as zeros (pass 0); with
@@ -2575,6 +2584,18 @@ class NNLS(WeightSolver):
         # layout however the caller grouped the apertures: numpy reductions
         # and BLAS are not bitwise stable across shapes, and the five read
         # paths must agree exactly.
+        lap = kins.statistic == "laplace"
+        if lap and (vp is None and not moments_only):
+            raise ValueError(
+                f"{kins.name}: statistic 'laplace' with relative: True needs "
+                "pm_recentre_mode: vp.")
+        if lap and not moments_only:
+            acc = getattr(self, "_lap_acc", None)
+            if acc is None:
+                raise ValueError(
+                    f"{kins.name}: statistic 'laplace' needs weight_solver_settings "
+                    "gram_blockwise: True (its linear term lives in the Gram path).")
+            lin = np.zeros(n_orbs)
         for a in range(n_ap):
             h = np.ascontiguousarray(orb[:, a])  # (o, vx, vy), unshifted
             sx = h.sum(axis=2, dtype=np.float64)  # (o, vx)
@@ -2609,17 +2630,32 @@ class NNLS(WeightSolver):
                 # matrices is ~10x slower at 45k orbits)
                 hs = (Sx.astype(dt) @ h.transpose(1, 0, 2).reshape(nvx, -1)).reshape(
                     nvx, n_orbs, nvy).transpose(1, 0, 2).reshape(-1, nvy)
-                hs = (hs @ Sy.T.astype(dt)).reshape(n_orbs, -1) / e.astype(dt)
-                o = obs[a].ravel() / e
+                hs = (hs @ Sy.T.astype(dt)).reshape(n_orbs, -1)
+                D = None
                 if vp.get("w_proj") is not None:
-                    # curvature rebuild: project out the shift derivative of
-                    # the current model (variable projection at this centre)
+                    # curvature rebuild: the shift derivative of the current
+                    # model at this centre (variable projection), cells x 2
                     Ha = (vp["w_proj"] @ h.reshape(n_orbs, -1)).reshape(nvx, nvy)
                     dc = 0.01 * min(np.diff(xedg[0]).min(), np.diff(xedg[1]).min())
-                    G = np.stack([(dyn_kin.pm_shift_matrix(xedg[0], cx + dc) - dyn_kin.pm_shift_matrix(xedg[0], cx - dc)) @ Ha @ Sy.T,
+                    D = np.stack([(dyn_kin.pm_shift_matrix(xedg[0], cx + dc) - dyn_kin.pm_shift_matrix(xedg[0], cx - dc)) @ Ha @ Sy.T,
                                   Sx @ Ha @ (dyn_kin.pm_shift_matrix(xedg[1], cy + dc) - dyn_kin.pm_shift_matrix(xedg[1], cy - dc)).T],
-                                 -1).reshape(-1, 2) / (2 * dc * e[:, None])
-                    Q = np.linalg.qr(G)[0]
+                                 -1).reshape(-1, 2) / (2 * dc)
+                if kins.statistic == "laplace":
+                    Lt, g, h0 = kins.laplace_terms(ap0 + a, float(prj_mass[a]))
+                    o = Lt @ h0
+                    rows = hs.astype(np.float64) @ Lt.T
+                    if D is not None:
+                        G, Gp, g = fitstat_pm.project_shift(Lt, g, D)
+                        rows = fitstat_pm.project_rows(rows, G, Gp)
+                        o = o - G @ (Gp @ o)
+                    lin += hs @ g
+                    obs_out[a] = o
+                    orb_out[:, a] = rows
+                    continue
+                hs = hs / e.astype(dt)
+                o = obs[a].ravel() / e
+                if D is not None:
+                    Q = np.linalg.qr(D / e[:, None])[0]
                     hs -= (hs @ Q.astype(dt)) @ Q.T.astype(dt)
                     o = o - Q @ (Q.T @ o)
                 obs_out[a] = o
@@ -2669,6 +2705,8 @@ class NNLS(WeightSolver):
             mom["ghat"][:, ap0 + a] = gh
             h -= gh @ G.T.astype(dt)
             orb_out[:, a] = h
+        if lap and not moments_only:
+            acc.add_linear(lin)
         return obs_out, np.ones_like(obs_out), orb_out.reshape(
             n_orbs, n_ap, nvx, nvy)
 
@@ -2946,6 +2984,59 @@ class NNLS(WeightSolver):
             hist["polish_phi"] = ph["phi"]
             hist["c"].append(c)
             stop = f"polish_{pstop}"
+        return w, c, hist, stop
+
+    def _solve_relative_vp_laplace(self, orblib, gram, prob, solver, w, c0, rel,
+                                   max_rounds, chi2_tol):
+        """``pm_recentre_mode: vp`` for ``statistic: laplace`` sets.
+
+        Same model-shifting frame as :meth:`_solve_relative_vp` (data and
+        stars fixed on their own grid, centres ``c`` on the model), but a
+        plain alternation instead of its exact-gradient line search, which
+        is written for the diagonal statistic: each round fits every
+        aperture's centre to the model at ``w`` (one rhs-only read, then
+        ``_vp_fit_centres``: the DIAGONAL chi2 of the veldist histogram
+        against the shifted model, not the Laplace statistic), rebuilds
+        the rows with the shift derivative of that model projected out
+        (:func:`fitstat_pm.project_shift`, ``vp["w_proj"] = w``) and
+        re-solves. Stops when a round changes the total chi2 by less than
+        ``chi2_tol`` or after ``max_rounds`` rounds. The projection is
+        linearised at ``w``, so the phi of different rounds are not strictly
+        comparable and need not fall monotonically. Each round is a full
+        library read and Gram build. No re-expansion of h0 and no
+        in-memory polish (refused). The final chi2 read (unprojected rows
+        at the fitted centres) is the Laplace statistic of the model
+        shifted to c. Returns ``(w, c, history, stop)`` as the diagonal one.
+        """
+        if int(self.settings.get("pm_vp_polish_maxfun", 0)) > 0:
+            raise ValueError("pm_vp_polish_maxfun needs the diagonal statistic.")
+        c = {k.name: np.array(c0[k.name], float) for k in rel}
+        xedg = {k.name: k.as_histogram2d().xedg for k in rel}
+        for k in rel:  # data back on their own grid; the model moves instead
+            k.shift_data(np.zeros((k.n_spatial_bins, 2)))
+        vp = self._pm_vp = dict(centre=c, capture={}, H={}, D={}, E={})
+        hist = dict(phi=[], c=[c])
+        stop = "max_rounds"
+        for it in range(max_rounds + 1):
+            vp["capture"], vp["H"], vp["w_proj"] = {"w": w}, {}, None
+            self._relative_build(orblib, gram, rhs_from=prob)  # captures H(w)
+            c = {nm: self._vp_fit_centres(xedg[nm], vp["H"][(nm, "w")],
+                                          vp["D"][nm], vp["E"][nm], c[nm],
+                                          scan=True)[0] for nm in c}
+            vp["centre"] = c
+            vp["capture"], vp["w_proj"] = {}, w
+            p = self._relative_build(orblib, gram)
+            w_new, solver = self._relative_qp(p, warm=solver)
+            phi = self._relative_chi2_total(p, w_new)
+            self.logger.info(f"relative PM: vp-laplace round {it}: chi2 {phi:.8g}")
+            gain = hist["phi"][-1] - phi if hist["phi"] else np.inf
+            hist["phi"].append(phi)
+            hist["c"].append(c)
+            w = w_new
+            if abs(gain) < chi2_tol:
+                stop = "chi2_tol"
+                break
+        vp["w_proj"] = None  # the final chi2 read: unprojected, at the fitted c
         return w, c, hist, stop
 
     def _vp_polish_problem(self, prob, gram, lib, D, E, xedg):
@@ -3288,6 +3379,11 @@ class NNLS(WeightSolver):
                    f"or 'vp', not {mode!r}")
             self.logger.error(txt)
             raise ValueError(txt)
+        if mode != "vp" and any(getattr(k, "statistic", "diag") == "laplace"
+                                for k in rel):
+            txt = "relative ProperMotions sets with statistic 'laplace' need pm_recentre_mode 'vp'"
+            self.logger.error(txt)
+            raise ValueError(txt)
         if mode == "vp" and self.nnls_solver not in ("admm", "cvxopt"):
             txt = "pm_recentre_mode 'vp' needs nnls_solver admm or cvxopt"
             self.logger.error(txt)
@@ -3395,7 +3491,10 @@ class NNLS(WeightSolver):
                     prob = self._relative_build(orblib, gram, rhs_from=prob)
             elif mode == "vp":
                 extra = False
-                w, c, vp_hist, stop = self._solve_relative_vp(
+                solve_vp = (self._solve_relative_vp_laplace if any(
+                    getattr(k, "statistic", "diag") == "laplace" for k in rel)
+                    else self._solve_relative_vp)
+                w, c, vp_hist, stop = solve_vp(
                     orblib, gram, prob, solver, w, m_ref, rel, max_rounds,
                     1.0 if chi2_tol is None else float(chi2_tol))
                 m_used = c

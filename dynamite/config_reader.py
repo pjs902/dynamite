@@ -1108,6 +1108,16 @@ class Configuration(object):
                                   "gram_blockwise: True."
                             self.logger.error(txt)
                             raise ValueError(txt)
+                        if check_pm and getattr(kin_data, 'statistic', 'diag') \
+                                == 'laplace' and getattr(
+                                kin_data, 'relative', False) and \
+                                self.settings.weight_solver_settings.get(
+                                'pm_recentre_mode') != 'vp':
+                            txt = f"{kin_data.name}: statistic 'laplace' " \
+                                  "with relative: True needs " \
+                                  "pm_recentre_mode: vp."
+                            self.logger.error(txt)
+                            raise ValueError(txt)
                         if check_bl or check_pm:
                             # check weight solver type
                             if ws_type == 'LegacyWeightSolver':

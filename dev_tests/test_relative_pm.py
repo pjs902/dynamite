@@ -1165,8 +1165,8 @@ def test_rebuild_rounds_keep_the_pass1_errors(tmp_path):
     seen = []
     orig = NNLS._relative_pm_block
 
-    def spy(self, kins, obs, err, orb, ap0):
-        r = orig(self, kins, obs, err, orb, ap0)
+    def spy(self, kins, obs, err, orb, ap0, *rest):
+        r = orig(self, kins, obs, err, orb, ap0, *rest)
         if not self._pm_moments_only:
             seen.append(self.pm_moments[kins.name]["e"].copy())
         return r

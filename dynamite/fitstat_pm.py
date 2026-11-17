@@ -25,7 +25,7 @@ models. With ``sum(h0) = mass``, ``g' h0 = n - n = 0``, so ``Q`` is offset-free.
 import numpy as np
 
 __all__ = ["laplace_terms", "laplace_lt", "default_delta", "stat_offset_free",
-           "stat_exact"]
+           "stat_exact", "project_shift", "project_rows"]
 
 
 def default_delta(n_stars, mass):
@@ -60,3 +60,21 @@ def stat_exact(h, M, n_stars, mass):
     p = np.asarray(M, dtype=np.float64) @ h
     return float(2.0 * (-np.sum(np.log(np.maximum(p, 1e-300)))
                         + n_stars / mass * np.sum(h)))
+
+
+def project_shift(Lt, g, D):
+    """Profile a free shift ``c`` of the model histogram out of ``Q``.
+
+    ``D`` (K2, 2) is ``dh/dc`` of the current model. With ``G = Lt D`` the
+    shift-profiled statistic is ``|P Lt (h - h0)|^2 + 2 gt'(h - h0) + const``,
+    ``P = I - G G^+`` and ``gt = g - Lt' G (G'G)^+ D'g`` (so ``D' gt = 0``).
+    Returns ``(G, G^+, gt)``; rank-safe: ``D = 0`` gives ``P = I``, ``gt = g``.
+    """
+    G = Lt @ D
+    Gp = np.linalg.pinv(G)
+    return G, Gp, g - Lt.T @ (G @ (Gp @ (Gp.T @ (D.T @ g))))
+
+
+def project_rows(X, G, Gp):
+    """``X`` (n, K2) rows times ``P`` (``P`` symmetric): ``X - X G^+' G'``."""
+    return X - (X @ Gp.T) @ G.T
