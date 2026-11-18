@@ -400,7 +400,16 @@ class NormalEquationAccumulator:
             keep = A_block.any(axis=1)
             b_block = np.asarray(b_block, dtype=np.float64)
             if not keep.all():
-                assert not b_block[~keep].any(), "dropped rows must have b = 0"
+                # a zero-A row adds nothing to G or v, but its b still enters |b|^2,
+                # b_max and the residual (A w - b = -b) of the chi2 / line terms
+                bd = b_block[~keep]
+                bb = float(bd @ bd)
+                self.b_sq_sum += bb
+                self.b_max = max(self.b_max, float(np.abs(bd).max(initial=0.0)))
+                if self.chi2_w is not None:
+                    self.chi2[self.tag] = self.chi2.get(self.tag, 0.0) + bb
+                if self.line is not None:
+                    self.line_q[0] += bb
                 A_block, b_block = np.asfortranarray(A_block[keep]), b_block[keep]
             if A_block.shape[0] == 0:  # nothing left (BLAS rejects k = 0)
                 return

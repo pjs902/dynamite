@@ -144,3 +144,28 @@ def test_driver_solution_is_within_the_reported_bound(tmp_path):
     E = out[10.0][2]["hst"]
     assert E >= 0
     assert q_rs - q_full <= E + 1e-6 * abs(q_full) + 1e-6
+
+
+def test_dropped_rows_keep_their_data_term():
+    """A row with zero orbit part but b != 0 adds nothing to G or v but still to |b|^2, b_max and the
+    chi2 residual (cells no orbit reaches); dropping it must keep those."""
+    rng = np.random.default_rng(2)
+    A = rng.random((8, 5))
+    A[[0, 3, 6]] = 0.0
+    b = rng.random(8) * 3
+    w = rng.random(5)
+    ref = NormalEquationAccumulator(5, chi2_w=w)
+    ref.add(A, b)
+    acc = NormalEquationAccumulator(5, chi2_w=w)
+    acc.drop_zero_rows = True
+    acc.add(np.asfortranarray(A), b)
+    np.testing.assert_allclose(np.triu(acc.G), np.triu(ref.G), rtol=1e-14)
+    np.testing.assert_allclose(acc.v, ref.v, rtol=1e-14)
+    assert acc.b_sq_sum == pytest.approx(ref.b_sq_sum, rel=1e-14)
+    assert acc.b_max == ref.b_max
+    assert acc.chi2[""] == pytest.approx(ref.chi2[""], rel=1e-14)
+    assert acc.rows_used == 5
+    allzero = NormalEquationAccumulator(5, chi2_w=w)
+    allzero.drop_zero_rows = True
+    allzero.add(np.zeros((3, 5)), np.array([1.0, 2.0, 0.0]))
+    assert allzero.b_sq_sum == pytest.approx(5.0) and allzero.chi2[""] == pytest.approx(5.0)
