@@ -412,6 +412,35 @@ class LaplaceStatistic:
         Lt = fitstat_pm.laplace_lt(F, fitstat_pm.default_delta(len(M), mass))
         return Lt, g, h0
 
+    def laplace_rowspace_basis(self, a):
+        """Orthonormal basis V (K2, r) of aperture ``a``'s star row space
+        (singular values > 1e-8 of the largest); range(F) for every h0. Cached."""
+        cache = self.__dict__.setdefault('_lap_V', {})
+        if a not in cache:
+            _, sv, Vt = np.linalg.svd(self.laplace_design(a), full_matrices=False)
+            cache[a] = np.ascontiguousarray(Vt[sv > 1e-8 * sv[0]].T)
+        return cache[a]
+
+    def laplace_rowspace_terms(self, a, mass, kappa, h0=None):
+        """Row-space Laplace rows of aperture ``a``: ``(R, g, h0, Vd, mu_d, delta)``.
+
+        ``R' R = V U_k mu_k U_k' V'`` keeps the eigenpairs of
+        ``S = V'F V + delta I`` with ``mu >= kappa * delta``; the full
+        ``F + delta I`` differs by ``delta (I - V V') + Vd diag(mu_d) Vd'``
+        (``Vd = V U_dropped``). ``g`` and ``h0`` as :meth:`laplace_terms`.
+        """
+        from dynamite import fitstat_pm
+        if h0 is None:
+            h0 = self._lap['lap_h0'][a].ravel() * mass
+        M = self.laplace_design(a)
+        F, g = fitstat_pm.laplace_terms(M, h0, len(M), mass)
+        delta = fitstat_pm.default_delta(len(M), mass)
+        V = self.laplace_rowspace_basis(a)
+        mu, U = np.linalg.eigh(V.T @ F @ V + delta * np.eye(V.shape[1]))
+        k = mu >= kappa * delta
+        R = (np.sqrt(mu[k])[:, None] * U[:, k].T) @ V.T
+        return R, g, h0, V @ U[:, ~k], mu[~k], delta
+
 
 class GaussHermite(Kinematics, data.Integrated):
     """LOSVDs described by a Gauss Hermite expansion

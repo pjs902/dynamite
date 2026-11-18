@@ -371,6 +371,14 @@ class NormalEquationAccumulator:
         self.chi2_w = chi2_w
         self.chi2 = {}
         self.skip_zero_blocks = False
+        # drop_zero_rows (pm_laplace_rowspace_kappa): all-zero rows add nothing
+        # to G, v or |b|^2 but dense dsyrk still pays for them; drop them first.
+        # rows_used counts the rows that reached the update (profiling).
+        self.drop_zero_rows = False
+        self.rows_used = 0
+        # diag_carry: per-orbit Gram diagonal of rows deliberately left out
+        # (row-space Laplace rows); added to diag(G) for the column scaling only.
+        self.diag_carry = None
         # relative PM vp mode (NNLS._solve_relative): grad_w -> g = A'(A w - b)
         # over all rows; line = (w0, dw) -> line_q = (r'r, r'A dw, |A dw|^2)
         # with r = A w0 - b, the exact chi2 along w0 + t dw at fixed rows
@@ -388,6 +396,15 @@ class NormalEquationAccumulator:
         rows. ``b_block``: ``(rows,)``, likewise."""
         A_block = np.asarray(A_block, dtype=self.dtype)
         assert A_block.shape[1] == self.n_orbs, A_block.shape
+        if self.drop_zero_rows:
+            keep = A_block.any(axis=1)
+            b_block = np.asarray(b_block, dtype=np.float64)
+            if not keep.all():
+                assert not b_block[~keep].any(), "dropped rows must have b = 0"
+                A_block, b_block = np.asfortranarray(A_block[keep]), b_block[keep]
+            if A_block.shape[0] == 0:  # nothing left (BLAS rejects k = 0)
+                return
+        self.rows_used += A_block.shape[0]
         prof = self.profiler
         if self.chi2_w is not None:
             r = A_block @ self.chi2_w - np.asarray(b_block, dtype=np.float64)
@@ -418,6 +435,11 @@ class NormalEquationAccumulator:
             self.v += A_block.T @ b_block
         self.b_sq_sum += float(np.dot(b_block, b_block))
         self.b_max = max(self.b_max, float(np.abs(b_block).max(initial=0.0)))
+
+    def add_diag_carry(self, c):
+        """Add ``c`` (n_orbs,) to the diagonal used for the column scaling only."""
+        c = np.asarray(c, dtype=np.float64)
+        self.diag_carry = c.copy() if self.diag_carry is None else self.diag_carry + c
 
     def add_linear(self, c):
         """Add ``2 c'w`` to the objective (``c``: ``(n_orbs,)``, raw scale).
@@ -463,6 +485,8 @@ class NormalEquationAccumulator:
             iu = np.triu_indices(i1 - i0)
             blk[(iu[1], iu[0])] = blk[iu]
         col = np.abs(np.diag(self.G))
+        if self.diag_carry is not None:
+            col += self.diag_carry
         col = np.sqrt(col, out=col)
         col[col == 0] = 1.0  # null orbits: leave alone
         b_max = self.b_max if self.b_max > 0 else 1.0
@@ -478,6 +502,14 @@ class NormalEquationAccumulator:
             P = self.G / col[:, None]
             P /= col[None, :]
         return P, q, col, b_max
+
+
+def _lap_rowspace_kappa(solver):
+    """``pm_laplace_rowspace_kappa`` (None = off, the default): row-space Laplace
+    rows for ProperMotions sets, eigen-directions of V'FV + delta I below
+    kappa * delta dropped (veldist docs/laplace-solve-speedup-analysis.md, A)."""
+    k = (getattr(solver, "settings", None) or {}).get("pm_laplace_rowspace_kappa")
+    return None if k is None else float(k)
 
 
 def _downcast_orblib(orblib, dtype):
@@ -2017,6 +2049,7 @@ class NNLS(WeightSolver):
         if acc.grad_w is not None or acc.line is not None:
             self._vp_acc = acc  # read back by vp mode (rhs-only: no Gram held)
         self._lap_acc = acc  # statistic: laplace sets add their linear term
+        acc.drop_zero_rows = _lap_rowspace_kappa(self) is not None
         n_mass_rest = self.n_intrinsic + self.n_apertures
         A_mass = np.empty((n_mass_rest, n_orbs), dtype=np.float64, order="C")
 
@@ -2450,16 +2483,50 @@ class NNLS(WeightSolver):
         orb_out = np.empty(orb.shape, dtype=orb.dtype)
         lin = np.zeros(n_orbs)
         cap = getattr(self, "_lap_capture", None)
+        kappa = _lap_rowspace_kappa(self)
+        reduce = kappa is not None and isinstance(kins, dyn_kin.ProperMotions)
+        chi2_w = getattr(acc, "chi2_w", None)
+        if reduce and chi2_w is None:  # Gram / capture reads: row-space rows
+            carry = np.zeros(n_orbs)
+            orb_out = orb_out.reshape(n_orbs, n_ap, -1)
+            orb_out[:] = 0.0
+            obs_out[:] = 0.0
+        if reduce and chi2_w is not None and ap0 == 0:
+            self.laplace_bound = getattr(self, "laplace_bound", None) or {}
+            self.laplace_bound[kins.name] = 0.0
         for a in range(n_ap):
             h0 = None if h0_set is None else h0_set[ap0 + a]
-            Lt, g, h0 = kins.laplace_terms(ap0 + a, float(prj_mass_i[a]), h0=h0)
+            mass = float(prj_mass_i[a])
             H = np.asarray(orb[:, a], dtype=np.float64).reshape(n_orbs, -1)
             if cap is not None:  # _solve_laplace: the model histogram at cap["w"]
                 cap["h"].setdefault(kins.name, np.zeros(
                     (kins.n_spatial_bins, H.shape[1])))[ap0 + a] = cap["w"] @ H
+            if reduce and chi2_w is None:
+                R, g, h0, Vd, mu_d, delta = kins.laplace_rowspace_terms(
+                    ap0 + a, mass, kappa, h0=h0)
+                HV = H @ kins.laplace_rowspace_basis(ap0 + a)
+                r = R.shape[0]
+                orb_out[:, a, :r] = H @ R.T
+                obs_out[a, :r] = R @ h0
+                # Gram diagonal of the left-out part: delta |H (I - V V')|^2 + dropped eigen-directions
+                c = delta * (np.einsum("ij,ij->i", H, H) - np.einsum("ij,ij->i", HV, HV))
+                if mu_d.size:
+                    c += (H @ Vd) ** 2 @ mu_d
+                carry += c
+                lin += H @ g
+                continue
+            Lt, g, h0 = kins.laplace_terms(ap0 + a, mass, h0=h0)
             orb_out[:, a] = (H @ Lt.T).reshape(orb.shape[0], *orb.shape[2:])
             obs_out[a] = Lt @ h0
             lin += H @ g
+            if reduce:  # chi2 read: full rows; E(w) = |Lt d|^2 - |R d|^2 >= 0
+                R = kins.laplace_rowspace_terms(ap0 + a, mass, kappa, h0=h0)[0]
+                d = chi2_w @ H - h0
+                self.laplace_bound[kins.name] += float(
+                    np.sum((Lt @ d) ** 2) - np.sum((R @ d) ** 2))
+        if reduce and chi2_w is None:
+            orb_out = orb_out.reshape(orb.shape)
+            acc.add_diag_carry(carry)
         acc.add_linear(lin)
         return (np.reshape(obs_out, np.shape(obs)), np.ones(np.size(obs)),
                 orb_out)
