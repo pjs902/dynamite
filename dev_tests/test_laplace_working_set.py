@@ -107,3 +107,31 @@ def test_too_small_working_set_finds_violators_and_converges(tmp_path):
     assert rounds[-1]["gap"] <= 0.01
     np.testing.assert_allclose(w, w_f, rtol=1e-5, atol=1e-6 * w_f.max())
     assert {c[0]: c[1] for c in chi2}["hst"] == pytest.approx(c_f["hst"], rel=1e-6, abs=1e-6)
+
+
+def test_kkt_gap_bounds_hold_on_a_small_qp():
+    """f(w) - f* for a restricted solution w is below both bounds: 2 M max(-gamma)_+ and, with a ridge,
+    sum gamma^2 / (col^2 shift) (strong convexity; support residuals and negative off-support gammas)."""
+    from scipy.optimize import minimize
+    from dynamite.weight_solvers import _kkt_gap_bounds
+    rng = np.random.default_rng(7)
+    n, M, shift = 7, 3.0, 0.05
+    A = rng.normal(size=(12, n))
+    col = np.sqrt((A * A).sum(0))
+    H = A.T @ A + shift * np.diag(col ** 2)
+    v = A.T @ rng.normal(size=12)
+    f = lambda w: w @ H @ w - 2 * v @ w
+
+    def solve(free):
+        cons = [{"type": "eq", "fun": lambda w: w.sum() - M}]
+        bnd = [(0, None) if j in free else (0, 0) for j in range(n)]
+        return minimize(f, np.full(n, M / n) * np.isin(np.arange(n), free) * n / len(free), jac=lambda w: 2 * (H @ w - v),
+                        bounds=bnd, constraints=cons, method="SLSQP", options=dict(ftol=1e-14, maxiter=500)).x
+    w_star = solve(list(range(n)))
+    for S in ([0, 1], [2, 3, 4], [int(np.argmax(w_star))]):
+        w = solve(S)
+        g = A.T @ (A @ w) - v  # half-gradient without the ridge
+        gap_sc, gap_lin = _kkt_gap_bounds(g, w, col, shift, M)
+        true = f(w) - f(w_star)
+        assert true >= -1e-9
+        assert true <= gap_lin * (1 + 1e-6) + 1e-9 and true <= gap_sc * (1 + 1e-6) + 1e-9

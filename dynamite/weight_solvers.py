@@ -532,6 +532,25 @@ class NormalEquationAccumulator:
         return P, q, col, b_max
 
 
+def _kkt_gap_bounds(g, w, col, shift, M):
+    """Bounds on f(w) - f* for ``min f = |A w - b|^2 + 2c'w + shift sum (col_j w_j)^2, w >= 0, sum w = M``.
+
+    ``g``: half-gradient without the ridge, ``g + shift w col^2`` with it; nu = its median over the support,
+    gamma = that minus nu. Returns ``(gap_sc, gap_lin)``:
+    - gap_sc (strong convexity, the ridge makes the Hessian >= 2 shift diag(col^2)): sum over orbits of
+      r_j^2 / (col_j^2 shift), r = gamma on the support, min(gamma, 0) off it (a subgradient of f + the
+      constraints; valid for any nu). inf without a ridge.
+    - gap_lin: 2 M max(-gamma)_+ over the zero orbits (first order; loose, the whole mass on one orbit).
+    """
+    gr = g + shift * w * col ** 2
+    act = w > 0
+    gam = gr - float(np.median(gr[act]))
+    gap_lin = 2.0 * M * max(0.0, -float(gam[~act].min(initial=0.0)))
+    r = np.where(act, gam, np.minimum(gam, 0.0))
+    gap_sc = float(np.sum(r ** 2 / col ** 2) / shift) if shift > 0 else np.inf
+    return gap_sc, gap_lin
+
+
 def _lap_rowspace_kappa(solver):
     """``pm_laplace_rowspace_kappa`` (None = off, the default): row-space Laplace
     rows for ProperMotions sets, eigen-directions of V'FV + delta I below
@@ -2669,7 +2688,8 @@ class NNLS(WeightSolver):
         and solved on S. The final chi2 read also returns the half-gradient ``g`` of THIS
         pass's objective for every orbit (``_lap_grad``, cell space). KKT for
         ``min f(w), w >= 0, sum w = M``: ``gamma = g + ridge - nu >= 0`` off the support,
-        nu from the support, so ``f(w) - f(w*) <= 2 M max(-gamma)_+`` (``gap``, chi2 units).
+        nu from the support; ``gap`` (chi2 units) is the smaller of the strong-convexity bound from the
+        ridge and ``2 M max(-gamma)_+`` (:func:`_kkt_gap_bounds`).
         Above ``pm_laplace_working_set_gap`` (default 0.01) the violators outside S are
         added and the pass repeated (at most 4 rounds). The caller has set
         ``_lap_reexpand``. Returns ``(w, chi2, h0, rounds)``.
@@ -2710,12 +2730,14 @@ class NNLS(WeightSolver):
             act = w > 0
             nu = float(np.median(gr[act]))
             gam = gr - nu
-            gap = 2.0 * self.total_mass * max(0.0, -float(gam[~act].min(initial=0.0)))
+            gap_sc, gap_lin = _kkt_gap_bounds(g, w, col, self._ridge_shift, self.total_mass)
+            gap = min(gap_sc, gap_lin)
             out = np.ones(n, bool)
             out[S] = False
             viol = np.flatnonzero(out & (gam < 0))
             p10, p90 = np.percentile(gr[act], [10, 90])
-            rounds.append(dict(m=int(S.size), gap=gap, n_viol=int(viol.size), nu=nu,
+            rounds.append(dict(m=int(S.size), gap=gap, gap_sc=gap_sc, gap_lin=gap_lin,
+                               n_viol=int(viol.size), nu=nu,
                                nu_spread=float(p90 - p10)))
             self.logger.info(f"working set: {rounds[-1]}")
             if gap <= tol or not viol.size:
