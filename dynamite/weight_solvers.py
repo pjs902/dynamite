@@ -2105,6 +2105,9 @@ class NNLS(WeightSolver):
         # in construct_adelie_matrix_and_rhs)
         idx_ap_start = 0
         idx_row = self.n_mass_constraints
+        # fit_exclude_sets: kinematic sets left out of the fit (e.g. LOS only, predict the PMs)
+        excluded = set((getattr(self, "settings", None) or {}).get("fit_exclude_sets") or ())
+        excl_rows = []
         for si, kins in enumerate(stars.kinematic_data):
             acc.tag = f"set{si}/"
             n_ap = kins.n_spatial_bins
@@ -2123,6 +2126,12 @@ class NNLS(WeightSolver):
             b_prj_i = np.zeros(n_ap, dtype=np.float64)
             np.divide(con_prj_i, econ_prj_i, out=b_prj_i, where=econ_prj_i != 0)
             n_cons_ap = obs_values[si][0].shape[1]
+            if excluded and kins.name in excluded:  # not read: no kinematic and no projected-mass rows
+                A_mass[mass_lo : mass_lo + n_ap, :] = 0.0
+                excl_rows.append(slice(mass_lo, mass_lo + n_ap))
+                idx_row = idx_row + n_ap * n_cons_ap
+                idx_ap_start += n_ap
+                continue
 
             # S1 READ-SIDE: read + process one aperture group at a time, so the
             # 124.8 GiB full set never materializes. Only for streamed 2D sets
@@ -2407,6 +2416,8 @@ class NNLS(WeightSolver):
             out=b_mass[self.n_intrinsic :],
             where=econ[idx_prj] != 0,
         )
+        for sl in excl_rows:  # excluded sets' projected-mass rows carry no data either
+            b_mass[sl] = 0.0
 
         acc.tag = ""
         self._lap_acc = None
