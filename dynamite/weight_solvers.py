@@ -2492,6 +2492,7 @@ class NNLS(WeightSolver):
         orb_out = np.empty(orb.shape, dtype=orb.dtype)
         lin = np.zeros(n_orbs)
         cap = getattr(self, "_lap_capture", None)
+        rx = getattr(self, "_lap_reexpand", None)  # _solve_laplace: fused re-expansion
         kappa = _lap_rowspace_kappa(self)
         reduce = kappa is not None and isinstance(kins, dyn_kin.ProperMotions)
         chi2_w = getattr(acc, "chi2_w", None)
@@ -2500,6 +2501,8 @@ class NNLS(WeightSolver):
             orb_out = orb_out.reshape(n_orbs, n_ap, -1)
             orb_out[:] = 0.0
             obs_out[:] = 0.0
+        if chi2_w is not None:  # cell-space chi2 read: zero rows, residual in b
+            orb_out[:] = 0.0
         if reduce and chi2_w is not None and ap0 == 0:
             self.laplace_bound = getattr(self, "laplace_bound", None) or {}
             self.laplace_bound[kins.name] = 0.0
@@ -2510,6 +2513,10 @@ class NNLS(WeightSolver):
             if cap is not None:  # _solve_laplace: the model histogram at cap["w"]
                 cap["h"].setdefault(kins.name, np.zeros(
                     (kins.n_spatial_bins, H.shape[1])))[ap0 + a] = cap["w"] @ H
+            if rx is not None and h0_set is None:  # expand about mix(w_prev @ H_a) M_a
+                h0 = laplace_reexpand_mix((rx["w"] @ H)[None], rx["floor"])[0] * mass
+                rx["h0"].setdefault(kins.name, np.zeros(
+                    (kins.n_spatial_bins, H.shape[1])))[ap0 + a] = h0
             if reduce and chi2_w is None:
                 R, g, h0, Vd, mu_d, delta = kins.laplace_rowspace_terms(
                     ap0 + a, mass, kappa, h0=h0)
@@ -2525,14 +2532,18 @@ class NNLS(WeightSolver):
                 lin += H @ g
                 continue
             Lt, g, h0 = kins.laplace_terms(ap0 + a, mass, h0=h0)
+            lin += H @ g
+            if chi2_w is not None:
+                # A w - b = 0 - (-Lt d) = Lt d: the full statistic without forming H Lt'
+                d = chi2_w @ H - h0
+                r = Lt @ d
+                obs_out[a] = -r
+                if reduce:  # E(w) = |Lt d|^2 - |R d|^2 >= 0
+                    R = kins.laplace_rowspace_terms(ap0 + a, mass, kappa, h0=h0)[0]
+                    self.laplace_bound[kins.name] += float(r @ r - np.sum((R @ d) ** 2))
+                continue
             orb_out[:, a] = (H @ Lt.T).reshape(orb.shape[0], *orb.shape[2:])
             obs_out[a] = Lt @ h0
-            lin += H @ g
-            if reduce:  # chi2 read: full rows; E(w) = |Lt d|^2 - |R d|^2 >= 0
-                R = kins.laplace_rowspace_terms(ap0 + a, mass, kappa, h0=h0)[0]
-                d = chi2_w @ H - h0
-                self.laplace_bound[kins.name] += float(
-                    np.sum((Lt @ d) ** 2) - np.sum((R @ d) ** 2))
         if reduce and chi2_w is None:
             orb_out = orb_out.reshape(orb.shape)
             acc.add_diag_carry(carry)
@@ -2545,51 +2556,46 @@ class NNLS(WeightSolver):
 
         Pass 1 expands each set's per-star likelihood about the veldist
         ``PM_lap_h0``. Each of ``pm_laplace_reexpand`` (setting, default 1)
-        further passes re-expands about the previous pass's model: one
-        rhs-only read captures ``h_a = w @ H_a``, the new expansion point is
+        further passes re-expands about the previous pass's model: the
+        pass's build forms ``h_a = w @ H_a`` from the H_a it reads (no separate
+        capture read), the new expansion point is
         ``((1 - f) h_a / sum(h_a) + f / K2) * M_a`` with ``f`` the setting ``pm_laplace_reexpand_floor``
         (default ``LAPLACE_REEXPAND_FLOOR`` = 1e-3; the uniform part keeps
         every star's probability positive), then a full rebuild and solve.
         veldist C1c: one re-expansion lands within ~0.03 km/s of the exact
         (sharpened) likelihood's fit and is calibrated.
 
+        The final chi2 read works in cell space (no ``H Lt'`` rows).
         The chi2 reported for a Laplace set is always the offset-free
         Laplace statistic about the DATA h0 at the final weights, so it is
         comparable across models. Returns ``(w, chi2_tot, chi2_kin, chi2)``
         as ``_solve_relative``; ``self.laplace_info`` holds ``reexpand`` and
-        the weights of every pass, ``w_pass``.
+        the weights of every pass, ``w_pass``, and each re-expansion's
+        points per set, ``h0_pass``.
         """
-        kin = self.system.get_unique_triaxial_visible_component().kinematic_data
         n_re = int(self.settings.get("pm_laplace_reexpand", 1))
         floor = float(self.settings.get("pm_laplace_reexpand_floor", LAPLACE_REEXPAND_FLOOR))
         consume = self.nnls_solver == "admm" and getattr(
             self, "admm_precision", "float64") == "float64"
-        self._lap_h0 = self._lap_capture = None
-        w_pass = []
+        self._lap_h0 = self._lap_capture = self._lap_reexpand = None
+        w_pass, h0_pass = [], []
         try:
             prob = self._relative_build(orblib, True)
             w, solver = self._relative_qp(prob, consume_p=consume)
             w_pass.append(w)
             for _ in range(n_re):
-                self._lap_capture = dict(w=w, h={})
-                self.construct_gram_and_rhs_blockwise(orblib, rhs_only=True)
-                h_model, self._lap_capture = self._lap_capture["h"], None
-                h0, ap = {}, 0  # projected_masses: all sets' apertures in order
-                for k in kin:
-                    if k.name in h_model:
-                        h = h_model[k.name]
-                        mix = laplace_reexpand_mix(h, floor)
-                        h0[k.name] = mix * self.projected_masses[ap:ap + k.n_spatial_bins, None]
-                    ap += k.n_spatial_bins
-                self._lap_h0 = h0
+                # the build computes each aperture's expansion point from the H_a it
+                # holds (_laplace_pm_block), so no separate capture read
+                self._lap_reexpand = dict(w=w, floor=floor, h0={})
                 prob = self._relative_build(orblib, True)
+                h0_pass.append(self._lap_reexpand["h0"])
+                self._lap_reexpand = None
                 w, solver = self._relative_qp(prob, warm=solver, consume_p=consume)
                 w_pass.append(w)
-            self._lap_h0 = None  # report about the data h0
-            chi2 = self._relative_chi2(orblib, prob, True, w)
+            chi2 = self._relative_chi2(orblib, prob, True, w)  # about the data h0
         finally:
-            self._lap_h0 = self._lap_capture = None
-        self.laplace_info = dict(reexpand=n_re, w_pass=w_pass)
+            self._lap_h0 = self._lap_capture = self._lap_reexpand = None
+        self.laplace_info = dict(reexpand=n_re, w_pass=w_pass, h0_pass=h0_pass)
         chi2_tot = sum(c[1] for c in chi2)
         return w, chi2_tot, chi2_tot - chi2[0][1], chi2
 

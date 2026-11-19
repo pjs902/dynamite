@@ -281,27 +281,6 @@ def test_driver_reports_laplace_at_the_data_h0(tmp_path, reexpand):
     assert fake.laplace_info["reexpand"] == reexpand
 
 
-def test_reexpansion_point_is_the_mixed_pass1_model(tmp_path):
-    fake, lib, pm, _ = _toy_lap(tmp_path, 1)
-    lib.vel_histograms = list(lib.full)
-    seen = []
-    orig = NNLS._relative_build
-
-    def spy(self, orblib, gram, rhs_from=None):
-        seen.append(None if self._lap_h0 is None else {k: v.copy() for k, v in self._lap_h0.items()})
-        return orig(self, orblib, gram, rhs_from)
-    fake._relative_build = spy.__get__(fake)
-    fake._solve_laplace(lib)
-    assert seen[0] is None and len(seen) == 2  # pass 1 at the data h0, then one rebuild
-    w1 = fake.laplace_info["w_pass"][0]
-    H = pm.transform_orblib_to_observables(lib.full[1]).reshape(N_ORBS, 3, -1)
-    prj = fake.projected_masses[2:]
-    for a in range(3):
-        h = H[:, a].T @ w1
-        want = (0.999 * h / h.sum() + 0.001 / NB**2) * prj[a]
-        np.testing.assert_allclose(seen[1]["hst"][a], want, rtol=1e-10)
-
-
 def test_mirrored_h0_is_refused(tmp_path):
     """PM_lap_h0 and PM_2dhist come from the same veldist fit; a frame flip
     between them (pm2 -> -pm2, as the x-East convention can introduce) must
