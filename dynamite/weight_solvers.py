@@ -98,6 +98,8 @@ class GramProblem(NamedTuple):
     b0: float  # rhs[0] = total_mass/total_mass_error
     # {accumulator tag: sum of squared residuals}, only from a chi2_w build
     chi2_by_tag: dict = None
+    # working-set build: P is over those orbits only; the full P's mean diagonal (ridge scale)
+    p_diag_mean: float = None
 
 
 #: Uniform floor mixed into the re-expansion reference of the PM Laplace statistic: h0 =
@@ -194,7 +196,7 @@ def _nan_weights_after_solver_error(exc, orblib, solver_name, logger):
     return np.full(n_orbs, np.nan)
 
 
-def _apply_diagonal_ridge(P, lam):
+def _apply_diagonal_ridge(P, lam, scale=None):
     """``P += lam * mean(diag(P))`` IN PLACE - Vasiliev Eq. 7's diagonal
     regularisation, dimensionless in lam so one value transfers across p.
 
@@ -206,7 +208,8 @@ def _apply_diagonal_ridge(P, lam):
     if lam <= 0.0:
         return 0.0
     p = P.shape[0]
-    scale = float(np.trace(P)) / p
+    if scale is None:  # a working-set P passes the full P's mean diagonal
+        scale = float(np.trace(P)) / p
     P.flat[:: p + 1] += lam * scale
     return lam * scale
 
@@ -355,7 +358,7 @@ class NormalEquationAccumulator:
     _MIRROR_BLOCK = 4096
 
     def __init__(self, n_orbs, dtype=np.float64, profiler=None,
-                 rhs_only=False, chi2_w=None):
+                 rhs_only=False, chi2_w=None, cols=None):
         self.n_orbs = n_orbs
         self.dtype = dtype
         # set by construct_gram_and_rhs_blockwise so the dsyrk and the
@@ -379,14 +382,20 @@ class NormalEquationAccumulator:
         # diag_carry: per-orbit Gram diagonal of rows deliberately left out
         # (row-space Laplace rows); added to diag(G) for the column scaling only.
         self.diag_carry = None
+        # cols (working set, NNLS._lap_working_set): G only over these orbits; the
+        # column scaling still comes from every orbit's diagonal (diag_full), and
+        # p_diag_mean (set by finalize) is the full P's mean diagonal for the ridge
+        self.cols = None if cols is None else np.asarray(cols)
+        self.diag_full = None if cols is None else np.zeros(n_orbs)
+        self.p_diag_mean = None
         # relative PM vp mode (NNLS._solve_relative): grad_w -> g = A'(A w - b)
         # over all rows; line = (w0, dw) -> line_q = (r'r, r'A dw, |A dw|^2)
         # with r = A w0 - b, the exact chi2 along w0 + t dw at fixed rows
         self.grad_w, self.g = None, None
         self.line, self.line_q = None, np.zeros(3)
         # symmetric: only the upper triangle is filled until finalize()
-        self.G = None if rhs_only else np.zeros((n_orbs, n_orbs), dtype=dtype,
-                                                order="F")
+        n_g = n_orbs if cols is None else self.cols.size
+        self.G = None if rhs_only else np.zeros((n_g, n_g), dtype=dtype, order="F")
         self.v = np.zeros(n_orbs, dtype=np.float64)
         self.b_sq_sum = 0.0
         self.b_max = 0.0
@@ -434,9 +443,13 @@ class NormalEquationAccumulator:
             return
         # dsyrk does the rank-k update in place: no (n_orbs, n_orbs) temporary
         if not self.rhs_only:
+            A_g = A_block
+            if self.cols is not None:
+                self.diag_full += np.einsum("ij,ij->j", A_block, A_block)
+                A_g = np.asfortranarray(A_block[:, self.cols])
             with _maybe_phase(prof, f"{self.tag}dsyrk"):
                 self.G = dsyrk(
-                    1.0, A_block, beta=1.0, c=self.G, trans=1, lower=0,
+                    1.0, A_g, beta=1.0, c=self.G, trans=1, lower=0,
                     overwrite_c=1
                 )
         b_block = np.asarray(b_block, dtype=np.float64)
@@ -487,13 +500,15 @@ class NormalEquationAccumulator:
         # pairs (16 GB at n_orbs=45000, on top of the 16 GB G) just to name
         # the entries. The block transpose copies the same values with a
         # bounded temporary.
-        for i0 in range(0, self.n_orbs, self._MIRROR_BLOCK):
-            i1 = min(i0 + self._MIRROR_BLOCK, self.n_orbs)
+        n_g = self.G.shape[0]
+        for i0 in range(0, n_g, self._MIRROR_BLOCK):
+            i1 = min(i0 + self._MIRROR_BLOCK, n_g)
             self.G[i0:i1, :i0] = self.G[:i0, i0:i1].T
             blk = self.G[i0:i1, i0:i1]
             iu = np.triu_indices(i1 - i0)
             blk[(iu[1], iu[0])] = blk[iu]
-        col = np.abs(np.diag(self.G))
+        dg = np.abs(np.diag(self.G)) if self.cols is None else self.diag_full.copy()
+        col = dg.copy() if self.cols is not None else dg
         if self.diag_carry is not None:
             col += self.diag_carry
         col = np.sqrt(col, out=col)
@@ -502,14 +517,18 @@ class NormalEquationAccumulator:
         # Two broadcast divides, not G / np.outer(col, col): the outer
         # product would be a second full (n_orbs, n_orbs) temporary.
         q = -self.v / (col * b_max)
+        cs = col
+        if self.cols is not None:
+            cs = col[self.cols]
+            self.p_diag_mean = float(np.mean(dg / col ** 2))
         if in_place:
-            self.G /= col[:, None]
-            self.G /= col[None, :]
+            self.G /= cs[:, None]
+            self.G /= cs[None, :]
             P = self.G
             self.G = None  # buffer now IS P; raw G is gone
         else:
-            P = self.G / col[:, None]
-            P /= col[None, :]
+            P = self.G / cs[:, None]
+            P /= cs[None, :]
         return P, q, col, b_max
 
 
@@ -2050,8 +2069,9 @@ class NNLS(WeightSolver):
         # rows too, so it must run after the loop fills them in - moved to
         # just before the accumulator is finalized, below.
 
-        acc = NormalEquationAccumulator(n_orbs, dtype=np.float64, profiler=prof,
-                                        rhs_only=rhs_only, chi2_w=chi2_w)
+        acc = NormalEquationAccumulator(
+            n_orbs, dtype=np.float64, profiler=prof, rhs_only=rhs_only, chi2_w=chi2_w,
+            cols=None if rhs_only else getattr(self, "_gram_cols", None))
         acc.skip_zero_blocks = getattr(self, "_pm_moments_only", False)
         acc.grad_w = getattr(self, "_vp_grad_w", None)
         acc.line = getattr(self, "_vp_line", None)
@@ -2413,6 +2433,7 @@ class NNLS(WeightSolver):
             row0_vec=row0_vec,
             b0=float(b0),
             chi2_by_tag=acc.chi2 if chi2_w is not None else None,
+            p_diag_mean=acc.p_diag_mean,
         )
 
     def _prepare_kinematic_block(self, kins, orb_veldist, tmp, prj_mass_i,
@@ -2496,9 +2517,12 @@ class NNLS(WeightSolver):
         kappa = _lap_rowspace_kappa(self)
         reduce = kappa is not None and isinstance(kins, dyn_kin.ProperMotions)
         chi2_w = getattr(acc, "chi2_w", None)
-        # cell-space chi2 read only when no gradient / line term needs the rows
-        cell = (chi2_w is not None and getattr(acc, "grad_w", None) is None
-                and getattr(acc, "line", None) is None)
+        # cell-space chi2 read only when no gradient / line term needs the rows;
+        # _lap_grad (NNLS._lap_working_set): the gradient of the pass about its own h0
+        lg = getattr(self, "_lap_grad", None)
+        cell = (chi2_w is not None and getattr(acc, "line", None) is None
+                and (getattr(acc, "grad_w", None) is None or lg is not None))
+        gvec = np.zeros(n_orbs) if cell and lg is not None else None
         if reduce and chi2_w is None:  # Gram / capture reads: row-space rows
             carry = np.zeros(n_orbs)
             orb_out = orb_out.reshape(n_orbs, n_ap, -1)
@@ -2544,6 +2568,14 @@ class NNLS(WeightSolver):
                     self.laplace_bound[kins.name] += float(r @ r - np.sum((R @ d) ** 2))
             if cell:  # A w - b = 0 - (-Lt d) = Lt d: the full statistic without forming H Lt'
                 obs_out[a] = -r
+                if gvec is not None:  # H (C'C d2 + g2) about the pass's h0, C = R or Lt
+                    h02 = lg["h0"].get(kins.name)
+                    h02 = None if h02 is None else h02[ap0 + a]
+                    if reduce:
+                        C2, g2, h02 = kins.laplace_rowspace_terms(ap0 + a, mass, kappa, h0=h02)[:3]
+                    else:
+                        C2, g2, h02 = kins.laplace_terms(ap0 + a, mass, h0=h02)
+                    gvec += H @ (C2.T @ (C2 @ (chi2_w @ H - h02)) + g2)
                 continue
             orb_out[:, a] = (H @ Lt.T).reshape(orb.shape[0], *orb.shape[2:])
             obs_out[a] = Lt @ h0
@@ -2551,6 +2583,8 @@ class NNLS(WeightSolver):
             orb_out = orb_out.reshape(orb.shape)
             acc.add_diag_carry(carry)
         acc.add_linear(lin)
+        if gvec is not None:  # the gradient takes the pass's linear term, not the data h0's
+            acc.g += gvec - lin
         return (np.reshape(obs_out, np.shape(obs)), np.ones(np.size(obs)),
                 orb_out)
 
@@ -2580,27 +2614,106 @@ class NNLS(WeightSolver):
         floor = float(self.settings.get("pm_laplace_reexpand_floor", LAPLACE_REEXPAND_FLOOR))
         consume = self.nnls_solver == "admm" and getattr(
             self, "admm_precision", "float64") == "float64"
+        frac = self.settings.get("pm_laplace_working_set")  # None: off
         self._lap_h0 = self._lap_capture = self._lap_reexpand = None
-        w_pass, h0_pass = [], []
+        w_pass, h0_pass, chi2, ws_rounds = [], [], None, None
         try:
             prob = self._relative_build(orblib, True)
             w, solver = self._relative_qp(prob, consume_p=consume)
             w_pass.append(w)
-            for _ in range(n_re):
+            for k in range(n_re):
+                # keep only the warm start: the solver's factor is p x p
+                warm = (SimpleNamespace(z_exit=solver.z_exit, u_exit=solver.u_exit)
+                        if hasattr(solver, "z_exit") else None)
+                solver = None
                 # the build computes each aperture's expansion point from the H_a it
                 # holds (_laplace_pm_block), so no separate capture read
                 self._lap_reexpand = dict(w=w, floor=floor, h0={})
+                if frac is not None and k == n_re - 1:
+                    w, chi2, h0, ws_rounds = self._lap_working_set(
+                        orblib, w, warm, float(frac), consume)
+                    h0_pass.append(h0)
+                    w_pass.append(w)
+                    break
                 prob = self._relative_build(orblib, True)
                 h0_pass.append(self._lap_reexpand["h0"])
                 self._lap_reexpand = None
-                w, solver = self._relative_qp(prob, warm=solver, consume_p=consume)
+                w, solver = self._relative_qp(prob, warm=warm, consume_p=consume)
                 w_pass.append(w)
-            chi2 = self._relative_chi2(orblib, prob, True, w)  # about the data h0
+            if chi2 is None:
+                chi2 = self._relative_chi2(orblib, prob, True, w)  # about the data h0
         finally:
             self._lap_h0 = self._lap_capture = self._lap_reexpand = None
-        self.laplace_info = dict(reexpand=n_re, w_pass=w_pass, h0_pass=h0_pass)
+        self.laplace_info = dict(reexpand=n_re, w_pass=w_pass, h0_pass=h0_pass,
+                                 working_set=ws_rounds)
         chi2_tot = sum(c[1] for c in chi2)
         return w, chi2_tot, chi2_tot - chi2[0][1], chi2
+
+    def _lap_working_set(self, orblib, w_prev, warm, frac, consume):
+        """The last re-expansion pass on a working set of orbits (``pm_laplace_working_set``).
+
+        S = the previous pass's support plus the zero orbits nearest activation (largest
+        ADMM dual ``u``), ``ceil(frac * n)`` orbits in all (never fewer than the support).
+        The pass is built (G over S only; column scaling and ridge scale from all orbits)
+        and solved on S. The final chi2 read also returns the half-gradient ``g`` of THIS
+        pass's objective for every orbit (``_lap_grad``, cell space). KKT for
+        ``min f(w), w >= 0, sum w = M``: ``gamma = g + ridge - nu >= 0`` off the support,
+        nu from the support, so ``f(w) - f(w*) <= 2 M max(-gamma)_+`` (``gap``, chi2 units).
+        Above ``pm_laplace_working_set_gap`` (default 0.01) the violators outside S are
+        added and the pass repeated (at most 4 rounds). The caller has set
+        ``_lap_reexpand``. Returns ``(w, chi2, h0, rounds)``.
+        """
+        n = w_prev.size
+        on = w_prev > 0
+        u = np.zeros(n) if warm is None else warm.u_exit
+        m = max(int(np.ceil(frac * n)), int(on.sum()))
+        S = np.sort(np.argsort(-np.where(on, np.inf, u), kind="stable")[:m])
+        tol = float(self.settings.get("pm_laplace_working_set_gap", 0.01))
+        z = None if warm is None else warm.z_exit
+        h0, rounds = None, []
+        for _ in range(4):
+            self._gram_cols, self._lap_h0 = S, h0
+            try:
+                prob = self._relative_build(orblib, True)
+            finally:
+                self._gram_cols = self._lap_h0 = None
+            if h0 is None:
+                h0, self._lap_reexpand = self._lap_reexpand["h0"], None
+            col = prob["col"]
+            ws_warm = None if z is None else SimpleNamespace(z_exit=z[S], u_exit=u[S])
+            wS, solver = self._relative_qp(dict(prob, q=prob["q"][S], col=col[S]),
+                                           warm=ws_warm, consume_p=consume)
+            w = np.zeros(n)
+            w[S] = wS
+            if hasattr(solver, "z_exit"):
+                z, u = np.zeros(n), np.zeros(n)
+                z[S], u[S] = solver.z_exit, solver.u_exit
+            solver = prob = None
+            self._lap_grad, self._vp_grad_w = dict(h0=h0), w
+            try:
+                chi2 = self._relative_chi2(orblib, None, True, w)
+                g = self._vp_acc.g
+            finally:
+                self._lap_grad = self._vp_grad_w = self._vp_acc = None
+            gr = g + self._ridge_shift * w * col ** 2  # half-gradient incl. the ridge
+            act = w > 0
+            nu = float(np.median(gr[act]))
+            gam = gr - nu
+            gap = 2.0 * self.total_mass * max(0.0, -float(gam[~act].min(initial=0.0)))
+            out = np.ones(n, bool)
+            out[S] = False
+            viol = np.flatnonzero(out & (gam < 0))
+            p10, p90 = np.percentile(gr[act], [10, 90])
+            rounds.append(dict(m=int(S.size), gap=gap, n_viol=int(viol.size), nu=nu,
+                               nu_spread=float(p90 - p10)))
+            self.logger.info(f"working set: {rounds[-1]}")
+            if gap <= tol or not viol.size:
+                break
+            S = np.union1d(S, viol)
+        if gap > tol:
+            self.logger.warning(f"working set: KKT gap {gap:.3g} > {tol:.3g} after "
+                                f"{len(rounds)} rounds")
+        return w, chi2, h0, rounds
 
     def _relative_pm_block(self, kins, obs, err, orb, ap0, prj_mass=None):
         """Project a free per-aperture mean shift out of a relative PM set.
@@ -3244,8 +3357,8 @@ class NNLS(WeightSolver):
             gp = self.construct_gram_and_rhs_blockwise(
                 orblib, rhs_only=rhs_from is not None)
             if rhs_from is None:
-                self._ridge_shift = _apply_diagonal_ridge(gp.P,
-                                                          self.ridge_lambda)
+                self._ridge_shift = _apply_diagonal_ridge(
+                    gp.P, self.ridge_lambda, gp.p_diag_mean)
                 return dict(gp=gp, P=gp.P, q=gp.q, col=gp.col_norm,
                             b_max=gp.b_max)
             col, b_max = rhs_from["col"], rhs_from["b_max"]

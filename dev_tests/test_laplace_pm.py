@@ -256,7 +256,8 @@ def _toy_lap(tmp_path, reexpand=1, relative=False):
         fake._pm_dsq_over_sigsq = NNLS._pm_dsq_over_sigsq
         fake._vp_fit_centres = NNLS._vp_fit_centres
     fake._relative_chi2_total = NNLS._relative_chi2_total
-    for name in DRIVER + ("_solve_laplace", "_laplace_pm_block", "_solve_relative_vp_laplace"):
+    for name in DRIVER + ("_solve_laplace", "_laplace_pm_block", "_solve_relative_vp_laplace",
+                         "_lap_working_set"):
         setattr(fake, name, types.MethodType(getattr(NNLS, name), fake))
     return fake, lib, pm, w_true
 
