@@ -2496,12 +2496,15 @@ class NNLS(WeightSolver):
         kappa = _lap_rowspace_kappa(self)
         reduce = kappa is not None and isinstance(kins, dyn_kin.ProperMotions)
         chi2_w = getattr(acc, "chi2_w", None)
+        # cell-space chi2 read only when no gradient / line term needs the rows
+        cell = (chi2_w is not None and getattr(acc, "grad_w", None) is None
+                and getattr(acc, "line", None) is None)
         if reduce and chi2_w is None:  # Gram / capture reads: row-space rows
             carry = np.zeros(n_orbs)
             orb_out = orb_out.reshape(n_orbs, n_ap, -1)
             orb_out[:] = 0.0
             obs_out[:] = 0.0
-        if chi2_w is not None:  # cell-space chi2 read: zero rows, residual in b
+        if cell:  # zero rows, residual in b
             orb_out[:] = 0.0
         if reduce and chi2_w is not None and ap0 == 0:
             self.laplace_bound = getattr(self, "laplace_bound", None) or {}
@@ -2534,13 +2537,13 @@ class NNLS(WeightSolver):
             Lt, g, h0 = kins.laplace_terms(ap0 + a, mass, h0=h0)
             lin += H @ g
             if chi2_w is not None:
-                # A w - b = 0 - (-Lt d) = Lt d: the full statistic without forming H Lt'
                 d = chi2_w @ H - h0
                 r = Lt @ d
-                obs_out[a] = -r
                 if reduce:  # E(w) = |Lt d|^2 - |R d|^2 >= 0
                     R = kins.laplace_rowspace_terms(ap0 + a, mass, kappa, h0=h0)[0]
                     self.laplace_bound[kins.name] += float(r @ r - np.sum((R @ d) ** 2))
+            if cell:  # A w - b = 0 - (-Lt d) = Lt d: the full statistic without forming H Lt'
+                obs_out[a] = -r
                 continue
             orb_out[:, a] = (H @ Lt.T).reshape(orb.shape[0], *orb.shape[2:])
             obs_out[a] = Lt @ h0

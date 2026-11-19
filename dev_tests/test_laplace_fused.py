@@ -30,8 +30,10 @@ def _two_read_reference(fake, lib, w1, floor):
     return gp, h0
 
 
-def test_fused_build_equals_capture_read_then_build(tmp_path):
+@pytest.mark.parametrize("stream,gap", [(False, 0), (True, 2)])
+def test_fused_build_equals_capture_read_then_build(tmp_path, stream, gap):
     fake, lib, pm, w_true = _toy_lap(tmp_path, 1)
+    fake.stream_reads, fake.gram_aperture_group = stream, gap  # 3 apertures in groups of 2
     lib.vel_histograms = list(lib.full)
     w1 = w_true * np.random.default_rng(3).uniform(0.5, 1.5, w_true.size)
     ref, h0_ref = _two_read_reference(fake, lib, w1, 1e-3)
@@ -85,3 +87,16 @@ def test_chi2_read_forms_no_laplace_rows(tmp_path, monkeypatch):
     assert seen[0] == (n_ap, True) and len(seen) > 1 and not any(z for _, z in seen[1:])
     ref = _lap_at_data_h0(pm, lib, fake.projected_masses[2:], w)
     assert {c[0]: c[1] for c in chi2}["hst"] == pytest.approx(ref, rel=1e-10, abs=1e-8)
+
+
+def test_chi2_read_with_a_gradient_keeps_the_laplace_gradient(tmp_path):
+    """A chi2 read that also asks for g = A'(A w - b) + c (vp reads) must not lose the Laplace rows' part."""
+    fake, lib, pm, w_true = _toy_lap(tmp_path, 0)
+    lib.vel_histograms = list(lib.full)
+    gp = fake.construct_gram_and_rhs_blockwise(lib)
+    w = w_true * 1.1
+    fake._vp_grad_w = w
+    fake.construct_gram_and_rhs_blockwise(lib, rhs_only=True, chi2_w=w)
+    g, fake._vp_grad_w, fake._vp_acc = fake._vp_acc.g, None, None
+    want = gp.G @ w - gp.v
+    np.testing.assert_allclose(g, want, rtol=1e-10, atol=1e-10 * np.abs(want).max())
