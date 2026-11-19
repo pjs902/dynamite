@@ -104,6 +104,10 @@ def test_too_small_working_set_finds_violators_and_converges(tmp_path):
     w_prev = np.where(w1 >= np.sort(w1)[-2], w1, 0.0)
     w, chi2, h0, rounds = fake._lap_working_set(lib, w_prev, None, 0.01, True)
     assert rounds[0]["m"] == 2 and rounds[0]["n_viol"] > 0 and len(rounds) > 1
+    # where the violators sat in the selection order (rank >= m: they were left out) and how negative
+    r0 = rounds[0]
+    assert len(r0["viol_rank"]) == min(r0["n_viol"], 100) and min(r0["viol_rank"]) >= r0["m"]
+    assert r0["viol_gam_min"] < 0
     assert rounds[-1]["gap"] <= 0.01
     np.testing.assert_allclose(w, w_f, rtol=1e-5, atol=1e-6 * w_f.max())
     assert {c[0]: c[1] for c in chi2}["hst"] == pytest.approx(c_f["hst"], rel=1e-6, abs=1e-6)

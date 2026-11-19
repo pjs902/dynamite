@@ -2698,7 +2698,10 @@ class NNLS(WeightSolver):
         on = w_prev > 0
         u = np.zeros(n) if warm is None else warm.u_exit
         m = max(int(np.ceil(frac * n)), int(on.sum()))
-        S = np.sort(np.argsort(-np.where(on, np.inf, u), kind="stable")[:m])
+        order = np.argsort(-np.where(on, np.inf, u), kind="stable")
+        rank = np.empty(n, int)
+        rank[order] = np.arange(n)  # selection rank: how far a violator sat from the cut m
+        S = np.sort(order[:m])
         tol = float(self.settings.get("pm_laplace_working_set_gap", 0.01))
         z = None if warm is None else warm.z_exit
         h0, rounds = None, []
@@ -2738,6 +2741,8 @@ class NNLS(WeightSolver):
             p10, p90 = np.percentile(gr[act], [10, 90])
             rounds.append(dict(m=int(S.size), gap=gap, gap_sc=gap_sc, gap_lin=gap_lin,
                                n_viol=int(viol.size), nu=nu,
+                               viol_rank=np.sort(rank[viol])[:100].tolist(),  # capped for the log
+                               viol_gam_min=float(gam[viol].min()) if viol.size else 0.0,
                                nu_spread=float(p90 - p10)))
             self.logger.info(f"working set: {rounds[-1]}")
             if gap <= tol or not viol.size:
