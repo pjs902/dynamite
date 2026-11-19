@@ -71,7 +71,8 @@ def test_driver_reads_the_library_once_per_pass_plus_the_chi2_read(tmp_path, mon
 
 
 def test_chi2_read_forms_no_laplace_rows(tmp_path, monkeypatch):
-    """The final read's Laplace-set blocks reach the accumulator as zero rows (residual in b)."""
+    """The final read hands the accumulator no Laplace rows at all (only the residual, via
+    add_b_only); the set's only block is its projected-mass rows."""
     fake, lib, pm, _ = _toy_lap(tmp_path, 0)
     lib.vel_histograms = list(lib.full)
     seen = []
@@ -84,7 +85,7 @@ def test_chi2_read_forms_no_laplace_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(ws.NormalEquationAccumulator, "add", spy)
     w, _, _, chi2 = fake._solve_laplace(lib)
     n_ap = pm.n_spatial_bins  # the set's first block is its projected-mass rows
-    assert seen[0] == (n_ap, True) and len(seen) > 1 and not any(z for _, z in seen[1:])
+    assert seen == [(n_ap, True)]
     ref = _lap_at_data_h0(pm, lib, fake.projected_masses[2:], w)
     assert {c[0]: c[1] for c in chi2}["hst"] == pytest.approx(ref, rel=1e-10, abs=1e-8)
 
@@ -100,3 +101,25 @@ def test_chi2_read_with_a_gradient_keeps_the_laplace_gradient(tmp_path):
     g, fake._vp_grad_w, fake._vp_acc = fake._vp_acc.g, None, None
     want = gp.G @ w - gp.v
     np.testing.assert_allclose(g, want, rtol=1e-10, atol=1e-10 * np.abs(want).max())
+
+
+@pytest.mark.parametrize("stream,gap", [(False, 0), (True, 2)])
+def test_rowspace_build_feeds_no_zero_rows(tmp_path, monkeypatch, stream, gap):
+    """Row-space builds hand the accumulator only the r_a kept rows per aperture (no zero padding
+    to copy, scan and drop), and the Gram matrix is unchanged."""
+    fake, lib, pm, _ = _toy_lap(tmp_path, 0)
+    fake.stream_reads, fake.gram_aperture_group = stream, gap
+    lib.vel_histograms = list(lib.full)
+    ref = fake.construct_gram_and_rhs_blockwise(lib)
+    fake.settings["pm_laplace_rowspace_kappa"] = 10.0
+    seen = []
+    orig = ws.NormalEquationAccumulator.add
+
+    def spy(self, A, b):
+        if self.tag == "set1/":
+            seen.append(np.asarray(A).any(axis=1).all())
+        return orig(self, A, b)
+    monkeypatch.setattr(ws.NormalEquationAccumulator, "add", spy)
+    gp = fake.construct_gram_and_rhs_blockwise(lib)
+    assert seen and all(seen)
+    assert np.abs(gp.G - ref.G).max() > 0  # kappa 10 changes G: the check below is not vacuous

@@ -448,6 +448,18 @@ class NormalEquationAccumulator:
         self.b_sq_sum += float(np.dot(b_block, b_block))
         self.b_max = max(self.b_max, float(np.abs(b_block).max(initial=0.0)))
 
+    def add_b_only(self, b):
+        """Rows whose orbit part is zero (``A w - b = -b``): only ``|b|^2``, ``b_max`` and the
+        chi2 / line residuals; nothing for G, v or the gradient. As :meth:`add` on zero rows."""
+        b = np.asarray(b, dtype=np.float64)
+        bb = float(b @ b)
+        self.b_sq_sum += bb
+        self.b_max = max(self.b_max, float(np.abs(b).max(initial=0.0)))
+        if self.chi2_w is not None:
+            self.chi2[self.tag] = self.chi2.get(self.tag, 0.0) + bb
+        if self.line is not None:
+            self.line_q[0] += bb
+
     def add_diag_carry(self, c):
         """Add ``c`` (n_orbs,) to the diagonal used for the column scaling only."""
         c = np.asarray(c, dtype=np.float64)
@@ -536,6 +548,33 @@ def _aperture_major(orb, chunk=64):
     for s in range(0, orb.shape[0], chunk):
         slab[:, s:s + chunk] = out[:, s:s + chunk]
     return slab
+
+
+def _row_feeder(acc, n_orbs, step):
+    """``(put, flush)``: ``put(rows_T (n_orbs, r), b (r,))`` appends rows to a reused Fortran
+    float64 buffer of ``step`` rows, handed to ``acc.add`` whenever it fills; ``flush()``
+    hands over the rest."""
+    buf = np.empty((step, n_orbs), dtype=np.float64, order="F")
+    bbuf = np.empty(step)
+    fill = [0]
+
+    def flush():
+        k = fill[0]
+        if k:
+            acc.add(buf if k == step else np.asfortranarray(buf[:k]), bbuf[:k])
+            fill[0] = 0
+
+    def put(rows_T, b):
+        i, r = 0, rows_T.shape[1]
+        while i < r:
+            k = min(r - i, step - fill[0])
+            buf[fill[0]:fill[0] + k] = rows_T[:, i:i + k].T
+            bbuf[fill[0]:fill[0] + k] = b[i:i + k]
+            fill[0] += k
+            i += k
+            if fill[0] == step:
+                flush()
+    return put, flush
 
 
 def _select_rows_cols(A, rows, cols):
@@ -2219,6 +2258,10 @@ class NNLS(WeightSolver):
                         row_hi = idx_row + g1 * n_cons_ap
                         con[row_lo:row_hi] = obs_kins
                         econ[row_lo:row_hi] = obs_kins_err
+                        if orb_kins is None:  # Laplace rows fed by _laplace_pm_block
+                            orblib.vel_histograms[si] = None
+                            del ghist, prj_block
+                            continue
                         econ_kin_i = econ[row_lo:row_hi]
                         con_kin_i = con[row_lo:row_hi]
                         b_kin_i = np.zeros(obs_kins.size, dtype=np.float64)
@@ -2301,6 +2344,8 @@ class NNLS(WeightSolver):
                     row_hi = idx_row + g1 * n_cons_ap
                     con[row_lo:row_hi] = obs_kins
                     econ[row_lo:row_hi] = obs_kins_err
+                    if orb_kins is None:  # Laplace rows fed by _laplace_pm_block
+                        continue
                     econ_kin_i = econ[row_lo:row_hi]
                     con_kin_i = con[row_lo:row_hi]
                     b_kin_i = np.zeros(obs_kins.size, dtype=np.float64)
@@ -2331,6 +2376,16 @@ class NNLS(WeightSolver):
                 obs_kins, obs_kins_err, orb_kins = self._prepare_kinematic_block(
                     kins, orb_veldist, obs_values[si], prj_mass_i
                 )
+            if orb_kins is None:  # Laplace rows fed by _laplace_pm_block
+                idx_row_end = idx_row + obs_kins.size
+                con[idx_row:idx_row_end] = obs_kins
+                econ[idx_row:idx_row_end] = obs_kins_err
+                del orb_veldist
+                if self.stream_reads:
+                    orblib.vel_histograms[si] = None
+                idx_row = idx_row_end
+                idx_ap_start += n_ap
+                continue
             n_orb_constraints = orb_kins.size // n_orbs
             idx_row_end = idx_row + obs_kins.size
             assert n_orb_constraints == obs_kins.size, (
@@ -2567,7 +2622,6 @@ class NNLS(WeightSolver):
         n_orbs, n_ap = orb.shape[:2]
         h0_set = (getattr(self, "_lap_h0", None) or {}).get(kins.name)
         obs_out = np.empty((n_ap, int(np.prod(orb.shape[2:]))))
-        orb_out = np.empty(orb.shape, dtype=orb.dtype)
         lin = np.zeros(n_orbs)
         cap = getattr(self, "_lap_capture", None)
         rx = getattr(self, "_lap_reexpand", None)  # _solve_laplace: fused re-expansion
@@ -2580,13 +2634,18 @@ class NNLS(WeightSolver):
         cell = (chi2_w is not None and getattr(acc, "line", None) is None
                 and (getattr(acc, "grad_w", None) is None or lg is not None))
         gvec = np.zeros(n_orbs) if cell and lg is not None else None
+        # direct: the rows go to the accumulator from here, compact (row space: the r_a kept
+        # rows per aperture; cell read: no rows, only the residual) and the caller gets
+        # orb_kins None. The zero-padded (n_orbs, n_ap, K2) block used to be copied to float64,
+        # scanned and dropped row by row (s1b profile: 27% of a working-set build).
+        direct = cell or (reduce and chi2_w is None)
+        if direct:
+            put, flush = _row_feeder(acc, n_orbs, int(getattr(self, "gram_chunk_rows", 0) or 8192))
+            b_cell = []
+        else:
+            orb_out = np.empty(orb.shape, dtype=orb.dtype)
         if reduce and chi2_w is None:  # Gram / capture reads: row-space rows
             carry = np.zeros(n_orbs)
-            orb_out = orb_out.reshape(n_orbs, n_ap, -1)
-            orb_out[:] = 0.0
-            obs_out[:] = 0.0
-        if cell:  # zero rows, residual in b
-            orb_out[:] = 0.0
         if reduce and chi2_w is not None and ap0 == 0:
             self.laplace_bound = getattr(self, "laplace_bound", None) or {}
             self.laplace_bound[kins.name] = 0.0
@@ -2606,9 +2665,8 @@ class NNLS(WeightSolver):
                 R, g, h0, Vd, mu_d, delta = kins.laplace_rowspace_terms(
                     ap0 + a, mass, kappa, h0=h0)
                 HV = H @ kins.laplace_rowspace_basis(ap0 + a)
-                r = R.shape[0]
-                orb_out[:, a, :r] = H @ R.T
-                obs_out[a, :r] = R @ h0
+                # rounded to the library dtype as the padded block stored them
+                put((H @ R.T).astype(orb.dtype, copy=False), R @ h0)
                 # Gram diagonal of the left-out part: delta |H (I - V V')|^2 + dropped eigen-directions
                 c = delta * (np.einsum("ij,ij->i", H, H) - np.einsum("ij,ij->i", HV, HV))
                 if mu_d.size:
@@ -2625,7 +2683,7 @@ class NNLS(WeightSolver):
                     R = kins.laplace_rowspace_terms(ap0 + a, mass, kappa, h0=h0)[0]
                     self.laplace_bound[kins.name] += float(r @ r - np.sum((R @ d) ** 2))
             if cell:  # A w - b = 0 - (-Lt d) = Lt d: the full statistic without forming H Lt'
-                obs_out[a] = -r
+                b_cell.append(-r)
                 if gvec is not None:  # H (C'C d2 + g2) about the pass's h0, C = R or Lt
                     h02 = lg["h0"].get(kins.name)
                     h02 = None if h02 is None else h02[ap0 + a]
@@ -2638,11 +2696,16 @@ class NNLS(WeightSolver):
             orb_out[:, a] = (H @ Lt.T).reshape(orb.shape[0], *orb.shape[2:])
             obs_out[a] = Lt @ h0
         if reduce and chi2_w is None:
-            orb_out = orb_out.reshape(orb.shape)
             acc.add_diag_carry(carry)
+        if direct:
+            flush()
+            if b_cell:
+                acc.add_b_only(np.concatenate(b_cell))
         acc.add_linear(lin)
         if gvec is not None:  # the gradient takes the pass's linear term, not the data h0's
             acc.g += gvec - lin
+        if direct:  # rows already fed: con 0, econ 1 for the set's (unused) cell rows
+            return np.zeros(np.shape(obs)), np.ones(np.size(obs)), None
         return (np.reshape(obs_out, np.shape(obs)), np.ones(np.size(obs)),
                 orb_out)
 

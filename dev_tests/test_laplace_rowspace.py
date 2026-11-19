@@ -54,28 +54,32 @@ def test_rowspace_is_rank_deficient_in_the_toy():
 
 @pytest.mark.parametrize("kappa", [0.0, 10.0])
 def test_block_rows_carry_and_linear_term(tmp_path, kappa):
-    """Per aperture: rows' Gram H R'R H', data cross term H R'R h0 (sign-free checks), zero
-    padding after r_a rows, carried diagonal diag(H (Q - R'R) H'), linear term unchanged."""
+    """Per aperture: rows' Gram H R'R H', data cross term H R'R h0 (sign-free checks), carried
+    diagonal diag(H (Q - R'R) H'), linear term unchanged. The rows reach the accumulator
+    directly, r_a per aperture in aperture order, with no zero padding."""
     pm = make_pm_lap(tmp_path, MEANS, n_stars=(30, 80, 20), statistic="laplace")
     lib = _orblib(pm, rebin=True)
     fake = _fake_nnls([__import__("test_relative_pm").FakeLOS(), pm], 5)
     fake._laplace_pm_block = NNLS._laplace_pm_block.__get__(fake)
     fake.settings = {"pm_laplace_rowspace_kappa": kappa}
-    rec = {"lin": [], "carry": []}
+    rec = {"lin": [], "carry": [], "A": [], "b": []}
     fake._lap_acc = type("A", (), {"chi2_w": None,
+                                   "add": lambda self, A, b: (rec["A"].append(np.array(A)),
+                                                              rec["b"].append(np.array(b))),
                                    "add_linear": lambda self, c: rec["lin"].append(np.array(c)),
                                    "add_diag_carry": lambda self, c: rec["carry"].append(np.array(c))})()
     obs, err = pm.get_observed_values_and_uncertainties({})
     prj = fake.projected_masses[2:]
     o, e, orb = fake._prepare_kinematic_block(pm, lib.full[1], (obs, err), prj)
-    o, orb = o.reshape(3, -1), orb.reshape(N_ORBS, 3, -1)
-    carry, lin = np.zeros(N_ORBS), np.zeros(N_ORBS)
+    assert orb is None and not o.any()
+    A_all, b_all = np.concatenate(rec["A"]), np.concatenate(rec["b"])
+    carry, lin, i = np.zeros(N_ORBS), np.zeros(N_ORBS), 0
     for a in range(3):
         H, Lt, g, h0, R, delta, V = _parts(pm, lib, prj, a, kappa)
         r = R.shape[0]
         assert r < H.shape[1]
-        rows, dat = orb[:, a, :r], o[a, :r]
-        assert not orb[:, a, r:].any() and not o[a, r:].any()
+        rows, dat = A_all[i:i + r].T, b_all[i:i + r]
+        i += r
         np.testing.assert_allclose(rows @ rows.T, H @ R.T @ R @ H.T, rtol=1e-9,
                                    atol=1e-9 * np.abs(H @ R.T @ R @ H.T).max())
         np.testing.assert_allclose(rows @ dat, H @ R.T @ R @ h0, rtol=1e-9)
@@ -83,6 +87,7 @@ def test_block_rows_carry_and_linear_term(tmp_path, kappa):
         lin += H @ g
     np.testing.assert_allclose(np.sum(rec["carry"], axis=0), carry, rtol=1e-6, atol=1e-12 * np.abs(carry).max())
     np.testing.assert_allclose(np.sum(rec["lin"], axis=0), lin, rtol=1e-10)
+    assert i == len(A_all) and A_all.any(axis=1).all()
 
 
 def test_finalize_column_scaling_includes_the_carry():
