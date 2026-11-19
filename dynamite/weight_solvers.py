@@ -405,48 +405,38 @@ class NormalEquationAccumulator:
         rows. ``b_block``: ``(rows,)``, likewise."""
         A_block = np.asarray(A_block, dtype=self.dtype)
         assert A_block.shape[1] == self.n_orbs, A_block.shape
+        b_block = np.asarray(b_block, dtype=np.float64)
+        # zero rows are dropped from the dsyrk only: every other term (v, |b|^2, b_max,
+        # chi2 / gradient / line residuals) is computed on the whole block, where a
+        # zero-A row contributes exactly its b
+        rows = None
         if self.drop_zero_rows:
             keep = A_block.any(axis=1)
-            b_block = np.asarray(b_block, dtype=np.float64)
             if not keep.all():
-                # a zero-A row adds nothing to G or v, but its b still enters |b|^2,
-                # b_max and the residual (A w - b = -b) of the chi2 / line terms
-                bd = b_block[~keep]
-                bb = float(bd @ bd)
-                self.b_sq_sum += bb
-                self.b_max = max(self.b_max, float(np.abs(bd).max(initial=0.0)))
-                if self.chi2_w is not None:
-                    self.chi2[self.tag] = self.chi2.get(self.tag, 0.0) + bb
-                if self.line is not None:
-                    self.line_q[0] += bb
-                A_block, b_block = np.asfortranarray(A_block[keep]), b_block[keep]
-            if A_block.shape[0] == 0:  # nothing left (BLAS rejects k = 0)
-                return
-        self.rows_used += A_block.shape[0]
+                rows = np.flatnonzero(keep)
+        n_used = A_block.shape[0] if rows is None else rows.size
+        self.rows_used += n_used
         prof = self.profiler
         if self.chi2_w is not None:
-            r = A_block @ self.chi2_w - np.asarray(b_block, dtype=np.float64)
+            r = A_block @ self.chi2_w - b_block
             self.chi2[self.tag] = self.chi2.get(self.tag, 0.0) + float(r @ r)
         if self.grad_w is not None:
             if self.g is None:
                 self.g = np.zeros(self.n_orbs)
-            self.g += A_block.T @ (A_block @ self.grad_w
-                                   - np.asarray(b_block, dtype=np.float64))
+            self.g += A_block.T @ (A_block @ self.grad_w - b_block)
         if self.line is not None:
-            r = A_block @ self.line[0] - np.asarray(b_block, dtype=np.float64)
+            r = A_block @ self.line[0] - b_block
             d = A_block @ self.line[1]
             self.line_q += (r @ r, r @ d, d @ d)
         if self.skip_zero_blocks and not A_block.any():
-            b_block = np.asarray(b_block, dtype=np.float64)
             self.b_sq_sum += float(np.dot(b_block, b_block))
             self.b_max = max(self.b_max, float(np.abs(b_block).max(initial=0.0)))
             return
         # dsyrk does the rank-k update in place: no (n_orbs, n_orbs) temporary
-        if not self.rhs_only:
-            A_g = A_block
+        if not self.rhs_only and n_used:  # BLAS rejects k = 0
             if self.cols is not None:
                 self.diag_full += np.einsum("ij,ij->j", A_block, A_block)
-                A_g = np.asfortranarray(A_block[:, self.cols])
+            A_g = _select_rows_cols(A_block, rows, self.cols)
             with _maybe_phase(prof, f"{self.tag}dsyrk"):
                 self.G = dsyrk(
                     1.0, A_g, beta=1.0, c=self.G, trans=1, lower=0,
@@ -530,6 +520,27 @@ class NormalEquationAccumulator:
             P = self.G / cs[:, None]
             P /= cs[None, :]
         return P, q, col, b_max
+
+
+def _select_rows_cols(A, rows, cols):
+    """``A[rows][:, cols]`` (None = all) as a Fortran array, in one copy for a Fortran ``A``.
+
+    ``A.T`` is then C-ordered, so the orbit subset is a gather of contiguous rows and
+    the row subset a gather within them; the result's transpose is Fortran for dsyrk.
+    (``np.asfortranarray(A[keep])`` and ``A[:, cols]`` each copied twice, single-threaded:
+    ~45% of a working-set build's wall time in the s1b profile.)
+    """
+    if rows is None and cols is None:
+        return A
+    if not A.flags.f_contiguous:
+        B = A if rows is None else A[rows]
+        return np.asfortranarray(B if cols is None else B[:, cols])
+    AT = A.T
+    if rows is None:
+        return AT[cols].T
+    if cols is None:
+        return AT[:, rows].T
+    return AT[np.ix_(cols, rows)].T
 
 
 def _kkt_gap_bounds(g, w, col, shift, M):

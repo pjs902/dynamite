@@ -169,3 +169,30 @@ def test_dropped_rows_keep_their_data_term():
     allzero.drop_zero_rows = True
     allzero.add(np.zeros((3, 5)), np.array([1.0, 2.0, 0.0]))
     assert allzero.b_sq_sum == pytest.approx(5.0) and allzero.chi2[""] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("order", ["F", "C"])
+def test_dropped_rows_with_a_working_set_and_vp_terms(order):
+    """Zero rows dropped and a column subset together (one selection copy for the dsyrk), with the
+    chi2, gradient and line terms on: everything equals the plain accumulator restricted to S."""
+    rng = np.random.default_rng(4)
+    A = rng.random((9, 6))
+    A[[1, 2, 7]] = 0.0
+    b = rng.random(9)
+    w, dw = rng.random(6), rng.random(6)
+    S = np.array([0, 2, 5])
+    out = []
+    for drop, cols in ((False, None), (True, S)):
+        acc = NormalEquationAccumulator(6, chi2_w=w, cols=cols)
+        acc.drop_zero_rows = drop
+        acc.grad_w, acc.line = w, (w, dw)
+        acc.add(np.asarray(A, order=order), b)
+        out.append(acc)
+    ref, acc = out
+    np.testing.assert_allclose(np.triu(acc.G), np.triu(ref.G[np.ix_(S, S)]), rtol=1e-14)
+    np.testing.assert_allclose(acc.diag_full, np.diag(ref.G), rtol=1e-14)
+    for k in ("v", "g", "line_q"):
+        np.testing.assert_allclose(getattr(acc, k), getattr(ref, k), rtol=1e-14)
+    assert acc.chi2[""] == pytest.approx(ref.chi2[""], rel=1e-14)
+    assert acc.b_sq_sum == pytest.approx(ref.b_sq_sum, rel=1e-14) and acc.b_max == ref.b_max
+    assert acc.rows_used == 6

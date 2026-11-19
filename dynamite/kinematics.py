@@ -2362,17 +2362,21 @@ class ProperMotions(LaplaceStatistic, Kinematics, data.Integrated):
         n_orb, _, _, n_ap = y.shape
         rx, ry = (cdf_regrid_matrix(src, dst).astype(y.dtype, copy=False)
                   for src, dst in zip(vel_hist.xedg, h2d.xedg))
-        rebinned_y = np.empty((n_orb, rx.shape[0], ry.shape[0], n_ap),
+        # stored aperture-major, (a, o, x', y'), returned as an (o, x', y', a) view: the
+        # solver reads one aperture's (o, x', y') slab at a time (_laplace_pm_block), and
+        # from orbit-major memory that read is a stride-n_ap gather (s1b profile: 22% of
+        # a working-set build). Contracting in this order the store moves (x', y') runs.
+        rebinned_y = np.empty((n_ap, n_orb, rx.shape[0], ry.shape[0]),
                               dtype=y.dtype)
         # chunk over orbits: y is the largest array in the run, so keep the
         # temporaries of the two tensordots bounded
         chunk = max(1, (64 << 20) // max(1, y[0].size * y.itemsize))
         for start in range(0, n_orb, chunk):
             end = min(start + chunk, n_orb)
-            t = np.tensordot(rx, y[start:end], axes=(1, 1))  # (x', o, y, a)
-            t = np.tensordot(ry, t, axes=(1, 2))             # (y', x', o, a)
-            rebinned_y[start:end] = t.transpose(2, 1, 0, 3)
-        return rebinned_y
+            t = np.tensordot(y[start:end], rx, axes=(1, 1))  # (o, y, a, x')
+            t = np.tensordot(t, ry, axes=(1, 1))             # (o, a, x', y')
+            rebinned_y[:, start:end] = t.transpose(1, 0, 2, 3)  # 2 KB runs: no worse than before
+        return np.moveaxis(rebinned_y, 0, 3)
 
     def transform_orblib_to_observables(self,
                                         vel_histograms,

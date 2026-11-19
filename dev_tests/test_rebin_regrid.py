@@ -81,6 +81,9 @@ def test_proper_motion_rebin_is_separable_and_keeps_dtype():
     assert out.dtype == np.float32 and out.shape == (5, 7, 9, 3)
     assert np.allclose(out, np.einsum('ik,jl,oklp->oijp', rx, ry, y),
                        rtol=1e-4, atol=1e-5)
+    # aperture-major memory: one aperture's (orbits, vx, vy) slab is contiguous, so the
+    # per-aperture Laplace rows read it without a strided gather
+    assert all(out[..., a].flags.c_contiguous for a in range(3))
 
 
 def test_los_rebin_uses_the_same_matrix():
