@@ -522,6 +522,22 @@ class NormalEquationAccumulator:
         return P, q, col, b_max
 
 
+def _aperture_major(orb, chunk=64):
+    """``(n_ap, n_orbs, *cells)`` with ``out[a] == orb[:, a]`` contiguous; ``orb`` is ``(n_orbs, n_ap, *cells)``.
+
+    The PM reader's layout is (orbit, vx, vy, aperture), so ``orb[:, a]`` is a stride-n_ap
+    gather, paid per aperture (s1b profile: 22% of a working-set build). One chunked
+    transpose per group replaces it; an aperture-major view is returned as is.
+    """
+    out = np.moveaxis(orb, 1, 0)
+    if out[0].flags.c_contiguous:
+        return out
+    slab = np.empty(out.shape, dtype=orb.dtype)
+    for s in range(0, orb.shape[0], chunk):
+        slab[:, s:s + chunk] = out[:, s:s + chunk]
+    return slab
+
+
 def _select_rows_cols(A, rows, cols):
     """``A[rows][:, cols]`` (None = all) as a Fortran array, in one copy for a Fortran ``A``.
 
@@ -2574,10 +2590,11 @@ class NNLS(WeightSolver):
         if reduce and chi2_w is not None and ap0 == 0:
             self.laplace_bound = getattr(self, "laplace_bound", None) or {}
             self.laplace_bound[kins.name] = 0.0
+        slabs = _aperture_major(orb)
         for a in range(n_ap):
             h0 = None if h0_set is None else h0_set[ap0 + a]
             mass = float(prj_mass_i[a])
-            H = np.asarray(orb[:, a], dtype=np.float64).reshape(n_orbs, -1)
+            H = np.asarray(slabs[a], dtype=np.float64).reshape(n_orbs, -1)
             if cap is not None:  # _solve_laplace: the model histogram at cap["w"]
                 cap["h"].setdefault(kins.name, np.zeros(
                     (kins.n_spatial_bins, H.shape[1])))[ap0 + a] = cap["w"] @ H
@@ -2658,6 +2675,10 @@ class NNLS(WeightSolver):
         frac = self.settings.get("pm_laplace_working_set")  # None: off
         self._lap_h0 = self._lap_capture = self._lap_reexpand = None
         w_pass, h0_pass, chi2, ws_rounds = [], [], None, None
+        # one decompression of each archive for the whole solve (every pass and
+        # working-set round), not per set and build; held files: ~12 GB at omega Cen
+        hold = contextlib.ExitStack()
+        hold.enter_context(getattr(orblib, "hold_decompressed", contextlib.nullcontext)())
         try:
             prob = self._relative_build(orblib, True)
             w, solver = self._relative_qp(prob, consume_p=consume)
@@ -2685,6 +2706,7 @@ class NNLS(WeightSolver):
                 chi2 = self._relative_chi2(orblib, prob, True, w)  # about the data h0
         finally:
             self._lap_h0 = self._lap_capture = self._lap_reexpand = None
+            hold.close()
         self.laplace_info = dict(reexpand=n_re, w_pass=w_pass, h0_pass=h0_pass,
                                  working_set=ws_rounds)
         chi2_tot = sum(c[1] for c in chi2)

@@ -139,3 +139,46 @@ def test_kkt_gap_bounds_hold_on_a_small_qp():
         true = f(w) - f(w_star)
         assert true >= -1e-9
         assert true <= gap_lin * (1 + 1e-6) + 1e-9 and true <= gap_sc * (1 + 1e-6) + 1e-9
+
+
+def test_aperture_major_slabs_equal_the_per_aperture_view():
+    """The reader's PM layout is (orbit, vx, vy, aperture); the Laplace loop reads one aperture's
+    (orbit, vx, vy) at a time. _aperture_major gives each as a contiguous slab, bitwise equal,
+    and passes an already aperture-major view through without a copy."""
+    from dynamite.weight_solvers import _aperture_major
+    rng = np.random.default_rng(1)
+    y = rng.random((70, 3, 4, 5)).astype(np.float32)          # reader layout
+    orb = np.moveaxis(y, 3, 1)                               # (o, a, x, y) view
+    S = _aperture_major(orb, chunk=16)
+    assert S.shape == (5, 70, 3, 4)
+    for a in range(5):
+        assert S[a].flags.c_contiguous and np.array_equal(S[a], orb[:, a])
+    major = np.moveaxis(np.ascontiguousarray(np.moveaxis(y, 3, 0)), 0, 1)
+    assert np.shares_memory(_aperture_major(major), major)
+
+
+def test_solve_keeps_the_archives_decompressed_throughout(tmp_path):
+    """Every histogram read of a Laplace solve (all passes, all working-set rounds) happens inside
+    ONE outermost hold_decompressed, so each archive is decompressed once per solve."""
+    import contextlib
+    fake, lib, pm, _ = _toy_lap(tmp_path, 1)
+    fake.settings["pm_laplace_working_set"] = 0.5
+    lib.vel_histograms = list(lib.full)
+    state = dict(depth=0, outer=0, outside=0)
+
+    @contextlib.contextmanager
+    def hold():
+        state["outer"] += state["depth"] == 0
+        state["depth"] += 1
+        try:
+            yield
+        finally:
+            state["depth"] -= 1
+    read = lib.read_vel_histograms
+
+    def counted(*a, **k):
+        state["outside"] += state["depth"] == 0
+        return read(*a, **k)
+    lib.hold_decompressed, lib.read_vel_histograms = hold, counted
+    fake._solve_laplace(lib)
+    assert state["outer"] == 1 and state["outside"] == 0
